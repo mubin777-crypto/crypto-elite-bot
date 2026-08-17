@@ -23,7 +23,7 @@ def home():
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# قائمة أساسية بـ 100 عملة (أعلى القيمة السوقية)
+# قائمة أساسية بـ 100 عملة
 BASE_WATCH_LIST = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
     "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -35,13 +35,12 @@ BASE_WATCH_LIST = [
 ]
 dynamic_watch_list = []
 
-# إعدادات المؤشرات
 RSI_PERIOD = 14
 EMA_PERIOD = 20
 COOLDOWN_MINUTES = 60
 last_signal_time = {}
 
-# -------------------- دوال جلب البيانات من Binance --------------------
+# -------------------- دوال جلب البيانات --------------------
 def fetch_klines(symbol, interval='15m', limit=50):
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -92,9 +91,8 @@ def calculate_ema(prices):
         ema = (p * multiplier) + (ema * (1 - multiplier))
     return ema
 
-# -------------------- جلب عملات الميم الرائجة من DexScreener --------------------
+# -------------------- جلب عملات الميم من DexScreener --------------------
 def fetch_dexscreener_trending():
-    """جلب العملات الأكثر ارتفاعاً خلال ساعة من DexScreener"""
     try:
         url = "https://api.dexscreener.com/latest/dex/search?q=?"
         resp = requests.get(url, timeout=5)
@@ -131,7 +129,6 @@ def advanced_analysis(symbol):
     score = 0
     reasons = []
     
-    # الاستراتيجية 1: الزخم
     if change_1h > 2.0:
         score += 1
         reasons.append(f"زخم سعري ({change_1h:.1f}%)")
@@ -139,7 +136,6 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append(f"انهيار ({change_1h:.1f}%)")
     
-    # الاستراتيجية 2: التشبع الفني
     if rsi < 35 and current_price > ema:
         score += 1
         reasons.append(f"RSI مفرط بيع ({rsi:.1f})")
@@ -147,12 +143,10 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append(f"RSI مفرط شراء ({rsi:.1f})")
     
-    # الاستراتيجية 3: انفجار الحجم
     if abs(stats.get('change_24h', 0)) > 5:
         score += 1
         reasons.append("نشاط حجم استثنائي")
     
-    # الاستراتيجية 4: اختراق القمم
     if is_breakout and change_1h > 0:
         score += 1
         reasons.append("اختراق قمة 50 شمعة")
@@ -306,48 +300,46 @@ async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- نظام الإبقاء على الحياة (Self-Ping) --------------------
 def self_pinger():
-    """يرسل طلباً لنفسه كل 10 دقائق لمنع السبات على Render"""
     host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not host:
         logger.warning("RENDER_EXTERNAL_HOSTNAME غير موجود، تخطي الـ Self-Ping")
         return
     url = f"https://{host}"
-    time.sleep(300)  # انتظر 5 دقائق بعد التشغيل
+    time.sleep(300)
     while True:
         try:
             requests.get(url, timeout=3)
             logger.info("✅ Self-ping sent successfully")
         except Exception as e:
             logger.error(f"Self-ping failed: {e}")
-        time.sleep(600)  # كل 10 دقائق
+        time.sleep(600)
 
-# -------------------- تشغيل البوت --------------------
+# -------------------- تشغيل Flask في خيط منفصل --------------------
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
+# -------------------- تشغيل البوت (في الخيط الرئيسي) --------------------
 def run_telegram_bot():
-    import asyncio
-    # إنشاء حلقة أحداث جديدة لهذا الخيط
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("add", add_symbol))
     application.add_handler(CommandHandler("remove", remove_symbol))
     application.add_handler(CommandHandler("signal", signal_now))
-    
-    try:
-        loop.run_until_complete(application.run_polling())
-    finally:
-        loop.close()
+    # تشغيل polling في الخيط الرئيسي (بدون استخدام asyncio إضافي)
+    application.run_polling()
 
+# -------------------- نقطة الدخول الرئيسية --------------------
 if __name__ == "__main__":
-    # تشغيل الخوادم في خيوط منفصلة
+    # تشغيل Flask في خيط منفصل (آمن)
     threading.Thread(target=run_flask, daemon=True).start()
+    
+    # تشغيل Self-Pinger في خيط منفصل
     threading.Thread(target=self_pinger, daemon=True).start()
-    threading.Thread(target=run_telegram_bot, daemon=True).start()
-    # تشغيل حلقة المسح الرئيسية
-    market_scanner_loop()
+    
+    # تشغيل الماسح في خيط منفصل
+    threading.Thread(target=market_scanner_loop, daemon=True).start()
+    
+    # تشغيل بوت التليجرام في الخيط الرئيسي (لتجنب مشكلة الإشارات)
+    run_telegram_bot()
