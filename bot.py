@@ -23,42 +23,41 @@ def home():
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_CHAT_ID = os.environ.get("CHAT_ID")  # المالك
+ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
 
-# تخزين المشتركين وقائمة الانتظار كـ JSON في متغيرات البيئة
+# -------------------- دوال إدارة الملفات --------------------
+SUBSCRIBERS_FILE = "subscribers.json"
+PENDING_FILE = "pending.json"
+
 def load_subscribers():
     try:
-        data = os.environ.get("SUBSCRIBERS_JSON", "[]")
-        return json.loads(data)
+        with open(SUBSCRIBERS_FILE, 'r') as f:
+            data = json.load(f)
+            # تأكد من وجود المالك
+            if ADMIN_CHAT_ID and ADMIN_CHAT_ID not in data:
+                data.append(ADMIN_CHAT_ID)
+                save_subscribers(data)
+            return data
     except:
-        return []
+        default = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else []
+        save_subscribers(default)
+        return default
 
-def save_subscribers(subscribers):
-    # سيتم تحديث متغير البيئة، لكن يجب إعادة تشغيل الخدمة حتى يرى المتغير الجديد.
-    # سنستخدم أمراً خاصاً لتحديث المتغير عبر API Render (اختياري) أو نكتفي بحفظ الملف.
-    # لكن Render لا يسمح بتعديل متغيرات البيئة عبر الكود. لذا سنستخدم ملف JSON لكن مع استراتيجية لضمان الديمومة.
-    # الحل الأفضل: تخزين الملف في مجلد /tmp/ (مؤقت) أو استخدام قاعدة بيانات خارجية.
-    # لكني سأستخدم ملفاً في مسار /opt/render/project/ (مستمر بين إعادة النشر؟ لا، ليس دائماً).
-    # الحل الأمثل: استخدام متغير بيئة نصي محدث عبر أوامر البوت نفسها باستخدام Webhook Render API (معقد).
-    # الحل البسيط: الاعتماد على ملف JSON في مسار ثابت، مع العلم بأنه قد يُفقد عند إعادة النشر، لكن يمكن للمالك إعادة إضافتهم يدوياً.
-    # ولتجنب الفقدان، سأستخدم متغير بيئة `SUBSCRIBERS_JSON` وسأحدثه عبر أمر للمالك، وسيظل ثابتاً طالما لم يتغير يدوياً.
-    # لكن Render لا يسمح بتعديل متغيرات البيئة عبر الكود، لذا سأستخدم ملفاً في دليل المشروع (والذي يُحفظ بين عمليات النشر)
-    # ملاحظة: Render يحفظ نظام الملفات بين عمليات النشر؟ نعم، إلا إذا تم مسحه يدوياً. لذا سنستخدم ملف JSON في دليل المشروع.
-    with open("subscribers.json", "w") as f:
-        json.dump(subscribers, f)
+def save_subscribers(data):
+    with open(SUBSCRIBERS_FILE, 'w') as f:
+        json.dump(data, f)
 
 def load_pending():
     try:
-        with open("pending.json", "r") as f:
+        with open(PENDING_FILE, 'r') as f:
             return json.load(f)
     except:
         return []
 
-def save_pending(pending):
-    with open("pending.json", "w") as f:
-        json.dump(pending, f)
+def save_pending(data):
+    with open(PENDING_FILE, 'w') as f:
+        json.dump(data, f)
 
-# تحميل البيانات
 SUBSCRIBERS = load_subscribers()
 PENDING = load_pending()
 logger.info(f"✅ المشتركين: {SUBSCRIBERS}")
@@ -211,7 +210,6 @@ def advanced_analysis(symbol):
 
 # -------------------- دوال الإرسال --------------------
 def send_to_all_subscribers(message):
-    """إرسال رسالة إلى جميع المشتركين"""
     if not TELEGRAM_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -222,7 +220,6 @@ def send_to_all_subscribers(message):
             logger.error(f"فشل الإرسال إلى {chat_id}: {e}")
 
 def send_to_admin(message):
-    """إرسال رسالة للمالك"""
     if not ADMIN_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -295,7 +292,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ طلبك قيد الانتظار. سيتم إعلامك عند الموافقة.")
         return
     
-    # إضافة إلى قائمة الانتظار
     PENDING.append(user_id)
     save_pending(PENDING)
     await update.message.reply_text(
@@ -303,30 +299,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "سيقوم المالك بمراجعته وقبولك قريباً.\n"
         "ستصلك رسالة عند الموافقة."
     )
-    # إشعار للمالك
     await send_to_admin(f"📩 *طلب اشتراك جديد*\nالمعرف: `{user_id}`\nللإضافة استخدم: /approve {user_id}")
 
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """قبول طلب اشتراك (للمالك فقط)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
     if not context.args:
         await update.message.reply_text("⚠️ استخدم: /approve USER_ID")
         return
-    user_id = context.args[0]
+    user_id = context.args[0].strip()  # إزالة أي مسافات زائدة
     if user_id in PENDING:
         PENDING.remove(user_id)
         save_pending(PENDING)
         if user_id not in SUBSCRIBERS:
             SUBSCRIBERS.append(user_id)
             save_subscribers(SUBSCRIBERS)
-            await update.message.reply_text(f"✅ تمت الموافقة على المستخدم `{user_id}` وإضافته كشريك.")
-            # إشعار للمستخدم
-            send_to_admin(f"✅ تم قبول المستخدم {user_id}")
-            # إرسال رسالة للمستخدم الجديد (نحاول إرسالها مباشرة)
+            await update.message.reply_text(f"✅ تمت الموافقة على المستخدم `{user_id}` وإضافته.")
             try:
-                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك! ستصل إليك الإشارات التلقائية.")
+                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك! ستصل إليك الإشارات.")
             except:
                 pass
         else:
@@ -335,14 +326,13 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ المستخدم `{user_id}` ليس في قائمة الانتظار.")
 
 async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """رفض طلب اشتراك (للمالك فقط)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
     if not context.args:
         await update.message.reply_text("⚠️ استخدم: /reject USER_ID")
         return
-    user_id = context.args[0]
+    user_id = context.args[0].strip()
     if user_id in PENDING:
         PENDING.remove(user_id)
         save_pending(PENDING)
@@ -355,7 +345,6 @@ async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ المستخدم `{user_id}` ليس في قائمة الانتظار.")
 
 async def pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض طلبات الانتظار (للمالك فقط)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
@@ -368,7 +357,6 @@ async def pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def list_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض المشتركين الحاليين (للمالك فقط)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
@@ -381,14 +369,13 @@ async def list_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def remove_subscriber(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف مشترك (للمالك فقط)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
     if not context.args:
         await update.message.reply_text("⚠️ استخدم: /remove USER_ID")
         return
-    user_id = context.args[0]
+    user_id = context.args[0].strip()
     if user_id in SUBSCRIBERS:
         SUBSCRIBERS.remove(user_id)
         save_subscribers(SUBSCRIBERS)
@@ -434,25 +421,10 @@ async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-# -------------------- إرسال رسالة ترحيبية عند بدء البوت --------------------
-def send_startup_notification():
-    all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
-    msg = (
-        "🤖 *البوت قيد التشغيل الآن!*\n\n"
-        f"📊 يفحص حالياً *{len(all_syms)}* عملة.\n"
-        f"👥 عدد المشتركين: {len(SUBSCRIBERS)}\n"
-        f"⏳ طلبات الانتظار: {len(PENDING)}\n"
-        "🔹 يستخدم 4 استراتيجيات نقاط.\n"
-        "🔹 يتم تحديث عملات الميم تلقائياً من DexScreener.\n\n"
-        "✅ ستصلك الإشارات التلقائية عند توفرها."
-    )
-    send_to_all_subscribers(msg)
-
 # -------------------- نظام الإبقاء على الحياة --------------------
 def self_pinger():
     host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not host:
-        logger.warning("RENDER_EXTERNAL_HOSTNAME غير موجود، تخطي الـ Self-Ping")
         return
     url = f"https://{host}"
     time.sleep(300)
@@ -469,10 +441,16 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# -------------------- تشغيل بوت التليجرام --------------------
+# -------------------- تشغيل بوت التليجرام (معالجة حلقة الأحداث) --------------------
 def run_telegram_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # التحقق من وجود حلقة مفتوحة، وإنشاء واحدة جديدة إذا لزم الأمر
+    try:
+        loop = asyncio.get_running_loop()
+        # إذا كنا في حلقة جارية، نستخدمها
+    except RuntimeError:
+        # لا توجد حلقة، ننشئ واحدة جديدة
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -484,10 +462,17 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
+    # تشغيل polling مع التعامل مع إغلاق الحلقة
     try:
         loop.run_until_complete(application.run_polling())
-    finally:
-        loop.close()
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e):
+            logger.warning("الحلقة مغلقة، نعيد إنشاءها...")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(application.run_polling())
+        else:
+            raise
 
 # -------------------- نقطة الدخول --------------------
 if __name__ == "__main__":
@@ -496,6 +481,6 @@ if __name__ == "__main__":
     threading.Thread(target=market_scanner_loop, daemon=True).start()
     
     time.sleep(5)
-    send_startup_notification()
+    send_to_all_subscribers("🤖 *تم إعادة تشغيل البوت*")
     
     run_telegram_bot()
