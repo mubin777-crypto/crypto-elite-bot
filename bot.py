@@ -328,8 +328,12 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# -------------------- تشغيل بوت التليجرام باستخدام asyncio.run() --------------------
+# -------------------- تشغيل بوت التليجرام مع حلقة أحداث يدوية --------------------
 def run_telegram_bot():
+    # إنشاء حلقة جديدة وتعيينها كحلقة حالية للخيط الرئيسي
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
@@ -337,12 +341,14 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("remove", remove_symbol))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # التشغيل باستخدام asyncio.run() لضمان وجود حلقة أحداث صحيحة
-    asyncio.run(application.run_polling())
+    # تشغيل polling باستخدام الحلقة المعرفة
+    try:
+        loop.run_until_complete(application.run_polling())
+    finally:
+        loop.close()
 
 # -------------------- إرسال رسالة ترحيبية عند بدء البوت --------------------
 def send_startup_notification():
-    """تُرسل رسالة إلى المستخدم لتأكيد تشغيل البوت وعدد العملات."""
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     msg = (
         "🤖 *البوت قيد التشغيل الآن!*\n\n"
@@ -364,9 +370,9 @@ if __name__ == "__main__":
     # تشغيل الماسح في خيط منفصل
     threading.Thread(target=market_scanner_loop, daemon=True).start()
     
-    # انتظار قليلاً لضمان بدء باقي المكونات ثم إرسال رسالة ترحيبية
+    # انتظار قليلاً ثم إرسال رسالة ترحيبية
     time.sleep(5)
     send_startup_notification()
     
-    # تشغيل بوت التليجرام في الخيط الرئيسي باستخدام asyncio.run()
+    # تشغيل بوت التليجرام في الخيط الرئيسي مع حلقة أحداث يدوية
     run_telegram_bot()
