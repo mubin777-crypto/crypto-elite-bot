@@ -23,29 +23,31 @@ def home():
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_CHAT_ID = os.environ.get("CHAT_ID")  # المالك (يُستخدم للصلاحيات)
+ADMIN_CHAT_ID = os.environ.get("CHAT_ID")  # المالك
 
-# ملف تخزين المشتركين (سيكون داخل مجلد المشروع)
+# ملف تخزين المشتركين
 SUBSCRIBERS_FILE = "subscribers.json"
 
 # -------------------- دوال إدارة المشتركين --------------------
 def load_subscribers():
-    """تحميل قائمة المشتركين من ملف JSON"""
     try:
         with open(SUBSCRIBERS_FILE, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            # تأكد من أن ADMIN_CHAT_ID موجود
+            if ADMIN_CHAT_ID and ADMIN_CHAT_ID not in data:
+                data.append(ADMIN_CHAT_ID)
+                save_subscribers(data)
+            return data
     except (FileNotFoundError, json.JSONDecodeError):
-        # إذا لم يوجد الملف، ننشئه مع المالك كمشترك افتراضي
         default = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else []
         save_subscribers(default)
         return default
 
 def save_subscribers(subscribers):
-    """حفظ قائمة المشتركين إلى ملف JSON"""
     with open(SUBSCRIBERS_FILE, 'w') as f:
         json.dump(subscribers, f)
 
-# قائمة المشتركين (تُحمّل عند بدء التشغيل)
+# تحميل القائمة
 SUBSCRIBERS = load_subscribers()
 logger.info(f"✅ تم تحميل {len(SUBSCRIBERS)} مشترك: {SUBSCRIBERS}")
 
@@ -75,26 +77,26 @@ def fetch_24hr_stats(symbol):
     return {"volume": 0, "change_24h": 0}
 
 def calculate_rsi(prices):
-    if len(prices) < RSI_PERIOD + 1:
+    if len(prices) < 15:
         return 50.0
     gains, losses = [], []
     for i in range(1, len(prices)):
         diff = prices[i] - prices[i-1]
         gains.append(diff if diff > 0 else 0)
         losses.append(abs(diff) if diff < 0 else 0)
-    avg_gain = sum(gains[:RSI_PERIOD]) / RSI_PERIOD
-    avg_loss = sum(losses[:RSI_PERIOD]) / RSI_PERIOD
-    for i in range(RSI_PERIOD, len(gains)):
-        avg_gain = (avg_gain * (RSI_PERIOD - 1) + gains[i]) / RSI_PERIOD
-        avg_loss = (avg_loss * (RSI_PERIOD - 1) + losses[i]) / RSI_PERIOD
+    avg_gain = sum(gains[:14]) / 14
+    avg_loss = sum(losses[:14]) / 14
+    for i in range(14, len(gains)):
+        avg_gain = (avg_gain * 13 + gains[i]) / 14
+        avg_loss = (avg_loss * 13 + losses[i]) / 14
     if avg_loss == 0:
         return 100.0
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
-def calculate_ema(prices):
-    if len(prices) < EMA_PERIOD:
+def calculate_ema(prices, period=20):
+    if len(prices) < period:
         return prices[-1] if prices else 0
-    multiplier = 2 / (EMA_PERIOD + 1)
+    multiplier = 2 / (period + 1)
     ema = prices[0]
     for p in prices[1:]:
         ema = (p * multiplier) + (ema * (1 - multiplier))
@@ -141,7 +143,7 @@ def advanced_analysis(symbol):
     
     current_price = prices[-1]
     rsi = calculate_rsi(prices)
-    ema = calculate_ema(prices)
+    ema = calculate_ema(prices, EMA_PERIOD)
     stats = fetch_24hr_stats(symbol)
     
     price_1h_ago = prices[-5] if len(prices) >= 5 else prices[0]
@@ -197,7 +199,6 @@ def advanced_analysis(symbol):
 # -------------------- دوال الإرسال (لجميع المشتركين) --------------------
 def send_to_all_subscribers(message):
     """إرسال رسالة إلى جميع المشتركين"""
-    global SUBSCRIBERS
     if not TELEGRAM_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -228,7 +229,7 @@ def process_single_symbol(symbol):
             )
             send_to_all_subscribers(msg)
             last_signal_time[symbol] = now
-            logger.info(f"✅ إشارة لـ {symbol} (نقاط: {analysis['score']}) أُرسلت إلى {len(SUBSCRIBERS)} مشترك")
+            logger.info(f"✅ إشارة لـ {symbol} أُرسلت إلى {len(SUBSCRIBERS)} مشترك")
             return symbol
     except Exception as e:
         logger.error(f"Error processing {symbol}: {e}")
@@ -264,93 +265,92 @@ def market_scanner_loop():
 # -------------------- أوامر التليجرام --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    welcome_msg = (
-        "🚀 *مرحباً بك في بوت الإشارات الذكي!* 🚀\n\n"
-        f"👤 معرفك: `{user_id}`\n\n"
-        "📌 *الأوامر المتاحة:*\n"
-        "/status - عرض حالة البوت والعملات المراقبة\n"
-        "/signal SYMBOL - تحليل فوري (مثال: /signal SOLUSDT)\n"
-        "/subscribe - إضافة نفسك لقائمة المشتركين (للمالك فقط)\n"
-        "/unsubscribe - إزالة نفسك من القائمة (للمالك فقط)\n"
-        "/list_subscribers - عرض المشتركين (للمالك فقط)\n\n"
-        "🔔 ستصل الإشارات التلقائية لجميع المشتركين."
-    )
-    await update.message.reply_text(welcome_msg, parse_mode="Markdown")
+    # إضافة المستخدم تلقائياً إلى المشتركين
+    if user_id not in SUBSCRIBERS:
+        SUBSCRIBERS.append(user_id)
+        save_subscribers(SUBSCRIBERS)
+        logger.info(f"➕ مشترك جديد: {user_id}")
+        await update.message.reply_text(
+            "✅ *تم اشتراكك بنجاح!*\n"
+            "ستصلك الإشارات التلقائية عند توفرها.\n\n"
+            "📌 *للإلغاء* استخدم الأمر /stop\n"
+            "🔍 *للاستعلام* استخدم /status أو /signal SYMBOL",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ أنت مشترك بالفعل.\n"
+            "ستصلك الإشارات التلقائية.\n"
+            "للإلغاء استخدم /stop",
+            parse_mode="Markdown"
+        )
+
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id in SUBSCRIBERS:
+        # لا نسمح بإزالة المالك
+        if user_id == ADMIN_CHAT_ID:
+            await update.message.reply_text("⛔ لا يمكن إزالة المالك من القائمة.")
+            return
+        SUBSCRIBERS.remove(user_id)
+        save_subscribers(SUBSCRIBERS)
+        logger.info(f"➖ مشترك أزال نفسه: {user_id}")
+        await update.message.reply_text("✅ تم إلغاء اشتراكك. لن تصل إليك إشارات جديدة.")
+    else:
+        await update.message.reply_text("ℹ️ أنت لست مشتركاً حالياً.")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     lines = [
-        "📊 *حالة البوت فائق السرعة*",
-        f"📌 إجمالي العملات المراقبة: {len(all_syms)}",
-        f"👥 عدد المشتركين: {len(SUBSCRIBERS)}",
+        "📊 *حالة البوت*",
+        f"📌 العملات المراقبة: {len(all_syms)}",
+        f"👥 المشتركين: {len(SUBSCRIBERS)}",
         "🔹 آخر 5 عملات ساخنة:"
     ]
     for sym in dynamic_watch_list[:5]:
         lines.append(f"   - `{sym}`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إضافة مستخدم إلى قائمة المشتركين (للمالك فقط)"""
-    user_id = str(update.effective_user.id)
-    if user_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
-        return
-    
-    # نبحث عن المستخدم المطلوب إضافته (يُؤخذ من الأمر /subscribe USER_ID)
-    if not context.args:
-        await update.message.reply_text("⚠️ الرجاء كتابة: /subscribe USER_ID (مثال: /subscribe 123456789)")
-        return
-    target = context.args[0]
-    if target not in SUBSCRIBERS:
-        SUBSCRIBERS.append(target)
-        save_subscribers(SUBSCRIBERS)
-        await update.message.reply_text(f"✅ تم إضافة المستخدم `{target}` بنجاح.")
-        logger.info(f"➕ تم إضافة مشترك: {target}")
-    else:
-        await update.message.reply_text(f"ℹ️ المستخدم `{target}` موجود مسبقاً.")
-
-async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إزالة مستخدم من المشتركين (للمالك فقط)"""
-    user_id = str(update.effective_user.id)
-    if user_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
-        return
-    
-    if not context.args:
-        await update.message.reply_text("⚠️ الرجاء كتابة: /unsubscribe USER_ID (مثال: /unsubscribe 123456789)")
-        return
-    target = context.args[0]
-    if target in SUBSCRIBERS:
-        SUBSCRIBERS.remove(target)
-        save_subscribers(SUBSCRIBERS)
-        await update.message.reply_text(f"✅ تم إزالة المستخدم `{target}` بنجاح.")
-        logger.info(f"➖ تم إزالة مشترك: {target}")
-    else:
-        await update.message.reply_text(f"❌ المستخدم `{target}` غير موجود في القائمة.")
-
-async def list_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def subscribers_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض قائمة المشتركين (للمالك فقط)"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_CHAT_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
-    
     if not SUBSCRIBERS:
-        await update.message.reply_text("📭 لا يوجد مشتركون حالياً.")
+        await update.message.reply_text("📭 لا يوجد مشتركون.")
         return
     lines = ["👥 *قائمة المشتركين:*"]
     for i, uid in enumerate(SUBSCRIBERS, 1):
         lines.append(f"{i}. `{uid}`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف مشترك (للمالك فقط)"""
+    user_id = str(update.effective_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ الرجاء كتابة: /remove USER_ID")
+        return
+    target = context.args[0]
+    if target in SUBSCRIBERS:
+        SUBSCRIBERS.remove(target)
+        save_subscribers(SUBSCRIBERS)
+        await update.message.reply_text(f"✅ تم حذف المستخدم `{target}`.")
+        logger.info(f"🗑️ المالك حذف مشترك: {target}")
+    else:
+        await update.message.reply_text(f"❌ المستخدم `{target}` غير موجود.")
+
 async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ الرجاء كتابة: /signal SYMBOL (مثال: /signal SOLUSDT)")
+        await update.message.reply_text("⚠️ /signal SYMBOL (مثال: /signal SOLUSDT)")
         return
     sym = context.args[0].upper()
     analysis = advanced_analysis(sym)
     if not analysis:
-        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}، حاول مرة أخرى.")
+        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}.")
         return
     msg = (
         f"📡 *تحليل فوري لـ {sym}*\n"
@@ -371,7 +371,7 @@ def send_startup_notification():
         "🤖 *البوت قيد التشغيل الآن!*\n\n"
         f"📊 يفحص حالياً *{len(all_syms)}* عملة.\n"
         f"👥 عدد المشتركين: {len(SUBSCRIBERS)}\n"
-        "🔹 يستخدم 4 استراتيجيات نقاط للكشف عن الفرص.\n"
+        "🔹 يستخدم 4 استراتيجيات نقاط.\n"
         "🔹 يتم تحديث عملات الميم تلقائياً من DexScreener.\n\n"
         "✅ ستصلك الإشارات التلقائية عند توفرها."
     )
@@ -405,10 +405,10 @@ def run_telegram_bot():
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("subscribe", subscribe))
-    application.add_handler(CommandHandler("unsubscribe", unsubscribe))
-    application.add_handler(CommandHandler("list_subscribers", list_subscribers))
+    application.add_handler(CommandHandler("subscribers", subscribers_list))
+    application.add_handler(CommandHandler("remove", remove_user))
     application.add_handler(CommandHandler("signal", signal_now))
     
     try:
