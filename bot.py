@@ -327,13 +327,22 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 def run_telegram_bot():
+    import asyncio
+    # إنشاء حلقة أحداث جديدة لهذا الخيط
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("add", add_symbol))
     application.add_handler(CommandHandler("remove", remove_symbol))
     application.add_handler(CommandHandler("signal", signal_now))
-    application.run_polling()
+    
+    try:
+        loop.run_until_complete(application.run_polling())
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     # تشغيل الخوادم في خيوط منفصلة
