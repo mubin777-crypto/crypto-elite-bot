@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import threading
+import asyncio
 import requests
 from datetime import datetime, timedelta
 from flask import Flask
@@ -238,13 +239,21 @@ def market_scanner_loop():
 
 # -------------------- أوامر التليجرام --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🚀 *بوت المؤسسات (4 استراتيجيات)*\n\n"
-        "/status - عرض حالة البوت\n"
-        "/add SYMBOL - إضافة عملة\n"
-        "/remove SYMBOL - إزالة عملة\n"
-        "/signal SYMBOL - تحليل فوري", parse_mode="Markdown"
+    welcome_msg = (
+        "🚀 *مرحباً بك في بوت الإشارات الذكي (المؤسسات)!* 🚀\n\n"
+        "📊 *الميزات:*\n"
+        "• نظام نقاط يجمع 4 استراتيجيات (الزخم، RSI، الحجم، اختراق القمم).\n"
+        "• فحص تلقائي لأكثر من 100 عملة + عملات الميم الساخنة من DexScreener.\n"
+        "• إشارات شراء/بيع مدعومة بأسباب واضحة.\n\n"
+        "📌 *الأوامر المتاحة:*\n"
+        "/status - عرض حالة البوت والعملات المراقبة.\n"
+        "/add SYMBOL - إضافة عملة جديدة (مثال: /add XRPUSDT).\n"
+        "/remove SYMBOL - إزالة عملة من المراقبة.\n"
+        "/signal SYMBOL - تحليل فوري لعملة معينة.\n\n"
+        "🔔 سيتم إرسال الإشارات التلقائية عند توفرها.\n"
+        "📈 تذكر: التداول يحمل مخاطر، استخدم الإشارات كأداة مساعدة فقط."
     )
+    await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["📊 *حالة البوت فائق السرعة*\n"]
@@ -257,34 +266,34 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ /add SYMBOL")
+        await update.message.reply_text("⚠️ الرجاء كتابة: /add SYMBOL (مثال: /add XRPUSDT)")
         return
     sym = context.args[0].upper()
     if sym not in BASE_WATCH_LIST:
         BASE_WATCH_LIST.append(sym)
-        await update.message.reply_text(f"✅ تمت إضافة {sym}")
+        await update.message.reply_text(f"✅ تمت إضافة {sym} بنجاح.")
     else:
-        await update.message.reply_text("✅ موجودة مسبقاً")
+        await update.message.reply_text(f"✅ {sym} موجودة مسبقاً في القائمة.")
 
 async def remove_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ /remove SYMBOL")
+        await update.message.reply_text("⚠️ الرجاء كتابة: /remove SYMBOL (مثال: /remove XRPUSDT)")
         return
     sym = context.args[0].upper()
     if sym in BASE_WATCH_LIST:
         BASE_WATCH_LIST.remove(sym)
-        await update.message.reply_text(f"✅ تمت إزالة {sym}")
+        await update.message.reply_text(f"✅ تمت إزالة {sym} بنجاح.")
     else:
-        await update.message.reply_text("❌ غير موجودة")
+        await update.message.reply_text(f"❌ {sym} غير موجودة في القائمة.")
 
 async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ /signal SYMBOL")
+        await update.message.reply_text("⚠️ الرجاء كتابة: /signal SYMBOL (مثال: /signal SOLUSDT)")
         return
     sym = context.args[0].upper()
     analysis = advanced_analysis(sym)
     if not analysis:
-        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}")
+        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}، حاول مرة أخرى.")
         return
     msg = (
         f"📡 *تحليل فوري لـ {sym}*\n"
@@ -319,7 +328,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# -------------------- تشغيل البوت (في الخيط الرئيسي) --------------------
+# -------------------- تشغيل بوت التليجرام باستخدام asyncio.run() --------------------
 def run_telegram_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -327,12 +336,26 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("add", add_symbol))
     application.add_handler(CommandHandler("remove", remove_symbol))
     application.add_handler(CommandHandler("signal", signal_now))
-    # تشغيل polling في الخيط الرئيسي (بدون استخدام asyncio إضافي)
-    application.run_polling()
+    
+    # التشغيل باستخدام asyncio.run() لضمان وجود حلقة أحداث صحيحة
+    asyncio.run(application.run_polling())
+
+# -------------------- إرسال رسالة ترحيبية عند بدء البوت --------------------
+def send_startup_notification():
+    """تُرسل رسالة إلى المستخدم لتأكيد تشغيل البوت وعدد العملات."""
+    all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
+    msg = (
+        "🤖 *البوت قيد التشغيل الآن!*\n\n"
+        f"📊 يفحص حالياً *{len(all_syms)}* عملة.\n"
+        "🔹 يستخدم 4 استراتيجيات نقاط للكشف عن الفرص.\n"
+        "🔹 يتم تحديث عملات الميم تلقائياً من DexScreener.\n\n"
+        "✅ ستصلك الإشارات التلقائية عند توفرها."
+    )
+    send_telegram_message(msg)
 
 # -------------------- نقطة الدخول الرئيسية --------------------
 if __name__ == "__main__":
-    # تشغيل Flask في خيط منفصل (آمن)
+    # تشغيل Flask في خيط منفصل
     threading.Thread(target=run_flask, daemon=True).start()
     
     # تشغيل Self-Pinger في خيط منفصل
@@ -341,5 +364,9 @@ if __name__ == "__main__":
     # تشغيل الماسح في خيط منفصل
     threading.Thread(target=market_scanner_loop, daemon=True).start()
     
-    # تشغيل بوت التليجرام في الخيط الرئيسي (لتجنب مشكلة الإشارات)
+    # انتظار قليلاً لضمان بدء باقي المكونات ثم إرسال رسالة ترحيبية
+    time.sleep(5)
+    send_startup_notification()
+    
+    # تشغيل بوت التليجرام في الخيط الرئيسي باستخدام asyncio.run()
     run_telegram_bot()
