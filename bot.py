@@ -3,6 +3,7 @@ import time
 import logging
 import threading
 import asyncio
+import json
 import requests
 from datetime import datetime, timedelta
 from flask import Flask
@@ -22,24 +23,31 @@ def home():
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+ADMIN_CHAT_ID = os.environ.get("CHAT_ID")  # المالك (يُستخدم للصلاحيات)
 
-# قائمة أساسية بـ 100 عملة
-BASE_WATCH_LIST = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
-    "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
-    "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ICPUSDT", "ETCUSDT", "XTZUSDT",
-    "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
-    "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "HOTUSDT",
-    "CHRUSDT", "OCEANUSDT", "RNDRUSDT", "FETUSDT", "AGIXUSDT", "WIFUSDT", "BONKUSDT",
-    "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT", "GOATUSDT", "LILPEPEUSDT", "VIRTUALUSDT"
-]
-dynamic_watch_list = []
+# ملف تخزين المشتركين (سيكون داخل مجلد المشروع)
+SUBSCRIBERS_FILE = "subscribers.json"
 
-RSI_PERIOD = 14
-EMA_PERIOD = 20
-COOLDOWN_MINUTES = 60
-last_signal_time = {}
+# -------------------- دوال إدارة المشتركين --------------------
+def load_subscribers():
+    """تحميل قائمة المشتركين من ملف JSON"""
+    try:
+        with open(SUBSCRIBERS_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # إذا لم يوجد الملف، ننشئه مع المالك كمشترك افتراضي
+        default = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else []
+        save_subscribers(default)
+        return default
+
+def save_subscribers(subscribers):
+    """حفظ قائمة المشتركين إلى ملف JSON"""
+    with open(SUBSCRIBERS_FILE, 'w') as f:
+        json.dump(subscribers, f)
+
+# قائمة المشتركين (تُحمّل عند بدء التشغيل)
+SUBSCRIBERS = load_subscribers()
+logger.info(f"✅ تم تحميل {len(SUBSCRIBERS)} مشترك: {SUBSCRIBERS}")
 
 # -------------------- دوال جلب البيانات --------------------
 def fetch_klines(symbol, interval='15m', limit=50):
@@ -110,7 +118,22 @@ def fetch_dexscreener_trending():
         logger.error(f"DexScreener error: {e}")
     return []
 
-# -------------------- التحليل المتقدم (نظام النقاط الرباعي) --------------------
+# -------------------- التحليل المتقدم --------------------
+RSI_PERIOD = 14
+EMA_PERIOD = 20
+COOLDOWN_MINUTES = 60
+last_signal_time = {}
+BASE_WATCH_LIST = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
+    "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
+    "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ICPUSDT", "ETCUSDT", "XTZUSDT",
+    "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
+    "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "HOTUSDT",
+    "CHRUSDT", "OCEANUSDT", "RNDRUSDT", "FETUSDT", "AGIXUSDT", "WIFUSDT", "BONKUSDT",
+    "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT", "GOATUSDT", "LILPEPEUSDT", "VIRTUALUSDT"
+]
+dynamic_watch_list = []
+
 def advanced_analysis(symbol):
     prices = fetch_klines(symbol, interval='15m', limit=50)
     if len(prices) < 25:
@@ -171,17 +194,18 @@ def advanced_analysis(symbol):
         "volume_24h": stats.get('volume', 0)
     }
 
-# -------------------- دوال الإرسال --------------------
-def send_telegram_message(message, chat_id=None):
-    if not chat_id:
-        chat_id = CHAT_ID
-    if not TELEGRAM_TOKEN or not chat_id:
+# -------------------- دوال الإرسال (لجميع المشتركين) --------------------
+def send_to_all_subscribers(message):
+    """إرسال رسالة إلى جميع المشتركين"""
+    global SUBSCRIBERS
+    if not TELEGRAM_TOKEN:
         return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=5)
-    except Exception as e:
-        logger.error(f"Telegram send error: {e}")
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    for chat_id in SUBSCRIBERS:
+        try:
+            requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=5)
+        except Exception as e:
+            logger.error(f"فشل الإرسال إلى {chat_id}: {e}")
 
 def process_single_symbol(symbol):
     try:
@@ -202,9 +226,9 @@ def process_single_symbol(symbol):
                 f"📈 التغير (ساعة): `{analysis['change_1h']:.2f}%`\n"
                 f"📝 الأسباب: {', '.join(analysis['reasons'])}"
             )
-            send_telegram_message(msg)
+            send_to_all_subscribers(msg)
             last_signal_time[symbol] = now
-            logger.info(f"✅ إشارة لـ {symbol} (نقاط: {analysis['score']})")
+            logger.info(f"✅ إشارة لـ {symbol} (نقاط: {analysis['score']}) أُرسلت إلى {len(SUBSCRIBERS)} مشترك")
             return symbol
     except Exception as e:
         logger.error(f"Error processing {symbol}: {e}")
@@ -239,52 +263,85 @@ def market_scanner_loop():
 
 # -------------------- أوامر التليجرام --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
     welcome_msg = (
-        "🚀 *مرحباً بك في بوت الإشارات الذكي (المؤسسات)!* 🚀\n\n"
-        "📊 *الميزات:*\n"
-        "• نظام نقاط يجمع 4 استراتيجيات (الزخم، RSI، الحجم، اختراق القمم).\n"
-        "• فحص تلقائي لأكثر من 100 عملة + عملات الميم الساخنة من DexScreener.\n"
-        "• إشارات شراء/بيع مدعومة بأسباب واضحة.\n\n"
+        "🚀 *مرحباً بك في بوت الإشارات الذكي!* 🚀\n\n"
+        f"👤 معرفك: `{user_id}`\n\n"
         "📌 *الأوامر المتاحة:*\n"
-        "/status - عرض حالة البوت والعملات المراقبة.\n"
-        "/add SYMBOL - إضافة عملة جديدة (مثال: /add XRPUSDT).\n"
-        "/remove SYMBOL - إزالة عملة من المراقبة.\n"
-        "/signal SYMBOL - تحليل فوري لعملة معينة.\n\n"
-        "🔔 سيتم إرسال الإشارات التلقائية عند توفرها.\n"
-        "📈 تذكر: التداول يحمل مخاطر، استخدم الإشارات كأداة مساعدة فقط."
+        "/status - عرض حالة البوت والعملات المراقبة\n"
+        "/signal SYMBOL - تحليل فوري (مثال: /signal SOLUSDT)\n"
+        "/subscribe - إضافة نفسك لقائمة المشتركين (للمالك فقط)\n"
+        "/unsubscribe - إزالة نفسك من القائمة (للمالك فقط)\n"
+        "/list_subscribers - عرض المشتركين (للمالك فقط)\n\n"
+        "🔔 ستصل الإشارات التلقائية لجميع المشتركين."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lines = ["📊 *حالة البوت فائق السرعة*\n"]
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
-    lines.append(f"📌 إجمالي العملات المراقبة: {len(all_syms)}\n")
-    lines.append("🔹 آخر 5 عملات ساخنة:")
+    lines = [
+        "📊 *حالة البوت فائق السرعة*",
+        f"📌 إجمالي العملات المراقبة: {len(all_syms)}",
+        f"👥 عدد المشتركين: {len(SUBSCRIBERS)}",
+        "🔹 آخر 5 عملات ساخنة:"
+    ]
     for sym in dynamic_watch_list[:5]:
         lines.append(f"   - `{sym}`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def add_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ الرجاء كتابة: /add SYMBOL (مثال: /add XRPUSDT)")
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة مستخدم إلى قائمة المشتركين (للمالك فقط)"""
+    user_id = str(update.effective_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
-    sym = context.args[0].upper()
-    if sym not in BASE_WATCH_LIST:
-        BASE_WATCH_LIST.append(sym)
-        await update.message.reply_text(f"✅ تمت إضافة {sym} بنجاح.")
+    
+    # نبحث عن المستخدم المطلوب إضافته (يُؤخذ من الأمر /subscribe USER_ID)
+    if not context.args:
+        await update.message.reply_text("⚠️ الرجاء كتابة: /subscribe USER_ID (مثال: /subscribe 123456789)")
+        return
+    target = context.args[0]
+    if target not in SUBSCRIBERS:
+        SUBSCRIBERS.append(target)
+        save_subscribers(SUBSCRIBERS)
+        await update.message.reply_text(f"✅ تم إضافة المستخدم `{target}` بنجاح.")
+        logger.info(f"➕ تم إضافة مشترك: {target}")
     else:
-        await update.message.reply_text(f"✅ {sym} موجودة مسبقاً في القائمة.")
+        await update.message.reply_text(f"ℹ️ المستخدم `{target}` موجود مسبقاً.")
 
-async def remove_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ الرجاء كتابة: /remove SYMBOL (مثال: /remove XRPUSDT)")
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إزالة مستخدم من المشتركين (للمالك فقط)"""
+    user_id = str(update.effective_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
-    sym = context.args[0].upper()
-    if sym in BASE_WATCH_LIST:
-        BASE_WATCH_LIST.remove(sym)
-        await update.message.reply_text(f"✅ تمت إزالة {sym} بنجاح.")
+    
+    if not context.args:
+        await update.message.reply_text("⚠️ الرجاء كتابة: /unsubscribe USER_ID (مثال: /unsubscribe 123456789)")
+        return
+    target = context.args[0]
+    if target in SUBSCRIBERS:
+        SUBSCRIBERS.remove(target)
+        save_subscribers(SUBSCRIBERS)
+        await update.message.reply_text(f"✅ تم إزالة المستخدم `{target}` بنجاح.")
+        logger.info(f"➖ تم إزالة مشترك: {target}")
     else:
-        await update.message.reply_text(f"❌ {sym} غير موجودة في القائمة.")
+        await update.message.reply_text(f"❌ المستخدم `{target}` غير موجود في القائمة.")
+
+async def list_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قائمة المشتركين (للمالك فقط)"""
+    user_id = str(update.effective_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    
+    if not SUBSCRIBERS:
+        await update.message.reply_text("📭 لا يوجد مشتركون حالياً.")
+        return
+    lines = ["👥 *قائمة المشتركين:*"]
+    for i, uid in enumerate(SUBSCRIBERS, 1):
+        lines.append(f"{i}. `{uid}`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -307,7 +364,20 @@ async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-# -------------------- نظام الإبقاء على الحياة (Self-Ping) --------------------
+# -------------------- إرسال رسالة ترحيبية عند بدء البوت --------------------
+def send_startup_notification():
+    all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
+    msg = (
+        "🤖 *البوت قيد التشغيل الآن!*\n\n"
+        f"📊 يفحص حالياً *{len(all_syms)}* عملة.\n"
+        f"👥 عدد المشتركين: {len(SUBSCRIBERS)}\n"
+        "🔹 يستخدم 4 استراتيجيات نقاط للكشف عن الفرص.\n"
+        "🔹 يتم تحديث عملات الميم تلقائياً من DexScreener.\n\n"
+        "✅ ستصلك الإشارات التلقائية عند توفرها."
+    )
+    send_to_all_subscribers(msg)
+
+# -------------------- نظام الإبقاء على الحياة --------------------
 def self_pinger():
     host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not host:
@@ -323,56 +393,36 @@ def self_pinger():
             logger.error(f"Self-ping failed: {e}")
         time.sleep(600)
 
-# -------------------- تشغيل Flask في خيط منفصل --------------------
+# -------------------- تشغيل Flask --------------------
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# -------------------- تشغيل بوت التليجرام مع حلقة أحداث يدوية --------------------
+# -------------------- تشغيل بوت التليجرام --------------------
 def run_telegram_bot():
-    # إنشاء حلقة جديدة وتعيينها كحلقة حالية للخيط الرئيسي
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("add", add_symbol))
-    application.add_handler(CommandHandler("remove", remove_symbol))
+    application.add_handler(CommandHandler("subscribe", subscribe))
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    application.add_handler(CommandHandler("list_subscribers", list_subscribers))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # تشغيل polling باستخدام الحلقة المعرفة
     try:
         loop.run_until_complete(application.run_polling())
     finally:
         loop.close()
 
-# -------------------- إرسال رسالة ترحيبية عند بدء البوت --------------------
-def send_startup_notification():
-    all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
-    msg = (
-        "🤖 *البوت قيد التشغيل الآن!*\n\n"
-        f"📊 يفحص حالياً *{len(all_syms)}* عملة.\n"
-        "🔹 يستخدم 4 استراتيجيات نقاط للكشف عن الفرص.\n"
-        "🔹 يتم تحديث عملات الميم تلقائياً من DexScreener.\n\n"
-        "✅ ستصلك الإشارات التلقائية عند توفرها."
-    )
-    send_telegram_message(msg)
-
-# -------------------- نقطة الدخول الرئيسية --------------------
+# -------------------- نقطة الدخول --------------------
 if __name__ == "__main__":
-    # تشغيل Flask في خيط منفصل
     threading.Thread(target=run_flask, daemon=True).start()
-    
-    # تشغيل Self-Pinger في خيط منفصل
     threading.Thread(target=self_pinger, daemon=True).start()
-    
-    # تشغيل الماسح في خيط منفصل
     threading.Thread(target=market_scanner_loop, daemon=True).start()
     
-    # انتظار قليلاً ثم إرسال رسالة ترحيبية
     time.sleep(5)
     send_startup_notification()
     
-    # تشغيل بوت التليجرام في الخيط الرئيسي مع حلقة أحداث يدوية
     run_telegram_bot()
