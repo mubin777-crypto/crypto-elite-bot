@@ -61,9 +61,8 @@ SUBSCRIBERS = load_subscribers()
 PENDING = load_pending()
 logger.info(f"✅ المشتركين: {SUBSCRIBERS}")
 
-# -------------------- دوال جلب البيانات المحسنة --------------------
+# -------------------- دوال جلب البيانات --------------------
 def fetch_klines(symbol, interval='5m', limit=30, retries=2):
-    """جلب بيانات الشموع (فترة أقصر 5 دقائق للاستجابة السريعة)"""
     url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     for attempt in range(retries):
         try:
@@ -72,8 +71,6 @@ def fetch_klines(symbol, interval='5m', limit=30, retries=2):
                 data = resp.json()
                 if data and len(data) > 10:
                     return [float(c[4]) for c in data]
-            else:
-                logger.debug(f"⚠️ {symbol} -> {resp.status_code}")
         except:
             pass
         if attempt < retries - 1:
@@ -121,7 +118,7 @@ def calculate_ema(prices, period=12):
         ema = (p * multiplier) + (ema * (1 - multiplier))
     return ema
 
-# -------------------- قائمة العملات (تم تصفيتها للعملات ذات السيولة العالية) --------------------
+# -------------------- قائمة العملات --------------------
 BASE_WATCH_LIST = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
     "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -139,12 +136,11 @@ dynamic_watch_list = []
 
 COOLDOWN_MINUTES = 30
 SIGNAL_THRESHOLD = 2
-MIN_VOLUME_USD = 1000000  # 1 مليون دولار حد أدنى للسيولة
+MIN_VOLUME_USD = 1000000
 MIN_CHANGE_1H = 0.3
 last_signal_time = {}
 
 def advanced_analysis(symbol):
-    """تحليل متقدم مع سيولة وفحص الانفجار"""
     prices = fetch_klines(symbol, interval='5m', limit=30)
     if not prices or len(prices) < 14:
         return None
@@ -154,31 +150,23 @@ def advanced_analysis(symbol):
     ema = calculate_ema(prices, 12)
     stats = fetch_24hr_stats(symbol)
     
-    # تجاهل العملات منخفضة السيولة
     if stats.get('volume', 0) < MIN_VOLUME_USD:
         return None
-    
-    # التحقق من صحة RSI
     if rsi >= 99 or rsi <= 1:
         return None
     
     change_1h = ((current_price - prices[-6]) / prices[-6]) * 100 if len(prices) >= 6 else 0
-    
-    # تجاهل العملات الراكدة (إلا إذا كان RSI متطرفاً)
     if abs(change_1h) < MIN_CHANGE_1H and not (rsi < 30 or rsi > 70):
         return None
     
-    # حساب متوسط الحجم للشمعة الأخيرة (تقديري)
-    avg_volume = stats.get('volume', 0) / 288  # 288 شمعة 5 دقائق في اليوم
-    current_volume = stats.get('volume', 0) / 288 * 1.5  # تقدير تقريبي
+    avg_volume = stats.get('volume', 0) / 288
+    current_volume = stats.get('volume', 0) / 288 * 1.5
     volume_spike = current_volume > avg_volume * 2.5
     
-    # حساب النقاط
     score = 0
     reasons = []
     signal_type = "⏸ انتظار"
     
-    # 1. الزخم السعري
     if change_1h > 1.0:
         score += 1
         reasons.append(f"زخم ({change_1h:.1f}%)")
@@ -186,7 +174,6 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append(f"انهيار ({change_1h:.1f}%)")
     
-    # 2. RSI + EMA
     if rsi < 35 and current_price > ema:
         score += 1
         reasons.append(f"RSI مفرط بيع ({rsi:.1f})")
@@ -194,22 +181,18 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append(f"RSI مفرط شراء ({rsi:.1f})")
     
-    # 3. نشاط الحجم
     if abs(stats.get('change_24h', 0)) > 5:
         score += 1
         reasons.append(f"نشاط حجم 24h ({stats['change_24h']:.1f}%)")
     
-    # 4. انفجار الحجم + سيولة عالية
     if volume_spike and change_1h > 0.5:
         score += 2
         reasons.append("🚀 انفجار حجم (سيولة عالية)")
     
-    # 5. اختراق قمة 24 ساعة
     if current_price > stats.get('high', 0) * 0.99 and change_1h > 0:
         score += 1
         reasons.append("اختراق قمة 24h")
     
-    # تصنيف الإشارة النهائية
     if score >= 3 and change_1h > 0:
         signal_type = "🚀 **شراء انفجاري**"
     elif score >= 2 and rsi < 45:
@@ -219,7 +202,6 @@ def advanced_analysis(symbol):
     elif score >= 2:
         signal_type = "🟡 **مراقبة**"
     
-    # تجاهل الإشارات الضعيفة
     if signal_type == "🟡 **مراقبة**" or score < SIGNAL_THRESHOLD:
         return None
     
@@ -258,7 +240,6 @@ def process_single_symbol(symbol):
         if last and (now - last) < timedelta(minutes=COOLDOWN_MINUTES):
             return None
         
-        # تنسيق الحجم
         volume_str = f"${analysis['volume_24h']:,.0f}"
         if analysis['volume_24h'] >= 1_000_000_000:
             volume_str = f"${analysis['volume_24h']/1_000_000_000:.1f}B"
@@ -283,13 +264,12 @@ def process_single_symbol(symbol):
         logger.error(f"خطأ {symbol}: {e}")
     return None
 
-# -------------------- حلقة المسح (محسنة) --------------------
+# -------------------- حلقة المسح --------------------
 def market_scanner_loop():
     logger.info("🚀 بدء الماسح الاحترافي...")
     while True:
         global dynamic_watch_list
         try:
-            # جلب عملات ساخنة من DexScreener
             url = "https://api.dexscreener.com/latest/dex/search?q=?"
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
@@ -324,10 +304,10 @@ def market_scanner_loop():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id in SUBSCRIBERS:
-        await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
+        await update.message.reply_text("ℹ️ أنت مشترك بالفعل. ستصل إليك الإشارات.")
         return
     if user_id in PENDING:
-        await update.message.reply_text("⏳ طلبك قيد الانتظار.")
+        await update.message.reply_text("⏳ طلبك قيد الانتظار. سيتم إعلامك عند الموافقة.")
         return
     PENDING.append(user_id)
     save_pending(PENDING)
@@ -339,7 +319,7 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ فقط للمالك.")
         return
     if not context.args:
-        await update.message.reply_text("⚠️ /approve USER_ID")
+        await update.message.reply_text("⚠️ استخدم: /approve USER_ID")
         return
     user_id = context.args[0].strip()
     if user_id in PENDING:
@@ -355,6 +335,52 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
     else:
         await update.message.reply_text("❌ غير موجود في قائمة الانتظار.")
+
+# ==================== الأمر الجديد: إضافة مستخدم يدوياً ====================
+async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة مستخدم يدوياً عن طريق المعرف (للمالك فقط)"""
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: /adduser USER_ID\nمثال: /adduser 123456789")
+        return
+    
+    user_id = context.args[0].strip()
+    
+    if not user_id.isdigit():
+        await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً فقط.")
+        return
+    
+    if user_id == ADMIN_CHAT_ID:
+        await update.message.reply_text("ℹ️ أنت المالك، مشترك بالفعل.")
+        return
+    
+    if user_id in SUBSCRIBERS:
+        await update.message.reply_text(f"ℹ️ المستخدم `{user_id}` مشترك بالفعل.", parse_mode="Markdown")
+        return
+    
+    SUBSCRIBERS.append(user_id)
+    save_subscribers(SUBSCRIBERS)
+    
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🎉 *تمت إضافتك إلى بوت الإشارات!*\n\nستصلك الإشارات التلقائية عند توفرها.",
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح، وتم إرسال رسالة ترحيب له.")
+    except Exception as e:
+        await update.message.reply_text(
+            f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب له (قد يكون لم يبدأ البوت بعد).",
+            parse_mode="Markdown"
+        )
+        logger.warning(f"لم نتمكن من إرسال رسالة للمستخدم {user_id}: {e}")
+    
+    logger.info(f"➕ المالك أضاف مستخدم يدوياً: {user_id}")
+
+# ====================================================================
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
@@ -418,6 +444,7 @@ def run_telegram_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("approve", approve))
+    application.add_handler(CommandHandler("adduser", add_user_manually))  # الأمر الجديد
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
