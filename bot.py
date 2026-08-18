@@ -134,13 +134,11 @@ def fetch_dexscreener_trending():
 # -------------------- التحليل المتقدم --------------------
 RSI_PERIOD = 14
 EMA_PERIOD = 20
-COOLDOWN_MINUTES = 30  # خفضنا إلى 30 دقيقة
-SIGNAL_THRESHOLD = 1   # خفضنا إلى نقطة واحدة
+COOLDOWN_MINUTES = 30
+SIGNAL_THRESHOLD = 1
 last_signal_time = {}
 
-# زيادة قائمة العملات إلى 100+
 BASE_WATCH_LIST = [
-    # العملات الكبرى
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
     "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
     "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ICPUSDT", "ETCUSDT", "XTZUSDT",
@@ -148,12 +146,11 @@ BASE_WATCH_LIST = [
     "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "HOTUSDT",
     "CHRUSDT", "OCEANUSDT", "RNDRUSDT", "FETUSDT", "AGIXUSDT", "WIFUSDT", "BONKUSDT",
     "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT", "GOATUSDT", "LILPEPEUSDT", "VIRTUALUSDT",
-    # عملات إضافية
     "ALGOUSDT", "ARBUSDT", "APTUSDT", "BGBUSDT", "BSVUSDT", "CAKEUSDT", "CELOUSDT",
     "COMPUSDT", "CROUSDT", "DYDXUSDT", "EGLDUSDT", "ENJUSDT", "EOSUSDT", "FLOWUSDT",
-    "GALAUSDT", "GRTUSDT", "HBARUSDT", "HNTUSDT", "ICPUSDT", "IMXUSDT", "INJUSDT",
-    "KAVAUSDT", "KSMUSDT", "LDOUSDT", "LEOUSD", "LRCUSDT", "MASKUSDT", "MINAUSDT",
-    "NEOUSDT", "OKBUSDT", "OMGUSDT", "PAXGUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT",
+    "GALAUSDT", "GRTUSDT", "HBARUSDT", "HNTUSDT", "IMXUSDT", "INJUSDT",
+    "KAVAUSDT", "KSMUSDT", "LDOUSDT", "LRCUSDT", "MASKUSDT", "MINAUSDT",
+    "NEOUSDT", "OKBUSDT", "OMGUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT",
     "RUNEUSDT", "RVNUSDT", "SUSHIUSDT", "UMAUSDT", "UNFIUSDT", "WOOUSDT", "ZECUSDT"
 ]
 dynamic_watch_list = []
@@ -172,12 +169,11 @@ def advanced_analysis(symbol):
     change_1h = ((current_price - price_1h_ago) / price_1h_ago) * 100 if price_1h_ago != 0 else 0
     
     highest_50 = max(prices) if prices else current_price
-    is_breakout = current_price >= highest_50 * 0.98  # خفضنا العتبة إلى 98% بدلاً من 99%
+    is_breakout = current_price >= highest_50 * 0.98
     
     score = 0
     reasons = []
     
-    # استراتيجية الزخم (خففنا الشرط إلى 1% بدلاً من 2%)
     if change_1h > 1.0:
         score += 1
         reasons.append(f"زخم سعري ({change_1h:.1f}%)")
@@ -185,7 +181,6 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append(f"انهيار ({change_1h:.1f}%)")
     
-    # استراتيجية RSI (خففنا العتبة إلى 40 و 60 بدلاً من 35 و 70)
     if rsi < 40 and current_price > ema:
         score += 1
         reasons.append(f"RSI منخفض ({rsi:.1f})")
@@ -193,12 +188,10 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append(f"RSI مرتفع ({rsi:.1f})")
     
-    # استراتيجية الحجم (خففنا إلى 3% بدلاً من 5%)
     if abs(stats.get('change_24h', 0)) > 3:
         score += 1
         reasons.append("نشاط حجم")
     
-    # استراتيجية اختراق القمم
     if is_breakout and change_1h > 0:
         score += 1
         reasons.append("اختراق قمة")
@@ -234,12 +227,20 @@ def send_to_all_subscribers(message):
         except Exception as e:
             logger.error(f"فشل الإرسال إلى {chat_id}: {e}")
 
+def send_to_admin(message):
+    if not ADMIN_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": ADMIN_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=5)
+    except Exception as e:
+        logger.error(f"فشل الإرسال للمالك: {e}")
+
 def process_single_symbol(symbol):
     try:
         analysis = advanced_analysis(symbol)
         if not analysis:
             return None
-        # الآن نرسل الإشارة إذا كانت النقاط >= 1 (بدلاً من 2)
         if analysis['score'] >= SIGNAL_THRESHOLD:
             now = datetime.now()
             last = last_signal_time.get(symbol)
@@ -262,7 +263,7 @@ def process_single_symbol(symbol):
         logger.error(f"Error processing {symbol}: {e}")
     return None
 
-# -------------------- حلقة المسح الذكية (تقليل المدة إلى 5 دقائق) --------------------
+# -------------------- حلقة المسح الذكية --------------------
 def market_scanner_loop():
     logger.info("🚀 بدء تشغيل الماسح فائق السرعة (100+ عملة)...")
     while True:
@@ -287,10 +288,195 @@ def market_scanner_loop():
                     logger.error(f"Thread error: {e}")
         
         logger.info("✅ انتهت دورة المسح. الانتظار 5 دقائق...")
-        time.sleep(300)  # 5 دقائق بدلاً من 10
+        time.sleep(300)
 
-# -------------------- بقية الكود (الأوامر، Flask، التشغيل) --------------------
-# ... (نفس الكود السابق مع تحديث رسائل التأكيد)
+# -------------------- أوامر التليجرام --------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id in SUBSCRIBERS:
+        await update.message.reply_text("ℹ️ أنت مشترك بالفعل. ستصل إليك الإشارات.")
+        return
+    if user_id in PENDING:
+        await update.message.reply_text("⏳ طلبك قيد الانتظار. سيتم إعلامك عند الموافقة.")
+        return
+    
+    PENDING.append(user_id)
+    save_pending(PENDING)
+    await update.message.reply_text(
+        "✅ تم استلام طلب الاشتراك.\n"
+        "سيقوم المالك بمراجعته وقبولك قريباً.\n"
+        "ستصلك رسالة عند الموافقة."
+    )
+    await send_to_admin(f"📩 *طلب اشتراك جديد*\nالمعرف: `{user_id}`\nللإضافة استخدم: /approve {user_id}")
+
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: /approve USER_ID")
+        return
+    user_id = context.args[0].strip()
+    if user_id in PENDING:
+        PENDING.remove(user_id)
+        save_pending(PENDING)
+        if user_id not in SUBSCRIBERS:
+            SUBSCRIBERS.append(user_id)
+            save_subscribers(SUBSCRIBERS)
+            await update.message.reply_text(f"✅ تمت الموافقة على المستخدم `{user_id}` وإضافته.")
+            try:
+                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك! ستصل إليك الإشارات.")
+            except:
+                pass
+        else:
+            await update.message.reply_text(f"ℹ️ المستخدم `{user_id}` مشترك بالفعل.")
+    else:
+        await update.message.reply_text(f"❌ المستخدم `{user_id}` ليس في قائمة الانتظار.")
+
+async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: /reject USER_ID")
+        return
+    user_id = context.args[0].strip()
+    if user_id in PENDING:
+        PENDING.remove(user_id)
+        save_pending(PENDING)
+        await update.message.reply_text(f"✅ تم رفض المستخدم `{user_id}`.")
+        try:
+            await context.bot.send_message(chat_id=user_id, text="❌ تم رفض طلب اشتراكك.")
+        except:
+            pass
+    else:
+        await update.message.reply_text(f"❌ المستخدم `{user_id}` ليس في قائمة الانتظار.")
+
+async def pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    if not PENDING:
+        await update.message.reply_text("📭 لا توجد طلبات معلقة.")
+        return
+    lines = ["📋 *طلبات الانتظار:*"]
+    for uid in PENDING:
+        lines.append(f"- `{uid}`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def list_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    if not SUBSCRIBERS:
+        await update.message.reply_text("📭 لا يوجد مشتركون حالياً.")
+        return
+    lines = ["👥 *المشتركين الحاليين:*"]
+    for uid in SUBSCRIBERS:
+        lines.append(f"- `{uid}`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def remove_subscriber(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: /remove USER_ID")
+        return
+    user_id = context.args[0].strip()
+    if user_id in SUBSCRIBERS:
+        SUBSCRIBERS.remove(user_id)
+        save_subscribers(SUBSCRIBERS)
+        await update.message.reply_text(f"✅ تم حذف المستخدم `{user_id}` من المشتركين.")
+        try:
+            await context.bot.send_message(chat_id=user_id, text="❌ تم إلغاء اشتراكك من قبل المالك.")
+        except:
+            pass
+    else:
+        await update.message.reply_text(f"❌ المستخدم `{user_id}` ليس مشتركاً.")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
+    lines = [
+        "📊 *حالة البوت*",
+        f"📌 العملات المراقبة: {len(all_syms)}",
+        f"👥 المشتركين: {len(SUBSCRIBERS)}",
+        f"⏳ طلبات الانتظار: {len(PENDING)}",
+        "🔹 آخر 5 عملات ساخنة:"
+    ]
+    for sym in dynamic_watch_list[:5]:
+        lines.append(f"   - `{sym}`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ /signal SYMBOL (مثال: /signal SOLUSDT)")
+        return
+    sym = context.args[0].upper()
+    analysis = advanced_analysis(sym)
+    if not analysis:
+        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}.")
+        return
+    msg = (
+        f"📡 *تحليل فوري لـ {sym}*\n"
+        f"🔹 النقاط: {analysis['score']}/4\n"
+        f"🔹 الإشارة: {analysis['signal']}\n"
+        f"💰 السعر: `{analysis['price']:.4f}`\n"
+        f"📊 RSI: `{analysis['rsi']:.1f}`\n"
+        f"📈 EMA: `{analysis['ema']:.4f}`\n"
+        f"📉 تغير ساعة: `{analysis['change_1h']:.2f}%`\n"
+        f"📝 الأسباب: {', '.join(analysis['reasons'])}"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# -------------------- نظام الإبقاء على الحياة --------------------
+def self_pinger():
+    host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    if not host:
+        return
+    url = f"https://{host}"
+    time.sleep(300)
+    while True:
+        try:
+            requests.get(url, timeout=3)
+            logger.info("✅ Self-ping sent successfully")
+        except Exception as e:
+            logger.error(f"Self-ping failed: {e}")
+        time.sleep(600)
+
+# -------------------- تشغيل Flask --------------------
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# -------------------- تشغيل بوت التليجرام --------------------
+def run_telegram_bot():
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("approve", approve))
+    application.add_handler(CommandHandler("reject", reject))
+    application.add_handler(CommandHandler("pending", pending_list))
+    application.add_handler(CommandHandler("list", list_subscribers))
+    application.add_handler(CommandHandler("remove", remove_subscriber))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("signal", signal_now))
+    
+    try:
+        loop.run_until_complete(application.run_polling())
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e):
+            logger.warning("الحلقة مغلقة، نعيد إنشاءها...")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(application.run_polling())
+        else:
+            raise
 
 # -------------------- إرسال رسالة تأكيد عند بدء البوت --------------------
 def send_startup_notification():
