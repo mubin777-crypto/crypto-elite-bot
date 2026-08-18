@@ -108,8 +108,8 @@ def fetch_order_book(symbol, limit=10):
         resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
-            bids = sum(float(b[1]) for b in data['bids'][:5])  # حجم طلبات الشراء
-            asks = sum(float(a[1]) for a in data['asks'][:5])  # حجم طلبات البيع
+            bids = sum(float(b[1]) for b in data['bids'][:5])
+            asks = sum(float(a[1]) for a in data['asks'][:5])
             return {"bids": bids, "asks": asks, "spread": (float(data['asks'][0][0]) / float(data['bids'][0][0]) - 1) * 100}
     except:
         pass
@@ -147,19 +147,16 @@ def calculate_sma(prices, period=20):
     return sum(prices[-period:]) / period
 
 def calculate_macd(prices):
-    """MACD: خط الإشارة (12, 26, 9)"""
     if len(prices) < 26:
         return {"macd": 0, "signal": 0, "histogram": 0}
     ema12 = calculate_ema(prices, 12)
     ema26 = calculate_ema(prices, 26)
     macd = ema12 - ema26
-    # حساب خط الإشارة (بسيط: متوسط آخر 9 قيم)
-    signal = macd * 0.9  # تبسيط
+    signal = macd * 0.9
     histogram = macd - signal
     return {"macd": macd, "signal": signal, "histogram": histogram}
 
 def calculate_bollinger(prices, period=20, std=2):
-    """بولينجر باند (متوسط + انحراف معياري)"""
     if len(prices) < period:
         return {"upper": 0, "middle": 0, "lower": 0}
     sma = sum(prices[-period:]) / period
@@ -172,7 +169,6 @@ def calculate_bollinger(prices, period=20, std=2):
     }
 
 def calculate_atr(highs, lows, closes, period=14):
-    """متوسط المدى الحقيقي (لوقف الخسارة الديناميكي)"""
     if len(closes) < period:
         return 0
     tr_list = []
@@ -181,7 +177,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# -------------------- قائمة العملات (تم تصفيتها) --------------------
+# -------------------- قائمة العملات --------------------
 BASE_WATCH_LIST = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
     "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -197,16 +193,13 @@ BASE_WATCH_LIST = [
 ]
 dynamic_watch_list = []
 
-# -------------------- إعدادات التحليل --------------------
 COOLDOWN_MINUTES = 20
-SIGNAL_THRESHOLD = 3  # رفع العتبة إلى 3 نقاط
-MIN_VOLUME_USD = 1_000_000
-MIN_CHANGE_1H = 0.3
+SIGNAL_THRESHOLD = 2
+MIN_VOLUME_USD = 500000
+MIN_CHANGE_1H = 0.2
 last_signal_time = {}
 
 def advanced_analysis(symbol):
-    """تحليل متكامل مع مؤشرات متقدمة وإدارة مخاطر"""
-    # جلب البيانات من أطر زمنية متعددة
     data_5m = fetch_klines(symbol, '5m', 50)
     data_1h = fetch_klines(symbol, '1h', 30)
     data_4h = fetch_klines(symbol, '4h', 20)
@@ -219,20 +212,15 @@ def advanced_analysis(symbol):
     lows_5m = data_5m['lows']
     volumes_5m = data_5m['volumes']
     
-    prices_1h = data_1h['prices']
-    prices_4h = data_4h['prices']
-    
-    # إحصائيات 24 ساعة
     stats = fetch_24hr_stats(symbol)
-    
-    # التحقق من السيولة
     if stats.get('volume', 0) < MIN_VOLUME_USD:
         return None
     
     current_price = prices_5m[-1]
-    
-    # ---- حساب المؤشرات ----
     rsi = calculate_rsi(prices_5m, 14)
+    if rsi >= 99 or rsi <= 1:
+        return None
+    
     ema12 = calculate_ema(prices_5m, 12)
     ema26 = calculate_ema(prices_5m, 26)
     sma20 = calculate_sma(prices_5m, 20)
@@ -240,39 +228,22 @@ def advanced_analysis(symbol):
     bb = calculate_bollinger(prices_5m, 20, 2)
     atr = calculate_atr(highs_5m, lows_5m, prices_5m, 14)
     
-    # التحقق من صحة البيانات
-    if rsi >= 99 or rsi <= 1:
-        return None
-    
-    # التحليل متعدد الأطر الزمنية
-    trend_1h = prices_1h[-1] > calculate_sma(prices_1h, 20) if len(prices_1h) >= 20 else False
-    trend_4h = prices_4h[-1] > calculate_sma(prices_4h, 20) if len(prices_4h) >= 20 else False
-    
-    # تغير السعر خلال ساعة
     change_1h = ((prices_5m[-1] - prices_5m[-6]) / prices_5m[-6]) * 100 if len(prices_5m) >= 6 else 0
-    
-    # تجاهل العملات الراكدة
     if abs(change_1h) < MIN_CHANGE_1H and not (rsi < 30 or rsi > 70):
         return None
     
-    # حساب الحجم النسبي
     avg_volume = stats.get('volume', 0) / 288
     current_volume = volumes_5m[-1] if volumes_5m else 0
     volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
     
-    # عمق السوق
     order_book = fetch_order_book(symbol)
     liquidity = order_book['bids'] + order_book['asks']
     
-    # ---- نظام النقاط المتقدم (0-7 نقاط) ----
+    # نظام النقاط
     score = 0
     reasons = []
-    signal_type = "⏸ انتظار"
-    stop_loss = 0
-    take_profit = 0
-    position_size = 0
     
-    # 1. الزخم السعري (0-1)
+    # 1. الزخم
     if change_1h > 1.5:
         score += 1
         reasons.append(f"زخم قوي ({change_1h:.1f}%)")
@@ -283,7 +254,7 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append(f"انهيار ({change_1h:.1f}%)")
     
-    # 2. RSI (0-1)
+    # 2. RSI
     if rsi < 35 and current_price > ema12:
         score += 1
         reasons.append(f"RSI مفرط بيع ({rsi:.1f})")
@@ -291,7 +262,7 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append(f"RSI مفرط شراء ({rsi:.1f})")
     
-    # 3. MACD (0-1)
+    # 3. MACD
     if macd['histogram'] > 0 and macd['histogram'] > macd['histogram'] * 1.1:
         score += 1
         reasons.append("تقاطع MACD إيجابي")
@@ -299,7 +270,7 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append("تقاطع MACD سلبي")
     
-    # 4. بولينجر باند (0-1)
+    # 4. بولينجر
     if current_price < bb['lower'] and change_1h > 0:
         score += 1
         reasons.append("اختراق دعم بولينجر")
@@ -307,7 +278,7 @@ def advanced_analysis(symbol):
         score -= 1
         reasons.append("اختراق مقاومة بولينجر")
     
-    # 5. الحجم والانفجار (0-2)
+    # 5. حجم
     if volume_ratio > 2.5:
         score += 1.5
         reasons.append(f"🚀 انفجار حجم ({volume_ratio:.1f}x)")
@@ -315,12 +286,14 @@ def advanced_analysis(symbol):
         score += 1
         reasons.append(f"نشاط حجم ({volume_ratio:.1f}x)")
     
-    # 6. السيولة وعمق السوق (0-1)
+    # 6. سيولة
     if liquidity > 100000:
         score += 0.5
         reasons.append("سيولة عالية")
     
-    # 7. الاتجاه متعدد الأطر (0-1)
+    # 7. الاتجاه
+    trend_1h = prices_1h[-1] > calculate_sma(prices_1h, 20) if len(prices_1h) >= 20 else False
+    trend_4h = prices_4h[-1] > calculate_sma(prices_4h, 20) if len(prices_4h) >= 20 else False
     if trend_1h and trend_4h:
         score += 1
         reasons.append("اتجاه صاعد (1h+4h)")
@@ -328,39 +301,41 @@ def advanced_analysis(symbol):
         score -= 0.5
         reasons.append("اتجاه هابط (1h+4h)")
     
-    # ---- تصنيف الإشارة النهائي ----
-    if score >= 4 and change_1h > 0:
-        signal_type = "🚀 **شراء انفجاري** (خطر مرتفع)"
+    # إشارة
+    signal_type = "⏸ انتظار"
+    stop_loss = current_price * 0.97
+    take_profit = current_price * 1.06
+    position_size = 0
+    
+    if score >= 3 and change_1h > 0:
+        signal_type = "🚀 **شراء انفجاري**"
         stop_loss = current_price * 0.97
         take_profit = current_price * 1.08
-        position_size = 0.5  # 0.5% من المحفظة
-    elif score >= 3 and change_1h > 0.5:
+        position_size = 0.5
+    elif score >= 2.5 and change_1h > 0.5:
         signal_type = "🟢 **شراء قوي**"
         stop_loss = current_price * 0.975
         take_profit = current_price * 1.06
         position_size = 1.0
-    elif score >= 3 and change_1h < -0.5:
+    elif score >= 2.5 and change_1h < -0.5:
         signal_type = "🔴 **بيع / جني أرباح**"
         stop_loss = current_price * 1.025
         take_profit = current_price * 0.95
         position_size = 1.0
     elif score >= 2:
         signal_type = "🟡 **مراقبة**"
-    else:
-        signal_type = "⏸ انتظار"
     
-    # تجاهل الإشارات الضعيفة
-    if signal_type in ["🟡 **مراقبة**", "⏸ انتظار"] or score < 3:
+    if signal_type in ["🟡 **مراقبة**", "⏸ انتظار"] or score < 2:
         return None
     
-    # ---- إدارة المخاطر ----
+    # ATR
     atr_stop = atr * 2 if atr > 0 else current_price * 0.02
     if "شراء" in signal_type:
-        stop_loss = max(stop_loss, current_price - atr_stop) if stop_loss > 0 else current_price - atr_stop
-        take_profit = max(take_profit, current_price + atr_stop * 2) if take_profit > 0 else current_price + atr_stop * 2
+        stop_loss = max(stop_loss, current_price - atr_stop)
+        take_profit = max(take_profit, current_price + atr_stop * 2)
     elif "بيع" in signal_type:
-        stop_loss = min(stop_loss, current_price + atr_stop) if stop_loss > 0 else current_price + atr_stop
-        take_profit = min(take_profit, current_price - atr_stop * 2) if take_profit > 0 else current_price - atr_stop * 2
+        stop_loss = min(stop_loss, current_price + atr_stop)
+        take_profit = min(take_profit, current_price - atr_stop * 2)
     
     return {
         "symbol": symbol,
@@ -375,8 +350,6 @@ def advanced_analysis(symbol):
         "change_1h": change_1h,
         "volume_ratio": volume_ratio,
         "liquidity": liquidity,
-        "trend_1h": trend_1h,
-        "trend_4h": trend_4h,
         "score": round(score, 1),
         "reasons": reasons,
         "signal": signal_type,
@@ -408,7 +381,6 @@ def process_single_symbol(symbol):
         if last and (now - last) < timedelta(minutes=COOLDOWN_MINUTES):
             return None
         
-        # تنسيق السيولة
         volume_str = f"${analysis['volume_24h']:,.0f}"
         if analysis['volume_24h'] >= 1_000_000_000:
             volume_str = f"${analysis['volume_24h']/1_000_000_000:.1f}B"
@@ -420,7 +392,6 @@ def process_single_symbol(symbol):
             f"🔔 {analysis['signal']}\n\n"
             f"💰 السعر: `{analysis['price']:.6f}`\n"
             f"📉 RSI: `{analysis['rsi']:.1f}` | MACD: `{analysis['macd']['histogram']:.4f}`\n"
-            f"📈 EMA12: `{analysis['ema12']:.6f}` | EMA26: `{analysis['ema26']:.6f}`\n"
             f"📊 بولينجر: الأعلى `{analysis['bb']['upper']:.6f}` | الأدنى `{analysis['bb']['lower']:.6f}`\n"
             f"📈 التغير (ساعة): `{analysis['change_1h']:.2f}%`\n"
             f"📊 الحجم النسبي: `{analysis['volume_ratio']:.1f}x`\n"
@@ -551,7 +522,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(SUBSCRIBERS)}\n"
         f"⏳ في الانتظار: {len(PENDING)}\n"
-        f"💧 الحد الأدنى للسيولة: $1M\n"
+        f"💧 الحد الأدنى للسيولة: $500K\n"
         f"📊 المؤشرات: RSI, MACD, بولينجر, متوسطات متحركة\n"
         f"🛡️ إدارة المخاطر: مدمجة (وقف الخسارة + جني الأرباح)",
         parse_mode="Markdown"
