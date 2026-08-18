@@ -4,6 +4,7 @@ import logging
 import threading
 import asyncio
 import json
+import math
 import requests
 from datetime import datetime, timedelta
 from flask import Flask
@@ -19,7 +20,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot is RUNNING!"
+    return "✅ Elite Pro Bot v2.0 is RUNNING!"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -61,21 +62,27 @@ SUBSCRIBERS = load_subscribers()
 PENDING = load_pending()
 logger.info(f"✅ المشتركين: {SUBSCRIBERS}")
 
-# -------------------- دوال جلب البيانات --------------------
-def fetch_klines(symbol, interval='5m', limit=30, retries=2):
+# -------------------- دوال جلب البيانات المحسنة --------------------
+def fetch_klines(symbol, interval='5m', limit=50, retries=2):
+    """جلب بيانات الشموع مع إعادة المحاولة"""
     url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     for attempt in range(retries):
         try:
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                if data and len(data) > 10:
-                    return [float(c[4]) for c in data]
+                if data and len(data) > 20:
+                    return {
+                        "prices": [float(c[4]) for c in data],
+                        "highs": [float(c[2]) for c in data],
+                        "lows": [float(c[3]) for c in data],
+                        "volumes": [float(c[5]) for c in data]
+                    }
         except:
             pass
         if attempt < retries - 1:
             time.sleep(2)
-    return []
+    return None
 
 def fetch_24hr_stats(symbol):
     try:
@@ -87,22 +94,38 @@ def fetch_24hr_stats(symbol):
                 "volume": float(data.get('quoteVolume', 0)),
                 "change_24h": float(data.get('priceChangePercent', 0)),
                 "high": float(data.get('highPrice', 0)),
-                "low": float(data.get('lowPrice', 0))
+                "low": float(data.get('lowPrice', 0)),
+                "open": float(data.get('openPrice', 0))
             }
     except:
         pass
-    return {"volume": 0, "change_24h": 0, "high": 0, "low": 0}
+    return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0}
 
-def calculate_rsi(prices):
-    if len(prices) < 14:
+def fetch_order_book(symbol, limit=10):
+    """جلب عمق السوق (السيولة الحقيقية)"""
+    try:
+        url = f"https://api.binance.us/api/v3/depth?symbol={symbol}&limit={limit}"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            bids = sum(float(b[1]) for b in data['bids'][:5])  # حجم طلبات الشراء
+            asks = sum(float(a[1]) for a in data['asks'][:5])  # حجم طلبات البيع
+            return {"bids": bids, "asks": asks, "spread": (float(data['asks'][0][0]) / float(data['bids'][0][0]) - 1) * 100}
+    except:
+        pass
+    return {"bids": 0, "asks": 0, "spread": 0}
+
+# -------------------- المؤشرات الفنية المتقدمة --------------------
+def calculate_rsi(prices, period=14):
+    if len(prices) < period:
         return 50.0
     gains, losses = [], []
     for i in range(1, len(prices)):
         diff = prices[i] - prices[i-1]
         gains.append(diff if diff > 0 else 0)
         losses.append(abs(diff) if diff < 0 else 0)
-    avg_gain = sum(gains[-14:]) / 14
-    avg_loss = sum(losses[-14:]) / 14
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
     if avg_loss == 0:
         return 70.0 if avg_gain > 0 else 50.0
     rs = avg_gain / avg_loss
@@ -118,7 +141,47 @@ def calculate_ema(prices, period=12):
         ema = (p * multiplier) + (ema * (1 - multiplier))
     return ema
 
-# -------------------- قائمة العملات --------------------
+def calculate_sma(prices, period=20):
+    if len(prices) < period:
+        return prices[-1] if prices else 0
+    return sum(prices[-period:]) / period
+
+def calculate_macd(prices):
+    """MACD: خط الإشارة (12, 26, 9)"""
+    if len(prices) < 26:
+        return {"macd": 0, "signal": 0, "histogram": 0}
+    ema12 = calculate_ema(prices, 12)
+    ema26 = calculate_ema(prices, 26)
+    macd = ema12 - ema26
+    # حساب خط الإشارة (بسيط: متوسط آخر 9 قيم)
+    signal = macd * 0.9  # تبسيط
+    histogram = macd - signal
+    return {"macd": macd, "signal": signal, "histogram": histogram}
+
+def calculate_bollinger(prices, period=20, std=2):
+    """بولينجر باند (متوسط + انحراف معياري)"""
+    if len(prices) < period:
+        return {"upper": 0, "middle": 0, "lower": 0}
+    sma = sum(prices[-period:]) / period
+    variance = sum((p - sma) ** 2 for p in prices[-period:]) / period
+    std_dev = math.sqrt(variance)
+    return {
+        "upper": sma + (std_dev * std),
+        "middle": sma,
+        "lower": sma - (std_dev * std)
+    }
+
+def calculate_atr(highs, lows, closes, period=14):
+    """متوسط المدى الحقيقي (لوقف الخسارة الديناميكي)"""
+    if len(closes) < period:
+        return 0
+    tr_list = []
+    for i in range(1, len(closes)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_list.append(tr)
+    return sum(tr_list[-period:]) / period
+
+# -------------------- قائمة العملات (تم تصفيتها) --------------------
 BASE_WATCH_LIST = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
     "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -134,88 +197,193 @@ BASE_WATCH_LIST = [
 ]
 dynamic_watch_list = []
 
-COOLDOWN_MINUTES = 30
-SIGNAL_THRESHOLD = 2
-MIN_VOLUME_USD = 1000000
+# -------------------- إعدادات التحليل --------------------
+COOLDOWN_MINUTES = 20
+SIGNAL_THRESHOLD = 3  # رفع العتبة إلى 3 نقاط
+MIN_VOLUME_USD = 1_000_000
 MIN_CHANGE_1H = 0.3
 last_signal_time = {}
 
 def advanced_analysis(symbol):
-    prices = fetch_klines(symbol, interval='5m', limit=30)
-    if not prices or len(prices) < 14:
+    """تحليل متكامل مع مؤشرات متقدمة وإدارة مخاطر"""
+    # جلب البيانات من أطر زمنية متعددة
+    data_5m = fetch_klines(symbol, '5m', 50)
+    data_1h = fetch_klines(symbol, '1h', 30)
+    data_4h = fetch_klines(symbol, '4h', 20)
+    
+    if not data_5m or not data_1h or not data_4h:
         return None
     
-    current_price = prices[-1]
-    rsi = calculate_rsi(prices)
-    ema = calculate_ema(prices, 12)
+    prices_5m = data_5m['prices']
+    highs_5m = data_5m['highs']
+    lows_5m = data_5m['lows']
+    volumes_5m = data_5m['volumes']
+    
+    prices_1h = data_1h['prices']
+    prices_4h = data_4h['prices']
+    
+    # إحصائيات 24 ساعة
     stats = fetch_24hr_stats(symbol)
     
+    # التحقق من السيولة
     if stats.get('volume', 0) < MIN_VOLUME_USD:
         return None
+    
+    current_price = prices_5m[-1]
+    
+    # ---- حساب المؤشرات ----
+    rsi = calculate_rsi(prices_5m, 14)
+    ema12 = calculate_ema(prices_5m, 12)
+    ema26 = calculate_ema(prices_5m, 26)
+    sma20 = calculate_sma(prices_5m, 20)
+    macd = calculate_macd(prices_5m)
+    bb = calculate_bollinger(prices_5m, 20, 2)
+    atr = calculate_atr(highs_5m, lows_5m, prices_5m, 14)
+    
+    # التحقق من صحة البيانات
     if rsi >= 99 or rsi <= 1:
         return None
     
-    change_1h = ((current_price - prices[-6]) / prices[-6]) * 100 if len(prices) >= 6 else 0
+    # التحليل متعدد الأطر الزمنية
+    trend_1h = prices_1h[-1] > calculate_sma(prices_1h, 20) if len(prices_1h) >= 20 else False
+    trend_4h = prices_4h[-1] > calculate_sma(prices_4h, 20) if len(prices_4h) >= 20 else False
+    
+    # تغير السعر خلال ساعة
+    change_1h = ((prices_5m[-1] - prices_5m[-6]) / prices_5m[-6]) * 100 if len(prices_5m) >= 6 else 0
+    
+    # تجاهل العملات الراكدة
     if abs(change_1h) < MIN_CHANGE_1H and not (rsi < 30 or rsi > 70):
         return None
     
+    # حساب الحجم النسبي
     avg_volume = stats.get('volume', 0) / 288
-    current_volume = stats.get('volume', 0) / 288 * 1.5
-    volume_spike = current_volume > avg_volume * 2.5
+    current_volume = volumes_5m[-1] if volumes_5m else 0
+    volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
     
+    # عمق السوق
+    order_book = fetch_order_book(symbol)
+    liquidity = order_book['bids'] + order_book['asks']
+    
+    # ---- نظام النقاط المتقدم (0-7 نقاط) ----
     score = 0
     reasons = []
     signal_type = "⏸ انتظار"
+    stop_loss = 0
+    take_profit = 0
+    position_size = 0
     
-    if change_1h > 1.0:
+    # 1. الزخم السعري (0-1)
+    if change_1h > 1.5:
         score += 1
-        reasons.append(f"زخم ({change_1h:.1f}%)")
-    elif change_1h < -1.0:
+        reasons.append(f"زخم قوي ({change_1h:.1f}%)")
+    elif change_1h > 0.5:
+        score += 0.5
+        reasons.append(f"زخم معتدل ({change_1h:.1f}%)")
+    elif change_1h < -1.5:
         score -= 1
         reasons.append(f"انهيار ({change_1h:.1f}%)")
     
-    if rsi < 35 and current_price > ema:
+    # 2. RSI (0-1)
+    if rsi < 35 and current_price > ema12:
         score += 1
         reasons.append(f"RSI مفرط بيع ({rsi:.1f})")
-    elif rsi > 65 and current_price < ema:
+    elif rsi > 65 and current_price < ema12:
         score -= 1
         reasons.append(f"RSI مفرط شراء ({rsi:.1f})")
     
-    if abs(stats.get('change_24h', 0)) > 5:
+    # 3. MACD (0-1)
+    if macd['histogram'] > 0 and macd['histogram'] > macd['histogram'] * 1.1:
         score += 1
-        reasons.append(f"نشاط حجم 24h ({stats['change_24h']:.1f}%)")
+        reasons.append("تقاطع MACD إيجابي")
+    elif macd['histogram'] < 0 and macd['histogram'] < macd['histogram'] * 1.1:
+        score -= 1
+        reasons.append("تقاطع MACD سلبي")
     
-    if volume_spike and change_1h > 0.5:
-        score += 2
-        reasons.append("🚀 انفجار حجم (سيولة عالية)")
-    
-    if current_price > stats.get('high', 0) * 0.99 and change_1h > 0:
+    # 4. بولينجر باند (0-1)
+    if current_price < bb['lower'] and change_1h > 0:
         score += 1
-        reasons.append("اختراق قمة 24h")
+        reasons.append("اختراق دعم بولينجر")
+    elif current_price > bb['upper'] and change_1h < 0:
+        score -= 1
+        reasons.append("اختراق مقاومة بولينجر")
     
-    if score >= 3 and change_1h > 0:
-        signal_type = "🚀 **شراء انفجاري**"
-    elif score >= 2 and rsi < 45:
+    # 5. الحجم والانفجار (0-2)
+    if volume_ratio > 2.5:
+        score += 1.5
+        reasons.append(f"🚀 انفجار حجم ({volume_ratio:.1f}x)")
+    elif volume_ratio > 1.5:
+        score += 1
+        reasons.append(f"نشاط حجم ({volume_ratio:.1f}x)")
+    
+    # 6. السيولة وعمق السوق (0-1)
+    if liquidity > 100000:
+        score += 0.5
+        reasons.append("سيولة عالية")
+    
+    # 7. الاتجاه متعدد الأطر (0-1)
+    if trend_1h and trend_4h:
+        score += 1
+        reasons.append("اتجاه صاعد (1h+4h)")
+    elif not trend_1h and not trend_4h:
+        score -= 0.5
+        reasons.append("اتجاه هابط (1h+4h)")
+    
+    # ---- تصنيف الإشارة النهائي ----
+    if score >= 4 and change_1h > 0:
+        signal_type = "🚀 **شراء انفجاري** (خطر مرتفع)"
+        stop_loss = current_price * 0.97
+        take_profit = current_price * 1.08
+        position_size = 0.5  # 0.5% من المحفظة
+    elif score >= 3 and change_1h > 0.5:
         signal_type = "🟢 **شراء قوي**"
-    elif score >= 2 and rsi > 55:
+        stop_loss = current_price * 0.975
+        take_profit = current_price * 1.06
+        position_size = 1.0
+    elif score >= 3 and change_1h < -0.5:
         signal_type = "🔴 **بيع / جني أرباح**"
+        stop_loss = current_price * 1.025
+        take_profit = current_price * 0.95
+        position_size = 1.0
     elif score >= 2:
         signal_type = "🟡 **مراقبة**"
+    else:
+        signal_type = "⏸ انتظار"
     
-    if signal_type == "🟡 **مراقبة**" or score < SIGNAL_THRESHOLD:
+    # تجاهل الإشارات الضعيفة
+    if signal_type in ["🟡 **مراقبة**", "⏸ انتظار"] or score < 3:
         return None
     
+    # ---- إدارة المخاطر ----
+    atr_stop = atr * 2 if atr > 0 else current_price * 0.02
+    if "شراء" in signal_type:
+        stop_loss = max(stop_loss, current_price - atr_stop) if stop_loss > 0 else current_price - atr_stop
+        take_profit = max(take_profit, current_price + atr_stop * 2) if take_profit > 0 else current_price + atr_stop * 2
+    elif "بيع" in signal_type:
+        stop_loss = min(stop_loss, current_price + atr_stop) if stop_loss > 0 else current_price + atr_stop
+        take_profit = min(take_profit, current_price - atr_stop * 2) if take_profit > 0 else current_price - atr_stop * 2
+    
     return {
+        "symbol": symbol,
         "price": current_price,
         "rsi": rsi,
-        "ema": ema,
+        "ema12": ema12,
+        "ema26": ema26,
+        "sma20": sma20,
+        "macd": macd,
+        "bb": bb,
+        "atr": atr,
         "change_1h": change_1h,
-        "score": score,
+        "volume_ratio": volume_ratio,
+        "liquidity": liquidity,
+        "trend_1h": trend_1h,
+        "trend_4h": trend_4h,
+        "score": round(score, 1),
         "reasons": reasons,
         "signal": signal_type,
-        "volume_24h": stats.get('volume', 0),
-        "high_24h": stats.get('high', 0),
-        "volume_spike": volume_spike
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "position_size": position_size,
+        "volume_24h": stats.get('volume', 0)
     }
 
 # -------------------- دوال الإرسال --------------------
@@ -240,6 +408,7 @@ def process_single_symbol(symbol):
         if last and (now - last) < timedelta(minutes=COOLDOWN_MINUTES):
             return None
         
+        # تنسيق السيولة
         volume_str = f"${analysis['volume_24h']:,.0f}"
         if analysis['volume_24h'] >= 1_000_000_000:
             volume_str = f"${analysis['volume_24h']/1_000_000_000:.1f}B"
@@ -247,13 +416,21 @@ def process_single_symbol(symbol):
             volume_str = f"${analysis['volume_24h']/1_000_000:.1f}M"
         
         msg = (
-            f"📊 *{symbol}* | النقاط: {analysis['score']}/5\n"
-            f"🔔 {analysis['signal']}\n"
+            f"📊 *{analysis['symbol']}* | النقاط: {analysis['score']}/7\n"
+            f"🔔 {analysis['signal']}\n\n"
             f"💰 السعر: `{analysis['price']:.6f}`\n"
-            f"📉 RSI: `{analysis['rsi']:.1f}` | EMA: `{analysis['ema']:.6f}`\n"
+            f"📉 RSI: `{analysis['rsi']:.1f}` | MACD: `{analysis['macd']['histogram']:.4f}`\n"
+            f"📈 EMA12: `{analysis['ema12']:.6f}` | EMA26: `{analysis['ema26']:.6f}`\n"
+            f"📊 بولينجر: الأعلى `{analysis['bb']['upper']:.6f}` | الأدنى `{analysis['bb']['lower']:.6f}`\n"
             f"📈 التغير (ساعة): `{analysis['change_1h']:.2f}%`\n"
+            f"📊 الحجم النسبي: `{analysis['volume_ratio']:.1f}x`\n"
             f"💧 السيولة 24h: `{volume_str}`\n"
-            f"📝 الأسباب: {', '.join(analysis['reasons'])}"
+            f"📊 عمق السوق: `{analysis['liquidity']:,.0f}`\n"
+            f"📝 الأسباب: {', '.join(analysis['reasons'])}\n\n"
+            f"🛡️ **إدارة المخاطر:**\n"
+            f"• وقف الخسارة: `{analysis['stop_loss']:.6f}`\n"
+            f"• جني الأرباح: `{analysis['take_profit']:.6f}`\n"
+            f"• حجم الصفقة: `{analysis['position_size']:.1f}%` من المحفظة"
         )
         
         send_to_all_subscribers(msg)
@@ -266,7 +443,7 @@ def process_single_symbol(symbol):
 
 # -------------------- حلقة المسح --------------------
 def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي...")
+    logger.info("🚀 بدء الماسح الاحترافي v2.0...")
     while True:
         global dynamic_watch_list
         try:
@@ -304,10 +481,10 @@ def market_scanner_loop():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id in SUBSCRIBERS:
-        await update.message.reply_text("ℹ️ أنت مشترك بالفعل. ستصل إليك الإشارات.")
+        await update.message.reply_text("ℹ️ أنت مشترك بالفعل. ستصل إليك الإشارات مع إدارة المخاطر.")
         return
     if user_id in PENDING:
-        await update.message.reply_text("⏳ طلبك قيد الانتظار. سيتم إعلامك عند الموافقة.")
+        await update.message.reply_text("⏳ طلبك قيد الانتظار.")
         return
     PENDING.append(user_id)
     save_pending(PENDING)
@@ -330,66 +507,53 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_subscribers(SUBSCRIBERS)
             await update.message.reply_text(f"✅ تمت الموافقة على `{user_id}`.")
             try:
-                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك!")
+                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك! ستصل إليك الإشارات مع إدارة المخاطر.")
             except:
                 pass
     else:
         await update.message.reply_text("❌ غير موجود في قائمة الانتظار.")
 
-# ==================== الأمر الجديد: إضافة مستخدم يدوياً ====================
 async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إضافة مستخدم يدوياً عن طريق المعرف (للمالك فقط)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
-    
     if not context.args:
         await update.message.reply_text("⚠️ استخدم: /adduser USER_ID\nمثال: /adduser 123456789")
         return
-    
     user_id = context.args[0].strip()
-    
     if not user_id.isdigit():
         await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً فقط.")
         return
-    
     if user_id == ADMIN_CHAT_ID:
         await update.message.reply_text("ℹ️ أنت المالك، مشترك بالفعل.")
         return
-    
     if user_id in SUBSCRIBERS:
         await update.message.reply_text(f"ℹ️ المستخدم `{user_id}` مشترك بالفعل.", parse_mode="Markdown")
         return
-    
     SUBSCRIBERS.append(user_id)
     save_subscribers(SUBSCRIBERS)
-    
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text="🎉 *تمت إضافتك إلى بوت الإشارات!*\n\nستصلك الإشارات التلقائية عند توفرها.",
+            text="🎉 *تمت إضافتك إلى بوت الإشارات الاحترافي!*\n\nستصلك الإشارات مع تحليل متكامل وإدارة مخاطر.",
             parse_mode="Markdown"
         )
-        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح، وتم إرسال رسالة ترحيب له.")
+        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
-        await update.message.reply_text(
-            f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب له (قد يكون لم يبدأ البوت بعد).",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب له.")
         logger.warning(f"لم نتمكن من إرسال رسالة للمستخدم {user_id}: {e}")
-    
     logger.info(f"➕ المالك أضاف مستخدم يدوياً: {user_id}")
-
-# ====================================================================
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت*\n"
+        f"📊 *حالة البوت v2.0*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(SUBSCRIBERS)}\n"
         f"⏳ في الانتظار: {len(PENDING)}\n"
-        f"💧 الحد الأدنى للسيولة: $1M",
+        f"💧 الحد الأدنى للسيولة: $1M\n"
+        f"📊 المؤشرات: RSI, MACD, بولينجر, متوسطات متحركة\n"
+        f"🛡️ إدارة المخاطر: مدمجة (وقف الخسارة + جني الأرباح)",
         parse_mode="Markdown"
     )
 
@@ -405,14 +569,20 @@ async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     volume_str = f"${analysis['volume_24h']:,.0f}"
     msg = (
         f"📡 *تحليل فوري لـ {sym}*\n"
-        f"🔹 النقاط: {analysis['score']}/5\n"
+        f"🔹 النقاط: {analysis['score']}/7\n"
         f"🔹 الإشارة: {analysis['signal']}\n"
         f"💰 السعر: `{analysis['price']:.6f}`\n"
         f"📊 RSI: `{analysis['rsi']:.1f}`\n"
-        f"📈 EMA: `{analysis['ema']:.6f}`\n"
-        f"📉 تغير ساعة: `{analysis['change_1h']:.2f}%`\n"
+        f"📈 MACD: `{analysis['macd']['histogram']:.4f}`\n"
+        f"📊 بولينجر: الأعلى `{analysis['bb']['upper']:.6f}` | الأدنى `{analysis['bb']['lower']:.6f}`\n"
+        f"📈 تغير ساعة: `{analysis['change_1h']:.2f}%`\n"
+        f"📊 الحجم النسبي: `{analysis['volume_ratio']:.1f}x`\n"
         f"💧 السيولة 24h: `{volume_str}`\n"
-        f"📝 الأسباب: {', '.join(analysis['reasons'])}"
+        f"📊 عمق السوق: `{analysis['liquidity']:,.0f}`\n"
+        f"📝 الأسباب: {', '.join(analysis['reasons'])}\n\n"
+        f"🛡️ وقف الخسارة: `{analysis['stop_loss']:.6f}`\n"
+        f"🎯 جني الأرباح: `{analysis['take_profit']:.6f}`\n"
+        f"📊 حجم الصفقة: `{analysis['position_size']:.1f}%` من المحفظة"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -444,7 +614,7 @@ def run_telegram_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("approve", approve))
-    application.add_handler(CommandHandler("adduser", add_user_manually))  # الأمر الجديد
+    application.add_handler(CommandHandler("adduser", add_user_manually))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
