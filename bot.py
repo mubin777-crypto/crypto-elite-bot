@@ -62,29 +62,49 @@ PENDING = load_pending()
 logger.info(f"✅ المشتركين: {SUBSCRIBERS}")
 logger.info(f"✅ قائمة الانتظار: {PENDING}")
 
-# -------------------- دوال جلب البيانات --------------------
-def fetch_klines(symbol, interval='15m', limit=50):
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        resp = requests.get(url, timeout=3)
-        if resp.status_code == 200:
-            return [float(c[4]) for c in resp.json()]
-    except:
-        pass
+# -------------------- دوال جلب البيانات (محسنة) --------------------
+def fetch_klines(symbol, interval='15m', limit=50, retries=3):
+    """جلب بيانات الشموع مع إعادة المحاولة وتفاصيل الخطأ"""
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    logger.info(f"📡 محاولة جلب {symbol}...")
+    
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, timeout=15)  # زيادة المهلة
+            logger.info(f"📡 {symbol} - الرد: {resp.status_code}")
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and len(data) > 0:
+                    logger.info(f"✅ تم جلب {len(data)} شمعة لـ {symbol}")
+                    return [float(c[4]) for c in data]
+                else:
+                    logger.warning(f"⚠️ بيانات فارغة لـ {symbol}")
+            else:
+                logger.warning(f"⚠️ Binance رد بـ {resp.status_code} لـ {symbol}: {resp.text[:100]}")
+        except requests.exceptions.Timeout:
+            logger.warning(f"⏳ مهلة الاتصال لـ {symbol} (محاولة {attempt+1}/{retries})")
+        except Exception as e:
+            logger.error(f"❌ خطأ في جلب {symbol}: {type(e).__name__} - {str(e)}")
+        
+        if attempt < retries - 1:
+            time.sleep(3)
+    
+    logger.error(f"❌ فشل جلب {symbol} بعد {retries} محاولات")
     return []
 
 def fetch_24hr_stats(symbol):
     try:
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-        resp = requests.get(url, timeout=3)
+        resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             return {
                 "volume": float(data.get('quoteVolume', 0)),
                 "change_24h": float(data.get('priceChangePercent', 0))
             }
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"خطأ في جلب إحصائيات {symbol}: {e}")
     return {"volume": 0, "change_24h": 0}
 
 def calculate_rsi(prices):
@@ -117,7 +137,7 @@ def calculate_ema(prices, period=20):
 def fetch_dexscreener_trending():
     try:
         url = "https://api.dexscreener.com/latest/dex/search?q=?"
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             pairs = resp.json().get('pairs', [])
             symbols = []
@@ -156,10 +176,15 @@ BASE_WATCH_LIST = [
 dynamic_watch_list = []
 
 def advanced_analysis(symbol):
+    """تحليل متقدم مع تسجيل تفصيلي للأخطاء"""
+    logger.info(f"🔍 بدء تحليل {symbol}...")
     prices = fetch_klines(symbol, interval='15m', limit=50)
-    if len(prices) < 25:
+    
+    if not prices or len(prices) < 25:
+        logger.warning(f"⚠️ بيانات غير كافية لـ {symbol}: {len(prices)} شمعة")
         return None
     
+    logger.info(f"✅ تم جلب {len(prices)} شمعة لـ {symbol}")
     current_price = prices[-1]
     rsi = calculate_rsi(prices)
     ema = calculate_ema(prices, EMA_PERIOD)
@@ -203,6 +228,8 @@ def advanced_analysis(symbol):
         final_signal = "✅ إشارة معتدلة"
     elif score <= -2:
         final_signal = "🔻 بيع"
+    
+    logger.info(f"📊 {symbol} - النقاط: {score}, الإشارة: {final_signal}")
     
     return {
         "price": current_price,
@@ -260,7 +287,7 @@ def process_single_symbol(symbol):
             logger.info(f"✅ إشارة لـ {symbol} أُرسلت إلى {len(SUBSCRIBERS)} مشترك")
             return symbol
     except Exception as e:
-        logger.error(f"Error processing {symbol}: {e}")
+        logger.error(f"خطأ في معالجة {symbol}: {e}")
     return None
 
 # -------------------- حلقة المسح الذكية --------------------
@@ -283,9 +310,9 @@ def market_scanner_loop():
             futures = {executor.submit(process_single_symbol, sym): sym for sym in all_symbols}
             for future in as_completed(futures):
                 try:
-                    future.result(timeout=3)
+                    future.result(timeout=5)
                 except Exception as e:
-                    logger.error(f"Thread error: {e}")
+                    logger.error(f"خطأ في الخيط: {e}")
         
         logger.info("✅ انتهت دورة المسح. الانتظار 5 دقائق...")
         time.sleep(300)
@@ -415,7 +442,7 @@ async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sym = context.args[0].upper()
     analysis = advanced_analysis(sym)
     if not analysis:
-        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}.")
+        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}. تحقق من السجلات.")
         return
     msg = (
         f"📡 *تحليل فوري لـ {sym}*\n"
