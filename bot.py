@@ -19,7 +19,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Bot is RUNNING! (100+ coins)"
+    return "✅ Elite Bot is RUNNING! (Using Binance.US)"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -62,15 +62,15 @@ PENDING = load_pending()
 logger.info(f"✅ المشتركين: {SUBSCRIBERS}")
 logger.info(f"✅ قائمة الانتظار: {PENDING}")
 
-# -------------------- دوال جلب البيانات (محسنة) --------------------
+# -------------------- دوال جلب البيانات (Binance.US) --------------------
 def fetch_klines(symbol, interval='15m', limit=50, retries=3):
-    """جلب بيانات الشموع مع إعادة المحاولة وتفاصيل الخطأ"""
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    """جلب بيانات الشموع من Binance.US مع إعادة المحاولة"""
+    url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     logger.info(f"📡 محاولة جلب {symbol}...")
     
     for attempt in range(retries):
         try:
-            resp = requests.get(url, timeout=15)  # زيادة المهلة
+            resp = requests.get(url, timeout=15)
             logger.info(f"📡 {symbol} - الرد: {resp.status_code}")
             
             if resp.status_code == 200:
@@ -81,7 +81,7 @@ def fetch_klines(symbol, interval='15m', limit=50, retries=3):
                 else:
                     logger.warning(f"⚠️ بيانات فارغة لـ {symbol}")
             else:
-                logger.warning(f"⚠️ Binance رد بـ {resp.status_code} لـ {symbol}: {resp.text[:100]}")
+                logger.warning(f"⚠️ Binance.US رد بـ {resp.status_code} لـ {symbol}: {resp.text[:100]}")
         except requests.exceptions.Timeout:
             logger.warning(f"⏳ مهلة الاتصال لـ {symbol} (محاولة {attempt+1}/{retries})")
         except Exception as e:
@@ -94,8 +94,9 @@ def fetch_klines(symbol, interval='15m', limit=50, retries=3):
     return []
 
 def fetch_24hr_stats(symbol):
+    """جلب إحصائيات 24 ساعة من Binance.US"""
     try:
-        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
@@ -165,18 +166,11 @@ BASE_WATCH_LIST = [
     "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
     "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "HOTUSDT",
     "CHRUSDT", "OCEANUSDT", "RNDRUSDT", "FETUSDT", "AGIXUSDT", "WIFUSDT", "BONKUSDT",
-    "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT", "GOATUSDT", "LILPEPEUSDT", "VIRTUALUSDT",
-    "ALGOUSDT", "ARBUSDT", "APTUSDT", "BGBUSDT", "BSVUSDT", "CAKEUSDT", "CELOUSDT",
-    "COMPUSDT", "CROUSDT", "DYDXUSDT", "EGLDUSDT", "ENJUSDT", "EOSUSDT", "FLOWUSDT",
-    "GALAUSDT", "GRTUSDT", "HBARUSDT", "HNTUSDT", "IMXUSDT", "INJUSDT",
-    "KAVAUSDT", "KSMUSDT", "LDOUSDT", "LRCUSDT", "MASKUSDT", "MINAUSDT",
-    "NEOUSDT", "OKBUSDT", "OMGUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT",
-    "RUNEUSDT", "RVNUSDT", "SUSHIUSDT", "UMAUSDT", "UNFIUSDT", "WOOUSDT", "ZECUSDT"
+    "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT", "GOATUSDT", "LILPEPEUSDT", "VIRTUALUSDT"
 ]
 dynamic_watch_list = []
 
 def advanced_analysis(symbol):
-    """تحليل متقدم مع تسجيل تفصيلي للأخطاء"""
     logger.info(f"🔍 بدء تحليل {symbol}...")
     prices = fetch_klines(symbol, interval='15m', limit=50)
     
@@ -513,6 +507,7 @@ def send_startup_notification():
         f"📊 يفحص حالياً *{len(all_syms)}* عملة.\n"
         f"👥 المشتركين النشطين: {len(SUBSCRIBERS)}\n"
         f"⏳ طلبات الانتظار: {len(PENDING)}\n\n"
+        "🔹 الآن يستخدم **Binance.US** (متوافق مع الولايات المتحدة).\n"
         "🔹 عتبة الإشارة: نقطة واحدة (أكثر حساسية).\n"
         "🔹 فترة المسح: 5 دقائق.\n\n"
         "✅ ستصلك الإشارات عند توفرها."
