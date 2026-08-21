@@ -5,7 +5,6 @@ import threading
 import asyncio
 import json
 import math
-import sqlite3
 import requests
 from datetime import datetime, timedelta
 from flask import Flask
@@ -21,134 +20,11 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v4.0 (Coinbase + Binance) is RUNNING!"
+    return "✅ Elite Pro Bot v5.0 (Coinbase + Binance) with Enhanced Signal Evaluation is RUNNING!"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
-
-# -------------------- دوال جلب البيانات من Coinbase --------------------
-def fetch_coinbase_klines(symbol, interval='5m', limit=50):
-    """جلب بيانات الشموع من Coinbase Advanced Trade API"""
-    try:
-        # تحويل الرمز إلى صيغة Coinbase (مثلاً BTC-USD)
-        symbol_cb = symbol.replace('USDT', '-USD')
-        url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/candles"
-        params = {
-            'granularity': 300 if interval == '5m' else 900,  # 5 دقائق = 300 ثانية
-            'limit': limit
-        }
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            # Coinbase تعيد [time, low, high, open, close, volume]
-            if data and len(data) > 0:
-                return {
-                    "prices": [c[4] for c in data],  # سعر الإغلاق
-                    "highs": [c[2] for c in data],
-                    "lows": [c[1] for c in data],
-                    "volumes": [c[5] for c in data],
-                    "opens": [c[3] for c in data]
-                }
-        else:
-            logger.debug(f"Coinbase API error: {resp.status_code} for {symbol}")
-    except Exception as e:
-        logger.debug(f"Coinbase error: {e}")
-    return None
-
-def fetch_coinbase_24hr_stats(symbol):
-    """جلب إحصائيات 24 ساعة من Coinbase"""
-    try:
-        symbol_cb = symbol.replace('USDT', '-USD')
-        url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/stats"
-        resp = requests.get(url, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "volume": float(data.get('volume', 0)),
-                "change_24h": 0,  # Coinbase لا تقدم التغير المئوي مباشرة
-                "high": float(data.get('high', 0)),
-                "low": float(data.get('low', 0)),
-                "open": float(data.get('open', 0))
-            }
-    except:
-        pass
-    return None
-
-# -------------------- دوال جلب البيانات من Binance.US --------------------
-def fetch_binance_klines(symbol, interval='5m', limit=50):
-    """جلب بيانات الشموع من Binance.US"""
-    try:
-        url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data and len(data) > 0:
-                return {
-                    "prices": [float(c[4]) for c in data],
-                    "highs": [float(c[2]) for c in data],
-                    "lows": [float(c[3]) for c in data],
-                    "volumes": [float(c[5]) for c in data],
-                    "opens": [float(c[1]) for c in data]
-                }
-        else:
-            logger.debug(f"Binance.US API error: {resp.status_code} for {symbol}")
-    except Exception as e:
-        logger.debug(f"Binance.US error: {e}")
-    return None
-
-def fetch_binance_24hr_stats(symbol):
-    try:
-        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
-        resp = requests.get(url, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "volume": float(data.get('quoteVolume', 0)),
-                "change_24h": float(data.get('priceChangePercent', 0)),
-                "high": float(data.get('highPrice', 0)),
-                "low": float(data.get('lowPrice', 0)),
-                "open": float(data.get('openPrice', 0))
-            }
-    except:
-        pass
-    return None
-
-# -------------------- دوال جلب البيانات الرئيسية (مع التبديل التلقائي) --------------------
-def fetch_klines(symbol, interval='5m', limit=50, retries=2):
-    """جلب البيانات من Coinbase أولاً، ثم Binance إذا فشل"""
-    for attempt in range(retries):
-        # حاول Coinbase
-        data = fetch_coinbase_klines(symbol, interval, limit)
-        if data and len(data['prices']) > 10:
-            logger.info(f"✅ Coinbase: {symbol} - {len(data['prices'])} شمعة")
-            return data
-        
-        # حاول Binance.US
-        data = fetch_binance_klines(symbol, interval, limit)
-        if data and len(data['prices']) > 10:
-            logger.info(f"✅ Binance.US: {symbol} - {len(data['prices'])} شمعة")
-            return data
-        
-        if attempt < retries - 1:
-            time.sleep(2)
-    
-    logger.warning(f"⚠️ فشل جلب {symbol} من جميع المصادر")
-    return None
-
-def fetch_24hr_stats(symbol):
-    """جلب إحصائيات 24 ساعة من Coinbase أولاً"""
-    stats = fetch_coinbase_24hr_stats(symbol)
-    if stats and stats.get('volume', 0) > 0:
-        return stats
-    stats = fetch_binance_24hr_stats(symbol)
-    if stats and stats.get('volume', 0) > 0:
-        return stats
-    return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0}
-
-# -------------------- باقي الكود (نفسه مع تحسينات طفيفة) --------------------
-# ... (جميع الدوال الأخرى كما هي، مع تغيير اسم الدالة fetch_24hr_stats إلى fetch_24hr_stats)
-# ... (سيتم إدراج الكود الكامل أدناه)
 
 # -------------------- دوال إدارة الملفات --------------------
 SUBSCRIBERS_FILE = "subscribers.json"
@@ -186,7 +62,114 @@ SUBSCRIBERS = load_subscribers()
 PENDING = load_pending()
 logger.info(f"✅ المشتركين: {SUBSCRIBERS}")
 
-# -------------------- المؤشرات الفنية (نفسها) --------------------
+# -------------------- دوال جلب البيانات من Coinbase --------------------
+def fetch_coinbase_klines(symbol, interval='5m', limit=50):
+    try:
+        symbol_cb = symbol.replace('USDT', '-USD')
+        url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/candles"
+        granularity = 300 if interval == '5m' else 900
+        params = {'granularity': granularity, 'limit': limit}
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and len(data) > 0:
+                return {
+                    "prices": [c[4] for c in data],
+                    "highs": [c[2] for c in data],
+                    "lows": [c[1] for c in data],
+                    "volumes": [c[5] for c in data],
+                    "opens": [c[3] for c in data]
+                }
+    except Exception as e:
+        logger.debug(f"Coinbase error: {e}")
+    return None
+
+def fetch_coinbase_24hr_stats(symbol):
+    try:
+        symbol_cb = symbol.replace('USDT', '-USD')
+        url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/stats"
+        resp = requests.get(url, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            # Coinbase لا تقدم التغير المئوي مباشرة، نحسبه من open و last
+            last = float(data.get('last', 0))
+            open_price = float(data.get('open', 0))
+            change_24h = ((last - open_price) / open_price * 100) if open_price != 0 else 0
+            return {
+                "volume": float(data.get('volume', 0)) * last,  # تحويل حجم العملة إلى دولار
+                "change_24h": change_24h,
+                "high": float(data.get('high', 0)),
+                "low": float(data.get('low', 0)),
+                "open": open_price,
+                "last": last
+            }
+    except:
+        pass
+    return None
+
+# -------------------- دوال جلب البيانات من Binance.US --------------------
+def fetch_binance_klines(symbol, interval='5m', limit=50):
+    try:
+        url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and len(data) > 0:
+                return {
+                    "prices": [float(c[4]) for c in data],
+                    "highs": [float(c[2]) for c in data],
+                    "lows": [float(c[3]) for c in data],
+                    "volumes": [float(c[5]) for c in data],
+                    "opens": [float(c[1]) for c in data]
+                }
+    except:
+        pass
+    return None
+
+def fetch_binance_24hr_stats(symbol):
+    try:
+        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
+        resp = requests.get(url, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "volume": float(data.get('quoteVolume', 0)),  # حجم الدولار
+                "change_24h": float(data.get('priceChangePercent', 0)),
+                "high": float(data.get('highPrice', 0)),
+                "low": float(data.get('lowPrice', 0)),
+                "open": float(data.get('openPrice', 0)),
+                "last": float(data.get('lastPrice', 0))
+            }
+    except:
+        pass
+    return None
+
+# -------------------- دوال جلب البيانات الرئيسية --------------------
+def fetch_klines(symbol, interval='5m', limit=50, retries=2):
+    for attempt in range(retries):
+        data = fetch_coinbase_klines(symbol, interval, limit)
+        if data and len(data['prices']) > 10:
+            logger.info(f"✅ Coinbase: {symbol} - {len(data['prices'])} شمعة")
+            return data
+        data = fetch_binance_klines(symbol, interval, limit)
+        if data and len(data['prices']) > 10:
+            logger.info(f"✅ Binance.US: {symbol} - {len(data['prices'])} شمعة")
+            return data
+        if attempt < retries - 1:
+            time.sleep(2)
+    logger.warning(f"⚠️ فشل جلب {symbol} من جميع المصادر")
+    return None
+
+def fetch_24hr_stats(symbol):
+    stats = fetch_coinbase_24hr_stats(symbol)
+    if stats and stats.get('volume', 0) > 0:
+        return stats
+    stats = fetch_binance_24hr_stats(symbol)
+    if stats and stats.get('volume', 0) > 0:
+        return stats
+    return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0, "last": 0}
+
+# -------------------- المؤشرات الفنية --------------------
 def calculate_rsi(prices, period=14):
     if len(prices) < period:
         return 50.0
@@ -248,27 +231,92 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-def calculate_ichimoku(prices, highs, lows):
-    if len(prices) < 52:
-        return {"tenkan": 0, "kijun": 0, "senkou_a": 0, "senkou_b": 0}
-    tenkan = (max(prices[-9:]) + min(prices[-9:])) / 2
-    kijun = (max(prices[-26:]) + min(prices[-26:])) / 2
-    senkou_a = (tenkan + kijun) / 2
-    senkou_b = (max(prices[-52:]) + min(prices[-52:])) / 2
-    return {"tenkan": tenkan, "kijun": kijun, "senkou_a": senkou_a, "senkou_b": senkou_b}
+# -------------------- دالة تقييم الإشارة المحسنة --------------------
+def evaluate_signal(rsi, volume_multiplier, liquidity_ok, price_near_upper_bollinger, change_1h):
+    """
+    تقييم الإشارة بناءً على معايير متعددة، تعيد نقاط وتصنيف وأسباب.
+    """
+    # فلترة RSI الصارمة
+    if rsi > 75:
+        return {
+            "status": "مرفوض",
+            "score": 0.0,
+            "signal": "🔴 تجنب الدخول",
+            "reasons": ["RSI مرتفع جداً (> 75) - مخاطر تصحيح عالية"]
+        }
+    if rsi < 25:
+        # في حالة انخفاض RSI قد تكون فرصة شراء لكن نفضل الحذر
+        pass
 
-def calculate_fibonacci(high, low):
-    diff = high - low
+    score = 0.0
+    reasons = []
+
+    # 1. تقييم RSI
+    if 40 <= rsi <= 60:
+        score += 3.0
+        reasons.append("زخم RSI في النطاق الآمن")
+    elif 60 < rsi <= 70:
+        score += 1.5
+        reasons.append("زخم مرتفع مع الحذر")
+    elif 25 <= rsi < 40:
+        score += 2.0
+        reasons.append("منطقة تشبع بيعي (فرصة)")
+    else:
+        score += 0.5
+        reasons.append("زخم ضعيف")
+
+    # 2. تقييم الحجم
+    if volume_multiplier >= 2.0:
+        score += 3.0
+        reasons.append(f"🚀 انفجار حجم ({volume_multiplier:.1f}x)")
+    elif volume_multiplier >= 1.3:
+        score += 2.0
+        reasons.append(f"نشاط حجم جيد ({volume_multiplier:.1f}x)")
+    else:
+        score += 0.5
+        reasons.append("حجم ضعيف")
+
+    # 3. تقييم السيولة
+    if liquidity_ok:
+        score += 2.0
+        reasons.append("سيولة عالية")
+    else:
+        score += 0.5
+        reasons.append("سيولة منخفضة")
+
+    # 4. موقع السعر من البولينجر
+    if not price_near_upper_bollinger:
+        score += 2.0
+        reasons.append("مساحة للصعود (بعيد عن الحد العلوي)")
+    else:
+        score += 0.5
+        reasons.append("السعر قريب من الحد العلوي")
+
+    # 5. الزخم السعري (إضافة جديدة)
+    if change_1h > 1.5:
+        score += 1.0
+        reasons.append(f"زخم سعري قوي ({change_1h:.1f}%)")
+    elif change_1h > 0.5:
+        score += 0.5
+        reasons.append(f"زخم سعري معتدل ({change_1h:.1f}%)")
+
+    final_score = round(score, 1)
+
+    if final_score >= 8.0:
+        signal_label = "🟢 شراء قوي"
+    elif final_score >= 5.0:
+        signal_label = "🟡 شراء معتدل / مراقبة"
+    else:
+        signal_label = "⚪ حيادي / تجنب"
+
     return {
-        "0": high,
-        "0.236": high - diff * 0.236,
-        "0.382": high - diff * 0.382,
-        "0.5": high - diff * 0.5,
-        "0.618": high - diff * 0.618,
-        "1": low
+        "status": "مقبول",
+        "score": final_score,
+        "signal": signal_label,
+        "reasons": reasons
     }
 
-# -------------------- قائمة العملات (تم تصفيتها للعملات المدعومة) --------------------
+# -------------------- قائمة العملات --------------------
 BASE_WATCH_LIST = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
     "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -285,15 +333,14 @@ BASE_WATCH_LIST = [
 dynamic_watch_list = []
 
 COOLDOWN_MINUTES = 20
-SIGNAL_THRESHOLD = 2.0  # خفض العتبة قليلاً
-MIN_VOLUME_USD = 200_000  # خفض الحد الأدنى للسيولة
+MIN_VOLUME_USD = 200_000
 MIN_CHANGE_1H = 0.2
 MAX_POSITION_SIZE = 0.02
 RISK_PER_TRADE = 0.01
 last_signal_time = {}
 
 def advanced_analysis(symbol):
-    """تحليل متكامل مع Coinbase/Binance"""
+    """تحليل متكامل مع تقييم محسن للإشارة"""
     data_5m = fetch_klines(symbol, '5m', 100)
     data_1h = fetch_klines(symbol, '1h', 30)
     data_4h = fetch_klines(symbol, '4h', 20)
@@ -305,7 +352,6 @@ def advanced_analysis(symbol):
     highs_5m = data_5m['highs']
     lows_5m = data_5m['lows']
     volumes_5m = data_5m['volumes']
-    opens_5m = data_5m['opens']
     
     stats = fetch_24hr_stats(symbol)
     if stats.get('volume', 0) < MIN_VOLUME_USD:
@@ -318,12 +364,9 @@ def advanced_analysis(symbol):
     
     ema12 = calculate_ema(prices_5m, 12)
     ema26 = calculate_ema(prices_5m, 26)
-    sma20 = calculate_sma(prices_5m, 20)
     macd = calculate_macd(prices_5m)
     bb = calculate_bollinger(prices_5m, 20, 2)
     atr = calculate_atr(highs_5m, lows_5m, prices_5m, 14)
-    ichimoku = calculate_ichimoku(prices_5m, highs_5m, lows_5m)
-    fib = calculate_fibonacci(stats.get('high', current_price), stats.get('low', current_price))
     
     change_1h = ((prices_5m[-1] - prices_5m[-6]) / prices_5m[-6]) * 100 if len(prices_5m) >= 6 else 0
     if abs(change_1h) < MIN_CHANGE_1H and not (rsi < 30 or rsi > 70):
@@ -333,118 +376,56 @@ def advanced_analysis(symbol):
     current_volume = volumes_5m[-1] if volumes_5m else 0
     volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
     
-    # نظام النقاط (مبسط ولكنه فعال)
-    score = 0
-    reasons = []
+    # تحديد موقع السعر من البولينجر
+    price_near_upper = current_price > bb['upper'] * 0.98 if bb['upper'] > 0 else False
     
-    # 1. الزخم
-    if change_1h > 1.5:
-        score += 2
-        reasons.append(f"زخم قوي ({change_1h:.1f}%)")
-    elif change_1h > 0.5:
-        score += 1
-        reasons.append(f"زخم معتدل ({change_1h:.1f}%)")
-    elif change_1h < -1.5:
-        score -= 2
-        reasons.append(f"انهيار ({change_1h:.1f}%)")
+    # تقييم السيولة
+    liquidity_ok = stats.get('volume', 0) > 1_000_000  # دولار
     
-    # 2. RSI
-    if rsi < 35 and current_price > ema12:
-        score += 2
-        reasons.append(f"RSI مفرط بيع ({rsi:.1f})")
-    elif rsi > 65 and current_price < ema12:
-        score -= 2
-        reasons.append(f"RSI مفرط شراء ({rsi:.1f})")
+    # استدعاء دالة التقييم المحسنة
+    eval_result = evaluate_signal(rsi, volume_ratio, liquidity_ok, price_near_upper, change_1h)
     
-    # 3. MACD
-    if macd['histogram'] > 0 and macd['histogram'] > macd['histogram'] * 1.1:
-        score += 1
-        reasons.append("MACD إيجابي")
-    elif macd['histogram'] < 0 and macd['histogram'] < macd['histogram'] * 1.1:
-        score -= 1
-        reasons.append("MACD سلبي")
-    
-    # 4. بولينجر
-    if current_price < bb['lower'] and change_1h > 0:
-        score += 1
-        reasons.append("اختراق دعم بولينجر")
-    elif current_price > bb['upper'] and change_1h < 0:
-        score -= 1
-        reasons.append("اختراق مقاومة بولينجر")
-    
-    # 5. الحجم
-    if volume_ratio > 2.5:
-        score += 1.5
-        reasons.append(f"🚀 انفجار حجم ({volume_ratio:.1f}x)")
-    elif volume_ratio > 1.5:
-        score += 1
-        reasons.append(f"نشاط حجم ({volume_ratio:.1f}x)")
-    
-    # 6. السيولة (Coinbase تعطي بيانات جيدة)
-    if stats.get('volume', 0) > 1_000_000:
-        score += 0.5
-        reasons.append("سيولة عالية جداً")
-    
-    # تصنيف الإشارة
-    signal_type = "⏸ انتظار"
-    stop_loss = current_price * 0.97
-    take_profit = current_price * 1.06
-    position_size = 0
-    
-    if score >= 3.5 and change_1h > 0:
-        signal_type = "🚀 **شراء انفجاري**"
-        stop_loss = current_price * 0.97
-        take_profit = current_price * 1.08
-        position_size = 0.5
-    elif score >= 2.5 and change_1h > 0.5:
-        signal_type = "🟢 **شراء قوي**"
-        stop_loss = current_price * 0.975
-        take_profit = current_price * 1.06
-        position_size = 1.0
-    elif score >= 2.5 and change_1h < -0.5:
-        signal_type = "🔴 **بيع / جني أرباح**"
-        stop_loss = current_price * 1.025
-        take_profit = current_price * 0.95
-        position_size = 1.0
-    elif score >= 2:
-        signal_type = "🟡 **مراقبة**"
-    
-    if signal_type in ["🟡 **مراقبة**", "⏸ انتظار"] or score < 2:
+    # إذا كانت الإشارة مرفوضة أو ضعيفة، نلغيها
+    if eval_result['status'] == 'مرفوض' or eval_result['score'] < 5.0:
         return None
     
-    # ATR لضبط وقف الخسارة
-    atr_stop = atr * 2 if atr > 0 else current_price * 0.02
-    if "شراء" in signal_type:
-        stop_loss = max(stop_loss, current_price - atr_stop)
-        take_profit = max(take_profit, current_price + atr_stop * 2)
-    elif "بيع" in signal_type:
-        stop_loss = min(stop_loss, current_price + atr_stop)
-        take_profit = min(take_profit, current_price - atr_stop * 2)
+    # حساب إدارة المخاطر الديناميكية
+    min_stop_pct = 0.01  # 1% كحد أدنى
+    atr_stop = atr * 2 if atr > 0 else current_price * 0.015
+    stop_loss = current_price - max(atr_stop, current_price * min_stop_pct)
+    take_profit = current_price + max(atr_stop * 2, current_price * 0.02)
+    
+    # معالجة الأسعار الصغيرة (دقة 8 أو 6)
+    price_precision = 8 if symbol in ["PEPEUSDT", "SHIBUSDT", "BONKUSDT"] else 6
+    stop_loss = round(stop_loss, price_precision)
+    take_profit = round(take_profit, price_precision)
+    
+    position_size = min(MAX_POSITION_SIZE, RISK_PER_TRADE * 100 / (abs(current_price - stop_loss) / current_price * 100))
+    position_size = round(position_size, 2)
     
     return {
         "symbol": symbol,
-        "price": current_price,
-        "rsi": rsi,
-        "ema12": ema12,
-        "ema26": ema26,
-        "sma20": sma20,
-        "macd": macd,
-        "bb": bb,
-        "atr": atr,
-        "ichimoku": ichimoku,
-        "fib": fib,
-        "change_1h": change_1h,
-        "volume_ratio": volume_ratio,
-        "score": round(score, 1),
-        "reasons": reasons,
-        "signal": signal_type,
+        "price": round(current_price, price_precision),
+        "rsi": round(rsi, 1),
+        "ema12": round(ema12, price_precision),
+        "ema26": round(ema26, price_precision),
+        "macd": {"histogram": round(macd['histogram'], 6)},
+        "bb": {
+            "upper": round(bb['upper'], price_precision),
+            "lower": round(bb['lower'], price_precision)
+        },
+        "change_1h": round(change_1h, 2),
+        "volume_ratio": round(volume_ratio, 1),
+        "score": eval_result['score'],
+        "reasons": eval_result['reasons'],
+        "signal": eval_result['signal'],
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "position_size": position_size,
         "volume_24h": stats.get('volume', 0)
     }
 
-# -------------------- دوال الإرسال ومعالجة الإشارات (نفسها) --------------------
+# -------------------- دوال الإرسال والمعالجة --------------------
 def send_to_all_subscribers(message):
     if not TELEGRAM_TOKEN:
         return
@@ -475,17 +456,17 @@ def process_single_symbol(symbol):
         msg = (
             f"📊 *{analysis['symbol']}* | النقاط: {analysis['score']}/10\n"
             f"🔔 {analysis['signal']}\n\n"
-            f"💰 السعر: `{analysis['price']:.6f}`\n"
-            f"📉 RSI: `{analysis['rsi']:.1f}` | MACD: `{analysis['macd']['histogram']:.4f}`\n"
-            f"📊 بولينجر: الأعلى `{analysis['bb']['upper']:.6f}` | الأدنى `{analysis['bb']['lower']:.6f}`\n"
-            f"📈 التغير (ساعة): `{analysis['change_1h']:.2f}%`\n"
-            f"📊 الحجم النسبي: `{analysis['volume_ratio']:.1f}x`\n"
+            f"💰 السعر: `{analysis['price']}`\n"
+            f"📉 RSI: `{analysis['rsi']}` | MACD: `{analysis['macd']['histogram']}`\n"
+            f"📊 بولينجر: الأعلى `{analysis['bb']['upper']}` | الأدنى `{analysis['bb']['lower']}`\n"
+            f"📈 التغير (ساعة): `{analysis['change_1h']}%`\n"
+            f"📊 الحجم النسبي: `{analysis['volume_ratio']}x`\n"
             f"💧 السيولة 24h: `{volume_str}`\n"
             f"📝 الأسباب: {', '.join(analysis['reasons'])}\n\n"
             f"🛡️ **إدارة المخاطر:**\n"
-            f"• وقف الخسارة: `{analysis['stop_loss']:.6f}`\n"
-            f"• جني الأرباح: `{analysis['take_profit']:.6f}`\n"
-            f"• حجم الصفقة: `{analysis['position_size']:.1f}%` من المحفظة"
+            f"• وقف الخسارة: `{analysis['stop_loss']}`\n"
+            f"• جني الأرباح: `{analysis['take_profit']}`\n"
+            f"• حجم الصفقة: `{analysis['position_size']}%` من المحفظة"
         )
         
         send_to_all_subscribers(msg)
@@ -498,11 +479,10 @@ def process_single_symbol(symbol):
 
 # -------------------- حلقة المسح --------------------
 def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v4.0 (Coinbase + Binance)...")
+    logger.info("🚀 بدء الماسح الاحترافي v5.0 ...")
     while True:
         global dynamic_watch_list
         try:
-            # جلب العملات الساخنة من DexScreener (لكننا نضيفها فقط إذا كانت مدعومة)
             url = "https://api.dexscreener.com/latest/dex/search?q=?"
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
@@ -514,7 +494,6 @@ def market_scanner_loop():
                         if base and len(base) < 10:
                             trending.append(base.upper() + 'USDT')
                 if trending:
-                    # نختبر العملات الساخنة ونتأكد من دعمها
                     valid_trending = []
                     for sym in trending[:10]:
                         test_data = fetch_klines(sym, '5m', 5)
@@ -544,14 +523,14 @@ def market_scanner_loop():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id in SUBSCRIBERS:
-        await update.message.reply_text("ℹ️ أنت مشترك بالفعل. ستصل إليك الإشارات مع تحليل متكامل.")
+        await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
         return
     if user_id in PENDING:
         await update.message.reply_text("⏳ طلبك قيد الانتظار.")
         return
     PENDING.append(user_id)
     save_pending(PENDING)
-    await update.message.reply_text("✅ تم استلام طلب الاشتراك. سيتم إعلامك عند الموافقة.")
+    await update.message.reply_text("✅ تم استلام طلب الاشتراك.")
     await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📩 طلب اشتراك جديد: `{user_id}`\n/approve {user_id}", parse_mode="Markdown")
 
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -570,7 +549,7 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_subscribers(SUBSCRIBERS)
             await update.message.reply_text(f"✅ تمت الموافقة على `{user_id}`.")
             try:
-                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك! ستصل إليك الإشارات مع تحليل متكامل.")
+                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك!")
             except:
                 pass
     else:
@@ -581,14 +560,11 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
         return
     if not context.args:
-        await update.message.reply_text("⚠️ استخدم: /adduser USER_ID\nمثال: /adduser 123456789")
+        await update.message.reply_text("⚠️ استخدم: /adduser USER_ID")
         return
     user_id = context.args[0].strip()
     if not user_id.isdigit():
         await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً فقط.")
-        return
-    if user_id == ADMIN_CHAT_ID:
-        await update.message.reply_text("ℹ️ أنت المالك، مشترك بالفعل.")
         return
     if user_id in SUBSCRIBERS:
         await update.message.reply_text(f"ℹ️ المستخدم `{user_id}` مشترك بالفعل.", parse_mode="Markdown")
@@ -596,27 +572,22 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.append(user_id)
     save_subscribers(SUBSCRIBERS)
     try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="🎉 *تمت إضافتك إلى بوت الإشارات الاحترافي v4.0!*",
-            parse_mode="Markdown"
-        )
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v5.0!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
-        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب له.")
-        logger.warning(f"لم نتمكن من إرسال رسالة للمستخدم {user_id}: {e}")
-    logger.info(f"➕ المالك أضاف مستخدم يدوياً: {user_id}")
+        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
+    logger.info(f"➕ المالك أضاف مستخدم: {user_id}")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v4.0*\n"
+        f"📊 *حالة البوت v5.0*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(SUBSCRIBERS)}\n"
         f"⏳ في الانتظار: {len(PENDING)}\n"
         f"💧 الحد الأدنى للسيولة: $200K\n"
-        f"📊 المصادر: Coinbase (رئيسي) + Binance.US (احتياطي)\n"
-        f"🛡️ إدارة المخاطر: ديناميكية (ATR + نسبة مخاطرة ثابتة)",
+        f"📊 نظام التقييم: RSI + الحجم + البولينجر + السيولة\n"
+        f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%)",
         parse_mode="Markdown"
     )
 
@@ -634,17 +605,17 @@ async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 *تحليل فوري لـ {sym}*\n"
         f"🔹 النقاط: {analysis['score']}/10\n"
         f"🔹 الإشارة: {analysis['signal']}\n"
-        f"💰 السعر: `{analysis['price']:.6f}`\n"
-        f"📊 RSI: `{analysis['rsi']:.1f}`\n"
-        f"📈 MACD: `{analysis['macd']['histogram']:.4f}`\n"
-        f"📊 بولينجر: الأعلى `{analysis['bb']['upper']:.6f}` | الأدنى `{analysis['bb']['lower']:.6f}`\n"
-        f"📈 تغير ساعة: `{analysis['change_1h']:.2f}%`\n"
-        f"📊 الحجم النسبي: `{analysis['volume_ratio']:.1f}x`\n"
+        f"💰 السعر: `{analysis['price']}`\n"
+        f"📊 RSI: `{analysis['rsi']}`\n"
+        f"📈 MACD: `{analysis['macd']['histogram']}`\n"
+        f"📊 بولينجر: الأعلى `{analysis['bb']['upper']}` | الأدنى `{analysis['bb']['lower']}`\n"
+        f"📈 تغير ساعة: `{analysis['change_1h']}%`\n"
+        f"📊 الحجم النسبي: `{analysis['volume_ratio']}x`\n"
         f"💧 السيولة 24h: `{volume_str}`\n"
         f"📝 الأسباب: {', '.join(analysis['reasons'])}\n\n"
-        f"🛡️ وقف الخسارة: `{analysis['stop_loss']:.6f}`\n"
-        f"🎯 جني الأرباح: `{analysis['take_profit']:.6f}`\n"
-        f"📊 حجم الصفقة: `{analysis['position_size']:.1f}%` من المحفظة"
+        f"🛡️ وقف الخسارة: `{analysis['stop_loss']}`\n"
+        f"🎯 جني الأرباح: `{analysis['take_profit']}`\n"
+        f"📊 حجم الصفقة: `{analysis['position_size']}%` من المحفظة"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
