@@ -8,7 +8,7 @@ import math
 import aiohttp
 import aiosqlite
 from datetime import datetime, timedelta
-from flask import Flask
+from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -18,13 +18,10 @@ logger = logging.getLogger(__name__)
 
 app = Flask('')
 
-@app.route('/')
-def home():
-    return "✅ Elite Pro Bot v8.1 - Final Stable"
-
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
+RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "localhost")
 
 # -------------------- إعدادات القوة العالية --------------------
 DB_PATH = "crypto_bot.db"
@@ -588,7 +585,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.1!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.2!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -599,7 +596,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v8.1 - جودة عالية*\n"
+        f"📊 *حالة البوت v8.2 - Webhook*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -680,7 +677,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v8.1 (جودة عالية)...")
+    logger.info("🚀 بدء الماسح الاحترافي v8.2 (جودة عالية)...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -716,37 +713,63 @@ async def market_scanner_loop():
                 logger.info("✅ انتهت الدورة. انتظار 5 دقائق...")
                 await asyncio.sleep(300)
 
-# -------------------- تشغيل البوت (مع حذف webhook باستخدام aiohttp) --------------------
+# -------------------- نقطة نهاية Webhook --------------------
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """استقبال التحديثات من تليجرام عبر Webhook"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "No data"}), 400
+        
+        # تحديث البوت عبر Application
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/')
+def home():
+    return "✅ Elite Pro Bot v8.2 - Running with Webhook"
+
+# -------------------- تشغيل البوت (باستخدام Webhook) --------------------
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
-async def post_init(application: Application):
+async def setup_webhook(application):
+    """تعيين Webhook على تليجرام"""
+    webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
+    logger.info(f"🔗 Setting webhook to: {webhook_url}")
+    await application.bot.set_webhook(url=webhook_url)
+    logger.info("✅ Webhook set successfully")
+
+async def delete_webhook(application):
+    """حذف Webhook عند إيقاف البوت"""
+    await application.bot.delete_webhook()
+    logger.info("✅ Webhook deleted")
+
+async def post_init(application):
     await init_db()
+    
+    # تعيين Webhook
+    await setup_webhook(application)
+    
+    # تشغيل الماسح في الخلفية
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
 
-async def delete_webhook():
-    """حذف الـ webhook باستخدام aiohttp لتجنب الاعتماد على requests"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook"
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    logger.info("✅ Webhook deleted successfully")
-                else:
-                    logger.warning(f"⚠️ Failed to delete webhook: {resp.status}")
-    except Exception as e:
-        logger.warning(f"⚠️ Error deleting webhook: {e}")
+async def shutdown(application):
+    await delete_webhook(application)
 
 def main():
+    global application
     # تشغيل Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask Server Started")
-    
-    # حذف الـ webhook قبل بدء البوت (باستخدام asyncio)
-    asyncio.run(delete_webhook())
     
     # بناء التطبيق
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
@@ -758,9 +781,16 @@ def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # بدء البوت
-    logger.info("✅ Starting Telegram Bot...")
-    application.run_polling(allowed_updates=["message", "callback_query"])
+    # تشغيل البوت بدون Polling (يتم التعامل مع التحديثات عبر Webhook)
+    logger.info("✅ Telegram Bot started with Webhook")
+    
+    # انتظار الإشارة لإيقاف البوت
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("🛑 Shutting down...")
+        asyncio.run(shutdown(application))
 
 if __name__ == "__main__":
     try:
