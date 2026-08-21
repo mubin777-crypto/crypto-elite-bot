@@ -20,7 +20,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v5.0 (Coinbase + Binance) with Enhanced Signal Evaluation is RUNNING!"
+    return "✅ Elite Pro Bot v5.1 is RUNNING! (Enhanced Filters + Sell Signals)"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -91,12 +91,11 @@ def fetch_coinbase_24hr_stats(symbol):
         resp = requests.get(url, timeout=8)
         if resp.status_code == 200:
             data = resp.json()
-            # Coinbase لا تقدم التغير المئوي مباشرة، نحسبه من open و last
             last = float(data.get('last', 0))
             open_price = float(data.get('open', 0))
             change_24h = ((last - open_price) / open_price * 100) if open_price != 0 else 0
             return {
-                "volume": float(data.get('volume', 0)) * last,  # تحويل حجم العملة إلى دولار
+                "volume": float(data.get('volume', 0)) * last,
                 "change_24h": change_24h,
                 "high": float(data.get('high', 0)),
                 "low": float(data.get('low', 0)),
@@ -133,7 +132,7 @@ def fetch_binance_24hr_stats(symbol):
         if resp.status_code == 200:
             data = resp.json()
             return {
-                "volume": float(data.get('quoteVolume', 0)),  # حجم الدولار
+                "volume": float(data.get('quoteVolume', 0)),
                 "change_24h": float(data.get('priceChangePercent', 0)),
                 "high": float(data.get('highPrice', 0)),
                 "low": float(data.get('lowPrice', 0)),
@@ -149,15 +148,13 @@ def fetch_klines(symbol, interval='5m', limit=50, retries=2):
     for attempt in range(retries):
         data = fetch_coinbase_klines(symbol, interval, limit)
         if data and len(data['prices']) > 10:
-            logger.info(f"✅ Coinbase: {symbol} - {len(data['prices'])} شمعة")
             return data
         data = fetch_binance_klines(symbol, interval, limit)
         if data and len(data['prices']) > 10:
-            logger.info(f"✅ Binance.US: {symbol} - {len(data['prices'])} شمعة")
             return data
         if attempt < retries - 1:
             time.sleep(2)
-    logger.warning(f"⚠️ فشل جلب {symbol} من جميع المصادر")
+    logger.warning(f"⚠️ فشل جلب {symbol}")
     return None
 
 def fetch_24hr_stats(symbol):
@@ -232,7 +229,7 @@ def calculate_atr(highs, lows, closes, period=14):
     return sum(tr_list[-period:]) / period
 
 # -------------------- دالة تقييم الإشارة المحسنة --------------------
-def evaluate_signal(rsi, volume_multiplier, liquidity_ok, price_near_upper_bollinger, change_1h):
+def evaluate_signal(rsi, volume_multiplier, liquidity_usd, price_near_upper_bollinger, change_1h, price_above_ema):
     """
     تقييم الإشارة بناءً على معايير متعددة، تعيد نقاط وتصنيف وأسباب.
     """
@@ -241,17 +238,17 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_ok, price_near_upper_bolli
         return {
             "status": "مرفوض",
             "score": 0.0,
-            "signal": "🔴 تجنب الدخول",
-            "reasons": ["RSI مرتفع جداً (> 75) - مخاطر تصحيح عالية"]
+            "signal": "🔴 تجنب الدخول (تشبع شرائي)",
+            "reasons": ["RSI مرتفع جداً (> 75)"]
         }
-    if rsi < 25:
-        # في حالة انخفاض RSI قد تكون فرصة شراء لكن نفضل الحذر
+    if rsi < 25 and change_1h < -0.5:
+        # قد تكون فرصة شراء من القاع، لكن نحتاج تأكيد
         pass
 
     score = 0.0
     reasons = []
 
-    # 1. تقييم RSI
+    # 1. تقييم RSI (0-3 نقاط)
     if 40 <= rsi <= 60:
         score += 3.0
         reasons.append("زخم RSI في النطاق الآمن")
@@ -265,7 +262,7 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_ok, price_near_upper_bolli
         score += 0.5
         reasons.append("زخم ضعيف")
 
-    # 2. تقييم الحجم
+    # 2. تقييم الحجم (0-3 نقاط) - يعتمد على متوسط 20 شمعة
     if volume_multiplier >= 2.0:
         score += 3.0
         reasons.append(f"🚀 انفجار حجم ({volume_multiplier:.1f}x)")
@@ -276,15 +273,18 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_ok, price_near_upper_bolli
         score += 0.5
         reasons.append("حجم ضعيف")
 
-    # 3. تقييم السيولة
-    if liquidity_ok:
+    # 3. تقييم السيولة (0-2 نقطة) - بناءً على قيمة التداول بالدولار
+    if liquidity_usd > 1_000_000:
         score += 2.0
-        reasons.append("سيولة عالية")
+        reasons.append("سيولة عالية جداً (> $1M)")
+    elif liquidity_usd > 500_000:
+        score += 1.0
+        reasons.append("سيولة جيدة (> $500K)")
     else:
         score += 0.5
         reasons.append("سيولة منخفضة")
 
-    # 4. موقع السعر من البولينجر
+    # 4. موقع السعر من البولينجر (0-2 نقطة)
     if not price_near_upper_bollinger:
         score += 2.0
         reasons.append("مساحة للصعود (بعيد عن الحد العلوي)")
@@ -292,7 +292,7 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_ok, price_near_upper_bolli
         score += 0.5
         reasons.append("السعر قريب من الحد العلوي")
 
-    # 5. الزخم السعري (إضافة جديدة)
+    # 5. الزخم السعري (0-1 نقطة)
     if change_1h > 1.5:
         score += 1.0
         reasons.append(f"زخم سعري قوي ({change_1h:.1f}%)")
@@ -300,12 +300,24 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_ok, price_near_upper_bolli
         score += 0.5
         reasons.append(f"زخم سعري معتدل ({change_1h:.1f}%)")
 
+    # 6. السعر فوق EMA (0-1 نقطة) - تأكيد الاتجاه الصاعد
+    if price_above_ema:
+        score += 1.0
+        reasons.append("السعر فوق EMA12 (اتجاه صاعد)")
+    else:
+        reasons.append("السعر تحت EMA12 (اتجاه هابط محتمل)")
+
     final_score = round(score, 1)
 
-    if final_score >= 8.0:
+    # تصنيف الإشارة (شراء / بيع)
+    if final_score >= 6.0 and change_1h > 0:
         signal_label = "🟢 شراء قوي"
-    elif final_score >= 5.0:
+    elif final_score >= 4.5 and change_1h > 0:
         signal_label = "🟡 شراء معتدل / مراقبة"
+    elif final_score >= 6.0 and change_1h < 0:
+        signal_label = "🔴 بيع / جني أرباح"
+    elif final_score >= 4.5 and change_1h < 0:
+        signal_label = "🟠 بيع معتدل / مراقبة"
     else:
         signal_label = "⚪ حيادي / تجنب"
 
@@ -316,7 +328,7 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_ok, price_near_upper_bolli
         "reasons": reasons
     }
 
-# -------------------- قائمة العملات --------------------
+# -------------------- قائمة العملات (تم إزالة BSV و RUNE) --------------------
 BASE_WATCH_LIST = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
     "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -324,10 +336,10 @@ BASE_WATCH_LIST = [
     "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
     "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
     "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-    "ALGOUSDT", "ARBUSDT", "APTUSDT", "BSVUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
+    "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
     "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
     "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
-    "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RUNEUSDT", "RVNUSDT",
+    "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT",
     "SUSHIUSDT", "UMAUSDT", "ZECUSDT"
 ]
 dynamic_watch_list = []
@@ -337,6 +349,7 @@ MIN_VOLUME_USD = 200_000
 MIN_CHANGE_1H = 0.2
 MAX_POSITION_SIZE = 0.02
 RISK_PER_TRADE = 0.01
+SIGNAL_SCORE_THRESHOLD = 4.5  # عتبة جديدة
 last_signal_time = {}
 
 def advanced_analysis(symbol):
@@ -372,30 +385,34 @@ def advanced_analysis(symbol):
     if abs(change_1h) < MIN_CHANGE_1H and not (rsi < 30 or rsi > 70):
         return None
     
-    avg_volume = stats.get('volume', 0) / 288
+    # حساب الحجم النسبي باستخدام متوسط 20 شمعة (أكثر دقة)
+    avg_volume_recent = sum(volumes_5m[-20:]) / 20 if len(volumes_5m) >= 20 else 1
     current_volume = volumes_5m[-1] if volumes_5m else 0
-    volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
+    volume_ratio = current_volume / avg_volume_recent if avg_volume_recent > 0 else 0
     
     # تحديد موقع السعر من البولينجر
     price_near_upper = current_price > bb['upper'] * 0.98 if bb['upper'] > 0 else False
     
-    # تقييم السيولة
-    liquidity_ok = stats.get('volume', 0) > 1_000_000  # دولار
+    # السعر فوق EMA12؟
+    price_above_ema = current_price > ema12
+    
+    # السيولة بالدولار
+    liquidity_usd = stats.get('volume', 0)
     
     # استدعاء دالة التقييم المحسنة
-    eval_result = evaluate_signal(rsi, volume_ratio, liquidity_ok, price_near_upper, change_1h)
+    eval_result = evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper, change_1h, price_above_ema)
     
     # إذا كانت الإشارة مرفوضة أو ضعيفة، نلغيها
-    if eval_result['status'] == 'مرفوض' or eval_result['score'] < 5.0:
+    if eval_result['status'] == 'مرفوض' or eval_result['score'] < SIGNAL_SCORE_THRESHOLD:
         return None
     
     # حساب إدارة المخاطر الديناميكية
-    min_stop_pct = 0.01  # 1% كحد أدنى
+    min_stop_pct = 0.01
     atr_stop = atr * 2 if atr > 0 else current_price * 0.015
     stop_loss = current_price - max(atr_stop, current_price * min_stop_pct)
     take_profit = current_price + max(atr_stop * 2, current_price * 0.02)
     
-    # معالجة الأسعار الصغيرة (دقة 8 أو 6)
+    # معالجة الأسعار الصغيرة
     price_precision = 8 if symbol in ["PEPEUSDT", "SHIBUSDT", "BONKUSDT"] else 6
     stop_loss = round(stop_loss, price_precision)
     take_profit = round(take_profit, price_precision)
@@ -479,7 +496,7 @@ def process_single_symbol(symbol):
 
 # -------------------- حلقة المسح --------------------
 def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v5.0 ...")
+    logger.info("🚀 بدء الماسح الاحترافي v5.1 ...")
     while True:
         global dynamic_watch_list
         try:
@@ -572,7 +589,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.append(user_id)
     save_subscribers(SUBSCRIBERS)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v5.0!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v5.1!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -581,12 +598,12 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v5.0*\n"
+        f"📊 *حالة البوت v5.1*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(SUBSCRIBERS)}\n"
         f"⏳ في الانتظار: {len(PENDING)}\n"
         f"💧 الحد الأدنى للسيولة: $200K\n"
-        f"📊 نظام التقييم: RSI + الحجم + البولينجر + السيولة\n"
+        f"📊 نظام التقييم: RSI + الحجم + البولينجر + السيولة + الاتجاه\n"
         f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%)",
         parse_mode="Markdown"
     )
