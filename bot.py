@@ -20,7 +20,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v7.1 - Production Ready"
+    return "✅ Elite Pro Bot v7.2 - Production Ready"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -216,9 +216,6 @@ async def fetch_24hr_stats(session, symbol):
 
 # -------------------- المؤشرات الفنية المحسنة --------------------
 def calculate_rsi(prices, period=14):
-    """
-    حساب RSI باستخدام صياغة ويلدر (Wilder's Smoothing) المعتمدة في TradingView.
-    """
     if len(prices) < period + 1:
         return 50.0
     
@@ -380,7 +377,6 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
     else:
         reasons.append("السعر تحت EMA12 (اتجاه هابط محتمل)")
 
-    # إضافة اتجاه 1h و 4h للتأكيد
     if trend_1h:
         score += 0.5
         reasons.append("اتجاه 1h صاعد")
@@ -416,7 +412,6 @@ dynamic_watch_list = []
 
 # -------------------- التحليل المتقدم --------------------
 async def advanced_analysis(session, symbol):
-    """تحليل متقدم مع 5m للزخم و 1h/4h لتأكيد الاتجاه"""
     data_5m = await fetch_klines(session, symbol, '5m', 100)
     data_1h = await fetch_klines(session, symbol, '1h', 30)
     data_4h = await fetch_klines(session, symbol, '4h', 20)
@@ -429,7 +424,6 @@ async def advanced_analysis(session, symbol):
     lows_5m = data_5m['lows']
     volumes_5m = data_5m['volumes']
     
-    # الاتجاه العام من 1h و 4h
     trend_1h = data_1h['prices'][-1] > calculate_sma(data_1h['prices'], 20) if len(data_1h['prices']) >= 20 else False
     trend_4h = data_4h['prices'][-1] > calculate_sma(data_4h['prices'], 20) if len(data_4h['prices']) >= 20 else False
     
@@ -584,7 +578,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.1!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.2!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -595,7 +589,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v7.1*\n"
+        f"📊 *حالة البوت v7.2*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -675,7 +669,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v7.1 (Async + Rate Limiting) ...")
+    logger.info("🚀 بدء الماسح الاحترافي v7.2 ...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -683,7 +677,6 @@ async def market_scanner_loop():
             while True:
                 global dynamic_watch_list
                 try:
-                    # جلب العملات الساخنة (محاكاة - سيتم تحسينها لاحقاً)
                     trending = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
                     valid_trending = []
                     for sym in trending[:5]:
@@ -731,15 +724,13 @@ async def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    logger.info("✅ Telegram Bot started")
-    
+    # تشغيل الماسح في الخلفية قبل تشغيل البوت
     asyncio.create_task(market_scanner_loop())
+    logger.info("✅ Scanner started as background task")
     
-    # إبقاء التطبيق حياً
-    await asyncio.Event().wait()
+    # تشغيل البوت (يحجب الـ Event Loop)
+    logger.info("✅ Telegram Bot started")
+    await application.run_polling()
 
 if __name__ == "__main__":
     try:
