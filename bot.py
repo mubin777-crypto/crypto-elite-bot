@@ -107,7 +107,7 @@ async def save_signal_history(symbol, signal_type, price, stop_loss, take_profit
         )
         await db.commit()
 
-# -------------------- دوال جلب البيانات (Binance أولاً) --------------------
+# -------------------- دوال جلب البيانات --------------------
 async def fetch_binance_klines(session, symbol, interval='5m', limit=50):
     try:
         url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -282,7 +282,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# -------------------- منطق تحديد الإشارة (قوة عالية) --------------------
+# -------------------- منطق تحديد الإشارة --------------------
 def determine_signal_type(rsi, change_1h, score):
     if rsi > 75:
         return "🔴 **بيع / جني أرباح** (تشبع شرائي مفرط)"
@@ -585,7 +585,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.2!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.3!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -596,7 +596,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v8.2 - Webhook*\n"
+        f"📊 *حالة البوت v8.3 - Webhook نهائي*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -677,7 +677,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v8.2 (جودة عالية)...")
+    logger.info("🚀 بدء الماسح الاحترافي v8.3 (جودة عالية)...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -731,8 +731,9 @@ async def webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/')
+@app.route('/healthcheck')
 def home():
-    return "✅ Elite Pro Bot v8.2 - Running with Webhook"
+    return "✅ Elite Pro Bot v8.3 - Running with Webhook"
 
 # -------------------- تشغيل البوت (باستخدام Webhook) --------------------
 def run_flask():
