@@ -20,19 +20,19 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v7.6 - Conflict Resolved"
+    return "✅ Elite Pro Bot v7.8 - High Quality Signals"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
 
-# -------------------- إعدادات قاعدة البيانات --------------------
+# -------------------- إعدادات القوة العالية --------------------
 DB_PATH = "crypto_bot.db"
 RATE_LIMIT_DELAY = 0.1
 SEMAPHORE_LIMIT = 5
-COOLDOWN_MINUTES = 20
-MIN_VOLUME_USD = 200_000
-SIGNAL_SCORE_THRESHOLD = 4.5
+COOLDOWN_MINUTES = 30                      # ↑ زيادة من 20
+MIN_VOLUME_USD = 300_000                   # ↑ زيادة من 200K
+SIGNAL_SCORE_THRESHOLD = 5.5               # ↑ زيادة من 4.5
 RISK_PER_TRADE = 0.01
 MAX_POSITION_SIZE_PCT = 2.0
 
@@ -285,7 +285,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# -------------------- منطق تحديد الإشارة المتسق --------------------
+# -------------------- منطق تحديد الإشارة المعدل (قوة أعلى) --------------------
 def determine_signal_type(rsi, change_1h, score):
     if rsi > 75:
         return "🔴 **بيع / جني أرباح** (تشبع شرائي مفرط)"
@@ -295,13 +295,16 @@ def determine_signal_type(rsi, change_1h, score):
         return "🟢 **شراء قوي** (تشبع بيعي مفرط - فرصة ارتداد)"
     elif rsi < 30 and change_1h < 0:
         return "🟢 **شراء** (منطقة تشبع بيعي)"
-    elif 45 <= rsi <= 65:
-        if score >= 6.0 and change_1h > 0:
+    # نطاق RSI الآمن مضيق (45-55 بدلاً من 40-60)
+    elif 45 <= rsi <= 55:
+        if score >= 7.0 and change_1h > 0:  # رفع العتبة من 6.0 إلى 7.0
             return "🟢 **شراء قوي** (زخم إيجابي في نطاق محايد)"
-        elif score >= 6.0 and change_1h < 0:
+        elif score >= 7.0 and change_1h < 0:
             return "🔴 **بيع** (زخم سلبي في نطاق محايد)"
         else:
             return "🟡 **مراقبة** (زخم متوازن)"
+    elif 55 < rsi <= 65:
+        return "🟡 **مراقبة** (زخم مرتفع مع الحذر)"
     else:
         return "⚪ **حيادي** (لا توجد إشارة واضحة)"
 
@@ -317,12 +320,16 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
     score = 0.0
     reasons = []
 
-    if 40 <= rsi <= 60:
-        score += 3.0
-        reasons.append("زخم RSI في النطاق الآمن")
-    elif 60 < rsi <= 70:
+    # 1. RSI - نقاط أكثر صرامة
+    if 45 <= rsi <= 55:
+        score += 3.5  # زيادة من 3.0
+        reasons.append("زخم RSI في النطاق الآمن المثالي")
+    elif 40 <= rsi < 45:
+        score += 2.5
+        reasons.append("RSI منخفض - فرصة شراء محتملة")
+    elif 55 < rsi <= 65:
         score += 1.5
-        reasons.append("زخم مرتفع مع الحذر")
+        reasons.append("RSI مرتفع - حذر")
     elif 25 <= rsi < 40:
         score += 2.0
         reasons.append("منطقة تشبع بيعي (فرصة)")
@@ -330,26 +337,35 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
         score += 0.5
         reasons.append("زخم ضعيف")
 
-    if volume_ratio >= 2.0:
+    # 2. الحجم - عتبات أعلى
+    if volume_ratio >= 2.5:
         score += 3.0
-        reasons.append(f"🚀 انفجار حجم ({volume_ratio:.1f}x)")
-    elif volume_ratio >= 1.3:
+        reasons.append(f"🚀 انفجار حجم كبير ({volume_ratio:.1f}x)")
+    elif volume_ratio >= 1.8:
         score += 2.0
-        reasons.append(f"نشاط حجم جيد ({volume_ratio:.1f}x)")
+        reasons.append(f"نشاط حجم قوي ({volume_ratio:.1f}x)")
+    elif volume_ratio >= 1.3:
+        score += 1.0
+        reasons.append(f"نشاط حجم معتدل ({volume_ratio:.1f}x)")
     else:
-        score += 0.5
+        score += 0.3
         reasons.append("حجم ضعيف")
 
-    if liquidity_usd > 1_000_000:
+    # 3. السيولة - عتبات أعلى
+    if liquidity_usd > 2_000_000:
         score += 2.0
-        reasons.append("سيولة عالية جداً (> $1M)")
+        reasons.append("سيولة عالية جداً (> $2M)")
+    elif liquidity_usd > 1_000_000:
+        score += 1.5
+        reasons.append("سيولة عالية (> $1M)")
     elif liquidity_usd > 500_000:
-        score += 1.0
+        score += 0.5
         reasons.append("سيولة جيدة (> $500K)")
     else:
-        score += 0.5
+        score += 0.2
         reasons.append("سيولة منخفضة")
 
+    # 4. البولينجر
     if not price_near_upper_bollinger:
         score += 2.0
         reasons.append("مساحة للصعود (بعيد عن الحد العلوي)")
@@ -357,6 +373,7 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
         score += 0.5
         reasons.append("السعر قريب من الحد العلوي")
 
+    # 5. الزخم السعري
     if change_1h > 1.5:
         score += 1.0
         reasons.append(f"زخم سعري قوي ({change_1h:.1f}%)")
@@ -366,12 +383,14 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
     elif change_1h < -1.5:
         reasons.append(f"انهيار سعري ({change_1h:.1f}%)")
 
+    # 6. الاتجاه (EMA)
     if price_above_ema:
         score += 1.0
         reasons.append("السعر فوق EMA12 (اتجاه صاعد)")
     else:
         reasons.append("السعر تحت EMA12 (اتجاه هابط محتمل)")
 
+    # 7. اتجاهات 1h و 4h
     if trend_1h:
         score += 0.5
         reasons.append("اتجاه 1h صاعد")
@@ -577,7 +596,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.6!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.8!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -588,13 +607,14 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v7.6*\n"
+        f"📊 *حالة البوت v7.8 - جودة عالية*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
         f"💧 الحد الأدنى للسيولة: ${MIN_VOLUME_USD:,}\n"
-        f"📊 نظام التقييم: RSI (Wilder's) + MACD + بولينجر + السيولة + الاتجاه (1h/4h)\n"
-        f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%، حجم صفقة محسوب)",
+        f"📊 نظام التقييم: RSI (45-55 مثالي) + حجم (≥2.5x للانفجار)\n"
+        f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%، حجم صفقة محسوب)\n"
+        f"🔹 عتبة النقاط: {SIGNAL_SCORE_THRESHOLD}/10 (إشارات قوية فقط)",
         parse_mode="Markdown"
     )
 
@@ -668,7 +688,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v7.6 ...")
+    logger.info("🚀 بدء الماسح الاحترافي v7.8 (جودة عالية)...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -727,7 +747,7 @@ async def main():
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
     
-    # تشغيل البوت باستخدام run_polling (الطريقة الموصى بها لمنع التعارض)
+    # تشغيل البوت باستخدام run_polling (الطريقة الصحيحة)
     logger.info("✅ Starting Telegram Bot...")
     await application.run_polling()
 
