@@ -56,6 +56,7 @@ async def init_db():
         await db.commit()
     logger.info("✅ قاعدة البيانات مهيأة (WAL mode)")
 
+# -------------------- دوال قاعدة البيانات --------------------
 async def get_subscribers():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM subscribers") as cursor:
@@ -107,7 +108,7 @@ async def save_signal_history(symbol, signal_type, price, stop_loss, take_profit
         )
         await db.commit()
 
-# -------------------- دوال جلب البيانات --------------------
+# -------------------- دوال جلب البيانات (Binance أولاً) --------------------
 async def fetch_binance_klines(session, symbol, interval='5m', limit=50):
     try:
         url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -282,7 +283,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# -------------------- منطق تحديد الإشارة --------------------
+# -------------------- منطق تحديد الإشارة (قوة عالية) --------------------
 def determine_signal_type(rsi, change_1h, score):
     if rsi > 75:
         return "🔴 **بيع / جني أرباح** (تشبع شرائي مفرط)"
@@ -585,7 +586,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.4!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.6!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -596,7 +597,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v8.4*\n"
+        f"📊 *حالة البوت v8.6*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -677,7 +678,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v8.4...")
+    logger.info("🚀 بدء الماسح الاحترافي v8.6...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -716,13 +717,10 @@ async def market_scanner_loop():
 # -------------------- نقطة نهاية Webhook --------------------
 @app.route('/webhook', methods=['POST'])
 async def webhook():
-    """استقبال التحديثات من تليجرام عبر Webhook"""
     try:
         data = request.get_json()
         if not data:
             return jsonify({"status": "error", "message": "No data"}), 400
-        
-        # تحديث البوت عبر Application
         update = Update.de_json(data, application.bot)
         await application.process_update(update)
         return jsonify({"status": "ok"}), 200
@@ -733,40 +731,26 @@ async def webhook():
 @app.route('/')
 @app.route('/healthcheck')
 def home():
-    return "✅ Elite Pro Bot v8.4 - Running with Webhook"
+    return "✅ Elite Pro Bot v8.6 - Running"
 
-# -------------------- تشغيل البوت (باستخدام Webhook) --------------------
+# -------------------- تشغيل البوت (Polling كحل بديل) --------------------
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
-async def setup_webhook(application):
-    """تعيين Webhook على تليجرام"""
-    webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
-    logger.info(f"🔗 Setting webhook to: {webhook_url}")
-    
-    # حذف أي webhook قديم أولاً
-    await application.bot.delete_webhook()
-    
-    # تعيين webhook الجديد
-    result = await application.bot.set_webhook(url=webhook_url)
-    if result:
-        logger.info("✅ Webhook set successfully")
-    else:
-        logger.error("❌ Failed to set webhook")
-
 async def post_init(application):
     await init_db()
+    # حذف Webhook أولاً لضمان عدم التعارض
+    await application.bot.delete_webhook()
+    logger.info("✅ Webhook deleted")
     
-    # تعيين Webhook
-    await setup_webhook(application)
-    
-    # تشغيل الماسح في الخلفية
+    # تشغيل الماسح
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
 
 def main():
     global application
+    
     # تشغيل Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -782,20 +766,14 @@ def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # تشغيل البوت بدون Polling (يتم التعامل مع التحديثات عبر Webhook)
-    logger.info("✅ Telegram Bot started with Webhook")
-    
-    # انتظار الإشارة لإيقاف البوت
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("🛑 Shutting down...")
+    # استخدام Polling بدلاً من Webhook (أكثر استقراراً)
+    logger.info("✅ Starting Telegram Bot with Polling...")
+    application.run_polling(allowed_updates=["message", "callback_query"])
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("🛑 تم إيقاف البوت يدوياً (KeyboardInterrupt)")
+        logger.info("🛑 تم إيقاف البوت يدوياً")
     except Exception as e:
         logger.error(f"⚠️ توقف غير متوقع: {e}")
