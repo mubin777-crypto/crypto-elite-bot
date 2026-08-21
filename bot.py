@@ -20,7 +20,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v7.9 - Final Stable (post_init)"
+    return "✅ Elite Pro Bot v8.0 - Conflict Resolved"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -59,6 +59,9 @@ async def init_db():
         await db.commit()
     logger.info("✅ قاعدة البيانات مهيأة (WAL mode)")
 
+# ... (جميع دوال قاعدة البيانات، جلب البيانات، المؤشرات، أوامر التليجرام، وحلقة المسح كما هي دون تغيير) ...
+
+# -------------------- دوال قاعدة البيانات --------------------
 async def get_subscribers():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM subscribers") as cursor:
@@ -588,7 +591,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.9!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.0!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -599,7 +602,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v7.9 - جودة عالية*\n"
+        f"📊 *حالة البوت v8.0 - جودة عالية*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -680,7 +683,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v7.9 (جودة عالية)...")
+    logger.info("🚀 بدء الماسح الاحترافي v8.0 (جودة عالية)...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -716,38 +719,49 @@ async def market_scanner_loop():
                 logger.info("✅ انتهت الدورة. انتظار 5 دقائق...")
                 await asyncio.sleep(300)
 
-# -------------------- تشغيل البوت (باستخدام post_init) --------------------
+# -------------------- تشغيل البوت (مع حذف webhook ومعالجة Conflict) --------------------
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
-# دالة مخصصة لتشغيل المهام غير المتزامنة عند بدء البوت
 async def post_init(application: Application):
     await init_db()
-    
-    # تشغيل الماسح في الخلفية
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
 
 def main():
-    # 1. تشغيل سيرفر Flask
+    # تشغيل Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask Server Started")
     
-    # 2. بناء تطبيق التليجرام وربط دالة post_init
+    # بناء التطبيق
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     
-    # 3. إضافة الأوامر
+    # إضافة الأوامر
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("approve", approve))
     application.add_handler(CommandHandler("adduser", add_user_manually))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # 4. تشغيل البوت (بشكل متزامن وبدون await)
-    logger.info("✅ Starting Telegram Bot...")
-    application.run_polling()
+    # بدء البوت مع إعادة محاولة في حال حدوث Conflict
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            logger.info("✅ Starting Telegram Bot...")
+            # حذف أي webhook موجود لتجنب التعارض
+            import requests
+            requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook")
+            application.run_polling(allowed_updates=["message", "callback_query"])
+            break
+        except Exception as e:
+            if "Conflict" in str(e):
+                logger.warning(f"⚠️ Conflict detected (attempt {attempt+1}/{max_retries}), retrying after 5s...")
+                time.sleep(5)
+                continue
+            else:
+                raise
 
 if __name__ == "__main__":
     try:
