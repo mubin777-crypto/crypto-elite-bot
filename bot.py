@@ -20,7 +20,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v7.2 - Production Ready"
+    return "✅ Elite Pro Bot v7.3 - Binance First + Zero Division Fix"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -110,7 +110,25 @@ async def save_signal_history(symbol, signal_type, price, stop_loss, take_profit
         )
         await db.commit()
 
-# -------------------- دوال جلب البيانات غير المتزامنة --------------------
+# -------------------- دوال جلب البيانات (Binance أولاً) --------------------
+async def fetch_binance_klines(session, symbol, interval='5m', limit=50):
+    try:
+        url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data and len(data) > 0:
+                    return {
+                        "prices": [float(c[4]) for c in data],
+                        "highs": [float(c[2]) for c in data],
+                        "lows": [float(c[3]) for c in data],
+                        "volumes": [float(c[5]) for c in data],
+                        "opens": [float(c[1]) for c in data]
+                    }
+    except Exception as e:
+        logger.debug(f"Binance error: {e}")
+    return None
+
 async def fetch_coinbase_klines(session, symbol, interval='5m', limit=50):
     try:
         symbol_cb = symbol.replace('USDT', '-USD')
@@ -132,36 +150,40 @@ async def fetch_coinbase_klines(session, symbol, interval='5m', limit=50):
         logger.debug(f"Coinbase error: {e}")
     return None
 
-async def fetch_binance_klines(session, symbol, interval='5m', limit=50):
-    try:
-        url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and len(data) > 0:
-                    return {
-                        "prices": [float(c[4]) for c in data],
-                        "highs": [float(c[2]) for c in data],
-                        "lows": [float(c[3]) for c in data],
-                        "volumes": [float(c[5]) for c in data],
-                        "opens": [float(c[1]) for c in data]
-                    }
-    except Exception as e:
-        logger.debug(f"Binance error: {e}")
-    return None
-
 async def fetch_klines(session, symbol, interval='5m', limit=50, retries=3):
     await asyncio.sleep(RATE_LIMIT_DELAY)
     for attempt in range(retries):
-        data = await fetch_coinbase_klines(session, symbol, interval, limit)
-        if data and len(data['prices']) > 10:
-            return data
+        # الأولوية لـ Binance (مطابقة لمنصة التداول)
         data = await fetch_binance_klines(session, symbol, interval, limit)
         if data and len(data['prices']) > 10:
             return data
+        
+        # الاحتياطي: Coinbase
+        data = await fetch_coinbase_klines(session, symbol, interval, limit)
+        if data and len(data['prices']) > 10:
+            return data
+        
         if attempt < retries - 1:
             wait_time = 2 ** attempt
             await asyncio.sleep(wait_time)
+    return None
+
+async def fetch_binance_24hr_stats(session, symbol):
+    try:
+        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "volume": float(data.get('quoteVolume', 0)),
+                    "change_24h": float(data.get('priceChangePercent', 0)),
+                    "high": float(data.get('highPrice', 0)),
+                    "low": float(data.get('lowPrice', 0)),
+                    "open": float(data.get('openPrice', 0)),
+                    "last": float(data.get('lastPrice', 0))
+                }
+    except Exception as e:
+        logger.debug(f"Binance stats error: {e}")
     return None
 
 async def fetch_coinbase_24hr_stats(session, symbol):
@@ -187,29 +209,11 @@ async def fetch_coinbase_24hr_stats(session, symbol):
         logger.debug(f"Coinbase stats error: {e}")
     return None
 
-async def fetch_binance_24hr_stats(session, symbol):
-    try:
-        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
-        async with session.get(url, timeout=8) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "volume": float(data.get('quoteVolume', 0)),
-                    "change_24h": float(data.get('priceChangePercent', 0)),
-                    "high": float(data.get('highPrice', 0)),
-                    "low": float(data.get('lowPrice', 0)),
-                    "open": float(data.get('openPrice', 0)),
-                    "last": float(data.get('lastPrice', 0))
-                }
-    except Exception as e:
-        logger.debug(f"Binance stats error: {e}")
-    return None
-
 async def fetch_24hr_stats(session, symbol):
-    stats = await fetch_coinbase_24hr_stats(session, symbol)
+    stats = await fetch_binance_24hr_stats(session, symbol)
     if stats and stats.get('volume', 0) > 1000:
         return stats
-    stats = await fetch_binance_24hr_stats(session, symbol)
+    stats = await fetch_coinbase_24hr_stats(session, symbol)
     if stats and stats.get('volume', 0) > 1000:
         return stats
     return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0, "last": 0}
@@ -441,7 +445,12 @@ async def advanced_analysis(session, symbol):
     bb = calculate_bollinger(prices_5m, 20, 2)
     atr = calculate_atr(highs_5m, lows_5m, prices_5m, 14)
     
-    change_1h = ((prices_5m[-1] - prices_5m[-6]) / prices_5m[-6]) * 100 if len(prices_5m) >= 6 else 0
+    # حساب التغير السعري مع الحماية من القسمة على صفر
+    if len(prices_5m) >= 6 and prices_5m[-6] > 0:
+        change_1h = ((prices_5m[-1] - prices_5m[-6]) / prices_5m[-6]) * 100
+    else:
+        change_1h = 0.0
+    
     if abs(change_1h) < 0.2 and not (rsi < 30 or rsi > 70):
         return None
     
@@ -578,7 +587,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.2!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.3!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -589,7 +598,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v7.2*\n"
+        f"📊 *حالة البوت v7.3*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -669,7 +678,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v7.2 ...")
+    logger.info("🚀 بدء الماسح الاحترافي v7.3 ...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -724,11 +733,11 @@ async def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # تشغيل الماسح في الخلفية قبل تشغيل البوت
+    # تشغيل الماسح في الخلفية
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
     
-    # تشغيل البوت (يحجب الـ Event Loop)
+    # تشغيل البوت (هذه الدالة تحجب الـ Event Loop)
     logger.info("✅ Telegram Bot started")
     await application.run_polling()
 
