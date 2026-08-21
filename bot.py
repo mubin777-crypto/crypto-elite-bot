@@ -5,12 +5,12 @@ import threading
 import asyncio
 import json
 import math
-import requests
+import aiohttp
+import aiosqlite
 from datetime import datetime, timedelta
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # -------------------- الإعدادات الأساسية --------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,192 +20,257 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v5.1 is RUNNING! (Enhanced Filters + Sell Signals)"
+    return "✅ Elite Pro Bot v7.1 - Production Ready"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
 
-# -------------------- دوال إدارة الملفات --------------------
-SUBSCRIBERS_FILE = "subscribers.json"
-PENDING_FILE = "pending.json"
+# -------------------- إعدادات قاعدة البيانات --------------------
+DB_PATH = "crypto_bot.db"
+RATE_LIMIT_DELAY = 0.1
+SEMAPHORE_LIMIT = 5
+COOLDOWN_MINUTES = 20
+MIN_VOLUME_USD = 200_000
+SIGNAL_SCORE_THRESHOLD = 4.5
+RISK_PER_TRADE = 0.01
+MAX_POSITION_SIZE_PCT = 2.0
 
-def load_subscribers():
-    try:
-        with open(SUBSCRIBERS_FILE, 'r') as f:
-            data = json.load(f)
-            if ADMIN_CHAT_ID and ADMIN_CHAT_ID not in data:
-                data.append(ADMIN_CHAT_ID)
-                save_subscribers(data)
-            return data
-    except:
-        default = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else []
-        save_subscribers(default)
-        return default
+# -------------------- دوال قاعدة البيانات غير المتزامنة --------------------
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('PRAGMA journal_mode=WAL')
+        await db.execute('''CREATE TABLE IF NOT EXISTS subscribers (user_id TEXT PRIMARY KEY)''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS pending (user_id TEXT PRIMARY KEY)''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS signal_cooldown (symbol TEXT PRIMARY KEY, last_signal_time TEXT)''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS signals_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            timestamp TEXT,
+            signal_type TEXT,
+            price REAL,
+            stop_loss REAL,
+            take_profit REAL,
+            result TEXT,
+            profit_loss REAL
+        )''')
+        if ADMIN_CHAT_ID:
+            await db.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (ADMIN_CHAT_ID,))
+        await db.commit()
+    logger.info("✅ قاعدة البيانات مهيأة (WAL mode)")
 
-def save_subscribers(data):
-    with open(SUBSCRIBERS_FILE, 'w') as f:
-        json.dump(data, f)
+async def get_subscribers():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM subscribers") as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
 
-def load_pending():
-    try:
-        with open(PENDING_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return []
+async def add_subscriber(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (user_id,))
+        await db.commit()
 
-def save_pending(data):
-    with open(PENDING_FILE, 'w') as f:
-        json.dump(data, f)
+async def remove_subscriber(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM subscribers WHERE user_id = ?", (user_id,))
+        await db.commit()
 
-SUBSCRIBERS = load_subscribers()
-PENDING = load_pending()
-logger.info(f"✅ المشتركين: {SUBSCRIBERS}")
+async def get_pending():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM pending") as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
 
-# -------------------- دوال جلب البيانات من Coinbase --------------------
-def fetch_coinbase_klines(symbol, interval='5m', limit=50):
+async def add_pending(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO pending (user_id) VALUES (?)", (user_id,))
+        await db.commit()
+
+async def remove_pending(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM pending WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+async def get_cooldown(symbol):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT last_signal_time FROM signal_cooldown WHERE symbol = ?", (symbol,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+async def set_cooldown(symbol, timestamp):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)", (symbol, timestamp))
+        await db.commit()
+
+async def save_signal_history(symbol, signal_type, price, stop_loss, take_profit):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO signals_history (symbol, timestamp, signal_type, price, stop_loss, take_profit) VALUES (?, ?, ?, ?, ?, ?)",
+            (symbol, datetime.now().isoformat(), signal_type, price, stop_loss, take_profit)
+        )
+        await db.commit()
+
+# -------------------- دوال جلب البيانات غير المتزامنة --------------------
+async def fetch_coinbase_klines(session, symbol, interval='5m', limit=50):
     try:
         symbol_cb = symbol.replace('USDT', '-USD')
         url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/candles"
         granularity = 300 if interval == '5m' else 900
         params = {'granularity': granularity, 'limit': limit}
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data and len(data) > 0:
-                return {
-                    "prices": [c[4] for c in data],
-                    "highs": [c[2] for c in data],
-                    "lows": [c[1] for c in data],
-                    "volumes": [c[5] for c in data],
-                    "opens": [c[3] for c in data]
-                }
+        async with session.get(url, params=params, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data and len(data) > 0:
+                    return {
+                        "prices": [c[4] for c in data],
+                        "highs": [c[2] for c in data],
+                        "lows": [c[1] for c in data],
+                        "volumes": [c[5] for c in data],
+                        "opens": [c[3] for c in data]
+                    }
     except Exception as e:
         logger.debug(f"Coinbase error: {e}")
     return None
 
-def fetch_coinbase_24hr_stats(symbol):
-    try:
-        symbol_cb = symbol.replace('USDT', '-USD')
-        url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/stats"
-        resp = requests.get(url, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            last = float(data.get('last', 0))
-            open_price = float(data.get('open', 0))
-            change_24h = ((last - open_price) / open_price * 100) if open_price != 0 else 0
-            return {
-                "volume": float(data.get('volume', 0)) * last,
-                "change_24h": change_24h,
-                "high": float(data.get('high', 0)),
-                "low": float(data.get('low', 0)),
-                "open": open_price,
-                "last": last
-            }
-    except:
-        pass
-    return None
-
-# -------------------- دوال جلب البيانات من Binance.US --------------------
-def fetch_binance_klines(symbol, interval='5m', limit=50):
+async def fetch_binance_klines(session, symbol, interval='5m', limit=50):
     try:
         url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data and len(data) > 0:
-                return {
-                    "prices": [float(c[4]) for c in data],
-                    "highs": [float(c[2]) for c in data],
-                    "lows": [float(c[3]) for c in data],
-                    "volumes": [float(c[5]) for c in data],
-                    "opens": [float(c[1]) for c in data]
-                }
-    except:
-        pass
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data and len(data) > 0:
+                    return {
+                        "prices": [float(c[4]) for c in data],
+                        "highs": [float(c[2]) for c in data],
+                        "lows": [float(c[3]) for c in data],
+                        "volumes": [float(c[5]) for c in data],
+                        "opens": [float(c[1]) for c in data]
+                    }
+    except Exception as e:
+        logger.debug(f"Binance error: {e}")
     return None
 
-def fetch_binance_24hr_stats(symbol):
-    try:
-        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
-        resp = requests.get(url, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "volume": float(data.get('quoteVolume', 0)),
-                "change_24h": float(data.get('priceChangePercent', 0)),
-                "high": float(data.get('highPrice', 0)),
-                "low": float(data.get('lowPrice', 0)),
-                "open": float(data.get('openPrice', 0)),
-                "last": float(data.get('lastPrice', 0))
-            }
-    except:
-        pass
-    return None
-
-# -------------------- دوال جلب البيانات الرئيسية --------------------
-def fetch_klines(symbol, interval='5m', limit=50, retries=2):
+async def fetch_klines(session, symbol, interval='5m', limit=50, retries=3):
+    await asyncio.sleep(RATE_LIMIT_DELAY)
     for attempt in range(retries):
-        data = fetch_coinbase_klines(symbol, interval, limit)
+        data = await fetch_coinbase_klines(session, symbol, interval, limit)
         if data and len(data['prices']) > 10:
             return data
-        data = fetch_binance_klines(symbol, interval, limit)
+        data = await fetch_binance_klines(session, symbol, interval, limit)
         if data and len(data['prices']) > 10:
             return data
         if attempt < retries - 1:
-            time.sleep(2)
-    logger.warning(f"⚠️ فشل جلب {symbol}")
+            wait_time = 2 ** attempt
+            await asyncio.sleep(wait_time)
     return None
 
-def fetch_24hr_stats(symbol):
-    stats = fetch_coinbase_24hr_stats(symbol)
-    if stats and stats.get('volume', 0) > 0:
+async def fetch_coinbase_24hr_stats(session, symbol):
+    try:
+        symbol_cb = symbol.replace('USDT', '-USD')
+        url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/stats"
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                last = float(data.get('last', 0))
+                open_price = float(data.get('open', 0))
+                change_24h = ((last - open_price) / open_price * 100) if open_price != 0 else 0
+                volume = float(data.get('volume', 0)) * last
+                return {
+                    "volume": volume,
+                    "change_24h": change_24h,
+                    "high": float(data.get('high', 0)),
+                    "low": float(data.get('low', 0)),
+                    "open": open_price,
+                    "last": last
+                }
+    except Exception as e:
+        logger.debug(f"Coinbase stats error: {e}")
+    return None
+
+async def fetch_binance_24hr_stats(session, symbol):
+    try:
+        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "volume": float(data.get('quoteVolume', 0)),
+                    "change_24h": float(data.get('priceChangePercent', 0)),
+                    "high": float(data.get('highPrice', 0)),
+                    "low": float(data.get('lowPrice', 0)),
+                    "open": float(data.get('openPrice', 0)),
+                    "last": float(data.get('lastPrice', 0))
+                }
+    except Exception as e:
+        logger.debug(f"Binance stats error: {e}")
+    return None
+
+async def fetch_24hr_stats(session, symbol):
+    stats = await fetch_coinbase_24hr_stats(session, symbol)
+    if stats and stats.get('volume', 0) > 1000:
         return stats
-    stats = fetch_binance_24hr_stats(symbol)
-    if stats and stats.get('volume', 0) > 0:
+    stats = await fetch_binance_24hr_stats(session, symbol)
+    if stats and stats.get('volume', 0) > 1000:
         return stats
     return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0, "last": 0}
 
-# -------------------- المؤشرات الفنية --------------------
+# -------------------- المؤشرات الفنية المحسنة --------------------
 def calculate_rsi(prices, period=14):
-    if len(prices) < period:
+    """
+    حساب RSI باستخدام صياغة ويلدر (Wilder's Smoothing) المعتمدة في TradingView.
+    """
+    if len(prices) < period + 1:
         return 50.0
-    gains, losses = [], []
+    
+    gains = []
+    losses = []
     for i in range(1, len(prices)):
         diff = prices[i] - prices[i-1]
-        gains.append(diff if diff > 0 else 0)
-        losses.append(abs(diff) if diff < 0 else 0)
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+        if diff >= 0:
+            gains.append(diff)
+            losses.append(0.0)
+        else:
+            gains.append(0.0)
+            losses.append(abs(diff))
+    
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    
     if avg_loss == 0:
-        return 70.0 if avg_gain > 0 else 50.0
+        return 100.0
+    
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return max(0, min(100, rsi))
-
-def calculate_ema(prices, period=12):
-    if len(prices) < period:
-        return prices[-1] if prices else 0
-    multiplier = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
-        ema = (p * multiplier) + (ema * (1 - multiplier))
-    return ema
 
 def calculate_sma(prices, period=20):
     if len(prices) < period:
         return prices[-1] if prices else 0
     return sum(prices[-period:]) / period
 
-def calculate_macd(prices):
-    if len(prices) < 26:
-        return {"macd": 0, "signal": 0, "histogram": 0}
-    ema12 = calculate_ema(prices, 12)
-    ema26 = calculate_ema(prices, 26)
-    macd = ema12 - ema26
-    signal = calculate_ema([macd] * 9, 9) if len([macd] * 9) >= 9 else macd
-    histogram = macd - signal
-    return {"macd": macd, "signal": signal, "histogram": histogram}
+def calculate_ema_series(prices, period):
+    if len(prices) < period:
+        return [prices[-1]] * len(prices) if prices else []
+    multiplier = 2 / (period + 1)
+    ema_series = [prices[0]]
+    for price in prices[1:]:
+        ema = (price - ema_series[-1]) * multiplier + ema_series[-1]
+        ema_series.append(ema)
+    return ema_series
+
+def calculate_macd(prices, short=12, long=26, signal=9):
+    if len(prices) < long:
+        return {"histogram": 0}
+    ema_short = calculate_ema_series(prices, short)
+    ema_long = calculate_ema_series(prices, long)
+    macd_line = [s - l for s, l in zip(ema_short, ema_long)]
+    signal_line = calculate_ema_series(macd_line, signal)
+    histogram = macd_line[-1] - signal_line[-1]
+    return {"histogram": histogram}
 
 def calculate_bollinger(prices, period=20, std=2):
     if len(prices) < period:
@@ -228,12 +293,27 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# -------------------- دالة تقييم الإشارة المحسنة --------------------
-def evaluate_signal(rsi, volume_multiplier, liquidity_usd, price_near_upper_bollinger, change_1h, price_above_ema):
-    """
-    تقييم الإشارة بناءً على معايير متعددة، تعيد نقاط وتصنيف وأسباب.
-    """
-    # فلترة RSI الصارمة
+# -------------------- منطق تحديد الإشارة المتسق --------------------
+def determine_signal_type(rsi, change_1h, score):
+    if rsi > 75:
+        return "🔴 **بيع / جني أرباح** (تشبع شرائي مفرط)"
+    elif rsi > 70 and change_1h > 0:
+        return "🔴 **بيع / جني أرباح** (اقتراب من القمة)"
+    elif rsi < 25:
+        return "🟢 **شراء قوي** (تشبع بيعي مفرط - فرصة ارتداد)"
+    elif rsi < 30 and change_1h < 0:
+        return "🟢 **شراء** (منطقة تشبع بيعي)"
+    elif 45 <= rsi <= 65:
+        if score >= 6.0 and change_1h > 0:
+            return "🟢 **شراء قوي** (زخم إيجابي في نطاق محايد)"
+        elif score >= 6.0 and change_1h < 0:
+            return "🔴 **بيع** (زخم سلبي في نطاق محايد)"
+        else:
+            return "🟡 **مراقبة** (زخم متوازن)"
+    else:
+        return "⚪ **حيادي** (لا توجد إشارة واضحة)"
+
+def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger, change_1h, price_above_ema, trend_1h=None, trend_4h=None):
     if rsi > 75:
         return {
             "status": "مرفوض",
@@ -241,14 +321,10 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_usd, price_near_upper_boll
             "signal": "🔴 تجنب الدخول (تشبع شرائي)",
             "reasons": ["RSI مرتفع جداً (> 75)"]
         }
-    if rsi < 25 and change_1h < -0.5:
-        # قد تكون فرصة شراء من القاع، لكن نحتاج تأكيد
-        pass
 
     score = 0.0
     reasons = []
 
-    # 1. تقييم RSI (0-3 نقاط)
     if 40 <= rsi <= 60:
         score += 3.0
         reasons.append("زخم RSI في النطاق الآمن")
@@ -262,18 +338,16 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_usd, price_near_upper_boll
         score += 0.5
         reasons.append("زخم ضعيف")
 
-    # 2. تقييم الحجم (0-3 نقاط) - يعتمد على متوسط 20 شمعة
-    if volume_multiplier >= 2.0:
+    if volume_ratio >= 2.0:
         score += 3.0
-        reasons.append(f"🚀 انفجار حجم ({volume_multiplier:.1f}x)")
-    elif volume_multiplier >= 1.3:
+        reasons.append(f"🚀 انفجار حجم ({volume_ratio:.1f}x)")
+    elif volume_ratio >= 1.3:
         score += 2.0
-        reasons.append(f"نشاط حجم جيد ({volume_multiplier:.1f}x)")
+        reasons.append(f"نشاط حجم جيد ({volume_ratio:.1f}x)")
     else:
         score += 0.5
         reasons.append("حجم ضعيف")
 
-    # 3. تقييم السيولة (0-2 نقطة) - بناءً على قيمة التداول بالدولار
     if liquidity_usd > 1_000_000:
         score += 2.0
         reasons.append("سيولة عالية جداً (> $1M)")
@@ -284,7 +358,6 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_usd, price_near_upper_boll
         score += 0.5
         reasons.append("سيولة منخفضة")
 
-    # 4. موقع السعر من البولينجر (0-2 نقطة)
     if not price_near_upper_bollinger:
         score += 2.0
         reasons.append("مساحة للصعود (بعيد عن الحد العلوي)")
@@ -292,34 +365,31 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_usd, price_near_upper_boll
         score += 0.5
         reasons.append("السعر قريب من الحد العلوي")
 
-    # 5. الزخم السعري (0-1 نقطة)
     if change_1h > 1.5:
         score += 1.0
         reasons.append(f"زخم سعري قوي ({change_1h:.1f}%)")
     elif change_1h > 0.5:
         score += 0.5
         reasons.append(f"زخم سعري معتدل ({change_1h:.1f}%)")
+    elif change_1h < -1.5:
+        reasons.append(f"انهيار سعري ({change_1h:.1f}%)")
 
-    # 6. السعر فوق EMA (0-1 نقطة) - تأكيد الاتجاه الصاعد
     if price_above_ema:
         score += 1.0
         reasons.append("السعر فوق EMA12 (اتجاه صاعد)")
     else:
         reasons.append("السعر تحت EMA12 (اتجاه هابط محتمل)")
 
-    final_score = round(score, 1)
+    # إضافة اتجاه 1h و 4h للتأكيد
+    if trend_1h:
+        score += 0.5
+        reasons.append("اتجاه 1h صاعد")
+    if trend_4h:
+        score += 0.5
+        reasons.append("اتجاه 4h صاعد")
 
-    # تصنيف الإشارة (شراء / بيع)
-    if final_score >= 6.0 and change_1h > 0:
-        signal_label = "🟢 شراء قوي"
-    elif final_score >= 4.5 and change_1h > 0:
-        signal_label = "🟡 شراء معتدل / مراقبة"
-    elif final_score >= 6.0 and change_1h < 0:
-        signal_label = "🔴 بيع / جني أرباح"
-    elif final_score >= 4.5 and change_1h < 0:
-        signal_label = "🟠 بيع معتدل / مراقبة"
-    else:
-        signal_label = "⚪ حيادي / تجنب"
+    final_score = round(score, 1)
+    signal_label = determine_signal_type(rsi, change_1h, final_score)
 
     return {
         "status": "مقبول",
@@ -328,7 +398,7 @@ def evaluate_signal(rsi, volume_multiplier, liquidity_usd, price_near_upper_boll
         "reasons": reasons
     }
 
-# -------------------- قائمة العملات (تم إزالة BSV و RUNE) --------------------
+# -------------------- قائمة العملات --------------------
 BASE_WATCH_LIST = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
     "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -344,19 +414,12 @@ BASE_WATCH_LIST = [
 ]
 dynamic_watch_list = []
 
-COOLDOWN_MINUTES = 20
-MIN_VOLUME_USD = 200_000
-MIN_CHANGE_1H = 0.2
-MAX_POSITION_SIZE = 0.02
-RISK_PER_TRADE = 0.01
-SIGNAL_SCORE_THRESHOLD = 4.5  # عتبة جديدة
-last_signal_time = {}
-
-def advanced_analysis(symbol):
-    """تحليل متكامل مع تقييم محسن للإشارة"""
-    data_5m = fetch_klines(symbol, '5m', 100)
-    data_1h = fetch_klines(symbol, '1h', 30)
-    data_4h = fetch_klines(symbol, '4h', 20)
+# -------------------- التحليل المتقدم --------------------
+async def advanced_analysis(session, symbol):
+    """تحليل متقدم مع 5m للزخم و 1h/4h لتأكيد الاتجاه"""
+    data_5m = await fetch_klines(session, symbol, '5m', 100)
+    data_1h = await fetch_klines(session, symbol, '1h', 30)
+    data_4h = await fetch_klines(session, symbol, '4h', 20)
     
     if not data_5m or not data_1h or not data_4h:
         return None
@@ -366,7 +429,11 @@ def advanced_analysis(symbol):
     lows_5m = data_5m['lows']
     volumes_5m = data_5m['volumes']
     
-    stats = fetch_24hr_stats(symbol)
+    # الاتجاه العام من 1h و 4h
+    trend_1h = data_1h['prices'][-1] > calculate_sma(data_1h['prices'], 20) if len(data_1h['prices']) >= 20 else False
+    trend_4h = data_4h['prices'][-1] > calculate_sma(data_4h['prices'], 20) if len(data_4h['prices']) >= 20 else False
+    
+    stats = await fetch_24hr_stats(session, symbol)
     if stats.get('volume', 0) < MIN_VOLUME_USD:
         return None
     
@@ -375,57 +442,45 @@ def advanced_analysis(symbol):
     if rsi >= 99 or rsi <= 1:
         return None
     
-    ema12 = calculate_ema(prices_5m, 12)
-    ema26 = calculate_ema(prices_5m, 26)
+    ema12 = calculate_ema_series(prices_5m, 12)[-1]
     macd = calculate_macd(prices_5m)
     bb = calculate_bollinger(prices_5m, 20, 2)
     atr = calculate_atr(highs_5m, lows_5m, prices_5m, 14)
     
     change_1h = ((prices_5m[-1] - prices_5m[-6]) / prices_5m[-6]) * 100 if len(prices_5m) >= 6 else 0
-    if abs(change_1h) < MIN_CHANGE_1H and not (rsi < 30 or rsi > 70):
+    if abs(change_1h) < 0.2 and not (rsi < 30 or rsi > 70):
         return None
     
-    # حساب الحجم النسبي باستخدام متوسط 20 شمعة (أكثر دقة)
-    avg_volume_recent = sum(volumes_5m[-20:]) / 20 if len(volumes_5m) >= 20 else 1
+    avg_volume_12 = sum(volumes_5m[-12:]) / 12 if len(volumes_5m) >= 12 else 1
     current_volume = volumes_5m[-1] if volumes_5m else 0
-    volume_ratio = current_volume / avg_volume_recent if avg_volume_recent > 0 else 0
+    volume_ratio = current_volume / avg_volume_12 if avg_volume_12 > 0 else 0
     
-    # تحديد موقع السعر من البولينجر
     price_near_upper = current_price > bb['upper'] * 0.98 if bb['upper'] > 0 else False
-    
-    # السعر فوق EMA12؟
     price_above_ema = current_price > ema12
-    
-    # السيولة بالدولار
     liquidity_usd = stats.get('volume', 0)
     
-    # استدعاء دالة التقييم المحسنة
-    eval_result = evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper, change_1h, price_above_ema)
+    eval_result = evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper, change_1h, price_above_ema, trend_1h, trend_4h)
     
-    # إذا كانت الإشارة مرفوضة أو ضعيفة، نلغيها
     if eval_result['status'] == 'مرفوض' or eval_result['score'] < SIGNAL_SCORE_THRESHOLD:
         return None
     
-    # حساب إدارة المخاطر الديناميكية
     min_stop_pct = 0.01
     atr_stop = atr * 2 if atr > 0 else current_price * 0.015
     stop_loss = current_price - max(atr_stop, current_price * min_stop_pct)
     take_profit = current_price + max(atr_stop * 2, current_price * 0.02)
     
-    # معالجة الأسعار الصغيرة
     price_precision = 8 if symbol in ["PEPEUSDT", "SHIBUSDT", "BONKUSDT"] else 6
     stop_loss = round(stop_loss, price_precision)
     take_profit = round(take_profit, price_precision)
     
-    position_size = min(MAX_POSITION_SIZE, RISK_PER_TRADE * 100 / (abs(current_price - stop_loss) / current_price * 100))
-    position_size = round(position_size, 2)
+    position_size = calculate_position_size(current_price, stop_loss)
+    
+    await save_signal_history(symbol, eval_result['signal'], current_price, stop_loss, take_profit)
     
     return {
         "symbol": symbol,
         "price": round(current_price, price_precision),
         "rsi": round(rsi, 1),
-        "ema12": round(ema12, price_precision),
-        "ema26": round(ema26, price_precision),
         "macd": {"histogram": round(macd['histogram'], 6)},
         "bb": {
             "upper": round(bb['upper'], price_precision),
@@ -442,26 +497,154 @@ def advanced_analysis(symbol):
         "volume_24h": stats.get('volume', 0)
     }
 
-# -------------------- دوال الإرسال والمعالجة --------------------
-def send_to_all_subscribers(message):
-    if not TELEGRAM_TOKEN:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for chat_id in SUBSCRIBERS:
-        try:
-            requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=5)
-        except Exception as e:
-            logger.error(f"فشل الإرسال إلى {chat_id}: {e}")
+def calculate_position_size(current_price, stop_loss):
+    if current_price <= 0 or stop_loss <= 0 or current_price == stop_loss:
+        return 0.5
+    stop_loss_pct = abs(current_price - stop_loss) / current_price
+    if stop_loss_pct == 0:
+        return 0.5
+    position_size = (RISK_PER_TRADE / stop_loss_pct) * 100
+    return round(min(MAX_POSITION_SIZE_PCT, max(0.1, position_size)), 2)
 
-def process_single_symbol(symbol):
+# -------------------- دوال الإرسال غير المتزامنة --------------------
+async def send_message_async(session, chat_id, message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    for attempt in range(3):
+        try:
+            async with session.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=5) as resp:
+                if resp.status == 200:
+                    return
+                elif resp.status == 429:
+                    data = await resp.json()
+                    retry_after = data.get('retry_after', 5)
+                    await asyncio.sleep(retry_after)
+                else:
+                    logger.warning(f"Telegram error {resp.status} for {chat_id}")
+        except Exception as e:
+            logger.error(f"Error sending to {chat_id}: {e}")
+            await asyncio.sleep(2 ** attempt)
+
+async def send_to_all_subscribers_async(session, message):
+    subscribers = await get_subscribers()
+    if not subscribers:
+        return
+    tasks = [send_message_async(session, chat_id, message) for chat_id in subscribers]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    logger.info(f"✅ تم إرسال الرسالة لـ {len(subscribers)} مشترك")
+
+# -------------------- أوامر التليجرام --------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    subscribers = await get_subscribers()
+    pending = await get_pending()
+    if user_id in subscribers:
+        await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
+        return
+    if user_id in pending:
+        await update.message.reply_text("⏳ طلبك قيد الانتظار.")
+        return
+    await add_pending(user_id)
+    await update.message.reply_text("✅ تم استلام طلب الاشتراك.")
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📩 طلب اشتراك جديد: `{user_id}`\n/approve {user_id}", parse_mode="Markdown")
+
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ فقط للمالك.")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: /approve USER_ID")
+        return
+    user_id = context.args[0].strip()
+    pending = await get_pending()
+    if user_id in pending:
+        await remove_pending(user_id)
+        await add_subscriber(user_id)
+        await update.message.reply_text(f"✅ تمت الموافقة على `{user_id}`.")
+        try:
+            await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك!")
+        except:
+            pass
+    else:
+        await update.message.reply_text("❌ غير موجود في قائمة الانتظار.")
+
+async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: /adduser USER_ID")
+        return
+    user_id = context.args[0].strip()
+    if not user_id.isdigit():
+        await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً فقط.")
+        return
+    subscribers = await get_subscribers()
+    if user_id in subscribers:
+        await update.message.reply_text(f"ℹ️ المستخدم `{user_id}` مشترك بالفعل.", parse_mode="Markdown")
+        return
+    await add_subscriber(user_id)
     try:
-        analysis = advanced_analysis(symbol)
-        if not analysis:
-            return None
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.1!*", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
+    except Exception as e:
+        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
+    logger.info(f"➕ المالك أضاف مستخدم: {user_id}")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    subscribers = await get_subscribers()
+    pending = await get_pending()
+    all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
+    await update.message.reply_text(
+        f"📊 *حالة البوت v7.1*\n"
+        f"📌 العملات: {len(all_syms)}\n"
+        f"👥 المشتركين: {len(subscribers)}\n"
+        f"⏳ في الانتظار: {len(pending)}\n"
+        f"💧 الحد الأدنى للسيولة: ${MIN_VOLUME_USD:,}\n"
+        f"📊 نظام التقييم: RSI (Wilder's) + MACD + بولينجر + السيولة + الاتجاه (1h/4h)\n"
+        f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%، حجم صفقة محسوب)",
+        parse_mode="Markdown"
+    )
+
+async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ /signal SYMBOL")
+        return
+    sym = context.args[0].upper()
+    async with aiohttp.ClientSession() as session:
+        analysis = await advanced_analysis(session, sym)
+    if not analysis:
+        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}")
+        return
+    volume_str = f"${analysis['volume_24h']:,.0f}"
+    msg = (
+        f"📡 *تحليل فوري لـ {sym}*\n"
+        f"🔹 النقاط: {analysis['score']}/10\n"
+        f"🔹 الإشارة: {analysis['signal']}\n"
+        f"💰 السعر: `{analysis['price']}`\n"
+        f"📊 RSI: `{analysis['rsi']}`\n"
+        f"📈 MACD: `{analysis['macd']['histogram']}`\n"
+        f"📊 بولينجر: الأعلى `{analysis['bb']['upper']}` | الأدنى `{analysis['bb']['lower']}`\n"
+        f"📈 تغير ساعة: `{analysis['change_1h']}%`\n"
+        f"📊 الحجم النسبي: `{analysis['volume_ratio']}x`\n"
+        f"💧 السيولة 24h: `{volume_str}`\n"
+        f"📝 الأسباب: {', '.join(analysis['reasons'])}\n\n"
+        f"🛡️ وقف الخسارة: `{analysis['stop_loss']}`\n"
+        f"🎯 جني الأرباح: `{analysis['take_profit']}`\n"
+        f"📊 حجم الصفقة: `{analysis['position_size']}%` من المحفظة"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# -------------------- حلقة المسح غير المتزامنة --------------------
+async def process_single_symbol(session, symbol, semaphore, send_session):
+    async with semaphore:
+        cooldown_time = await get_cooldown(symbol)
+        if cooldown_time:
+            last_time = datetime.fromisoformat(cooldown_time)
+            if (datetime.now() - last_time) < timedelta(minutes=COOLDOWN_MINUTES):
+                return None
         
-        now = datetime.now()
-        last = last_signal_time.get(symbol)
-        if last and (now - last) < timedelta(minutes=COOLDOWN_MINUTES):
+        analysis = await advanced_analysis(session, symbol)
+        if not analysis:
             return None
         
         volume_str = f"${analysis['volume_24h']:,.0f}"
@@ -486,180 +669,60 @@ def process_single_symbol(symbol):
             f"• حجم الصفقة: `{analysis['position_size']}%` من المحفظة"
         )
         
-        send_to_all_subscribers(msg)
-        last_signal_time[symbol] = now
+        await send_to_all_subscribers_async(send_session, msg)
+        await set_cooldown(symbol, datetime.now().isoformat())
         logger.info(f"✅ إشارة {symbol} أُرسلت")
-        return symbol
-    except Exception as e:
-        logger.error(f"خطأ {symbol}: {e}")
-    return None
+        return analysis
 
-# -------------------- حلقة المسح --------------------
-def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v5.1 ...")
-    while True:
-        global dynamic_watch_list
-        try:
-            url = "https://api.dexscreener.com/latest/dex/search?q=?"
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                pairs = resp.json().get('pairs', [])
-                trending = []
-                for p in pairs[:20]:
-                    if p.get('quoteToken', {}).get('symbol') == 'USDT' and float(p.get('volume', {}).get('h24', 0)) > 500000:
-                        base = p.get('baseToken', {}).get('symbol', '')
-                        if base and len(base) < 10:
-                            trending.append(base.upper() + 'USDT')
-                if trending:
+async def market_scanner_loop():
+    logger.info("🚀 بدء الماسح الاحترافي v7.1 (Async + Rate Limiting) ...")
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+    
+    async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession() as send_session:
+            while True:
+                global dynamic_watch_list
+                try:
+                    # جلب العملات الساخنة (محاكاة - سيتم تحسينها لاحقاً)
+                    trending = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
                     valid_trending = []
-                    for sym in trending[:10]:
-                        test_data = fetch_klines(sym, '5m', 5)
+                    for sym in trending[:5]:
+                        test_data = await fetch_klines(session, sym, '5m', 5)
                         if test_data:
                             valid_trending.append(sym)
                     if valid_trending:
                         dynamic_watch_list = valid_trending
                         logger.info(f"🔥 {len(dynamic_watch_list)} عملة ساخنة مدعومة")
-        except:
-            pass
-        
-        all_symbols = list(set(BASE_WATCH_LIST + dynamic_watch_list))
-        logger.info(f"🔄 فحص {len(all_symbols)} عملة ...")
-        
-        with ThreadPoolExecutor(max_workers=15) as executor:
-            futures = {executor.submit(process_single_symbol, sym): sym for sym in all_symbols}
-            for future in as_completed(futures):
-                try:
-                    future.result(timeout=5)
-                except:
-                    pass
-        
-        logger.info("✅ انتهت الدورة. انتظار 5 دقائق...")
-        time.sleep(300)
-
-# -------------------- أوامر التليجرام --------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    if user_id in SUBSCRIBERS:
-        await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
-        return
-    if user_id in PENDING:
-        await update.message.reply_text("⏳ طلبك قيد الانتظار.")
-        return
-    PENDING.append(user_id)
-    save_pending(PENDING)
-    await update.message.reply_text("✅ تم استلام طلب الاشتراك.")
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📩 طلب اشتراك جديد: `{user_id}`\n/approve {user_id}", parse_mode="Markdown")
-
-async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ فقط للمالك.")
-        return
-    if not context.args:
-        await update.message.reply_text("⚠️ استخدم: /approve USER_ID")
-        return
-    user_id = context.args[0].strip()
-    if user_id in PENDING:
-        PENDING.remove(user_id)
-        save_pending(PENDING)
-        if user_id not in SUBSCRIBERS:
-            SUBSCRIBERS.append(user_id)
-            save_subscribers(SUBSCRIBERS)
-            await update.message.reply_text(f"✅ تمت الموافقة على `{user_id}`.")
-            try:
-                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك!")
-            except:
-                pass
-    else:
-        await update.message.reply_text("❌ غير موجود في قائمة الانتظار.")
-
-async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
-        return
-    if not context.args:
-        await update.message.reply_text("⚠️ استخدم: /adduser USER_ID")
-        return
-    user_id = context.args[0].strip()
-    if not user_id.isdigit():
-        await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً فقط.")
-        return
-    if user_id in SUBSCRIBERS:
-        await update.message.reply_text(f"ℹ️ المستخدم `{user_id}` مشترك بالفعل.", parse_mode="Markdown")
-        return
-    SUBSCRIBERS.append(user_id)
-    save_subscribers(SUBSCRIBERS)
-    try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v5.1!*", parse_mode="Markdown")
-        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
-    except Exception as e:
-        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
-    logger.info(f"➕ المالك أضاف مستخدم: {user_id}")
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
-    await update.message.reply_text(
-        f"📊 *حالة البوت v5.1*\n"
-        f"📌 العملات: {len(all_syms)}\n"
-        f"👥 المشتركين: {len(SUBSCRIBERS)}\n"
-        f"⏳ في الانتظار: {len(PENDING)}\n"
-        f"💧 الحد الأدنى للسيولة: $200K\n"
-        f"📊 نظام التقييم: RSI + الحجم + البولينجر + السيولة + الاتجاه\n"
-        f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%)",
-        parse_mode="Markdown"
-    )
-
-async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ /signal SYMBOL")
-        return
-    sym = context.args[0].upper()
-    analysis = advanced_analysis(sym)
-    if not analysis:
-        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}")
-        return
-    volume_str = f"${analysis['volume_24h']:,.0f}"
-    msg = (
-        f"📡 *تحليل فوري لـ {sym}*\n"
-        f"🔹 النقاط: {analysis['score']}/10\n"
-        f"🔹 الإشارة: {analysis['signal']}\n"
-        f"💰 السعر: `{analysis['price']}`\n"
-        f"📊 RSI: `{analysis['rsi']}`\n"
-        f"📈 MACD: `{analysis['macd']['histogram']}`\n"
-        f"📊 بولينجر: الأعلى `{analysis['bb']['upper']}` | الأدنى `{analysis['bb']['lower']}`\n"
-        f"📈 تغير ساعة: `{analysis['change_1h']}%`\n"
-        f"📊 الحجم النسبي: `{analysis['volume_ratio']}x`\n"
-        f"💧 السيولة 24h: `{volume_str}`\n"
-        f"📝 الأسباب: {', '.join(analysis['reasons'])}\n\n"
-        f"🛡️ وقف الخسارة: `{analysis['stop_loss']}`\n"
-        f"🎯 جني الأرباح: `{analysis['take_profit']}`\n"
-        f"📊 حجم الصفقة: `{analysis['position_size']}%` من المحفظة"
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+                except Exception as e:
+                    logger.error(f"خطأ في جلب العملات الساخنة: {e}")
+                
+                all_symbols = list(set(BASE_WATCH_LIST + dynamic_watch_list))
+                logger.info(f"🔄 فحص {len(all_symbols)} عملة ...")
+                
+                tasks = [
+                    process_single_symbol(session, symbol, semaphore, send_session)
+                    for symbol in all_symbols
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"خطأ في المعالجة: {result}")
+                
+                logger.info("✅ انتهت الدورة. انتظار 5 دقائق...")
+                await asyncio.sleep(300)
 
 # -------------------- تشغيل البوت --------------------
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
-def self_pinger():
-    host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
-    if not host:
-        return
-    url = f"https://{host}"
-    time.sleep(300)
-    while True:
-        try:
-            requests.get(url, timeout=3)
-        except:
-            pass
-        time.sleep(600)
-
-def run_telegram_bot():
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+async def main():
+    await init_db()
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("✅ Flask Server Started")
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -668,19 +731,20 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    try:
-        loop.run_until_complete(application.run_polling())
-    except RuntimeError as e:
-        if "Event loop is closed" in str(e):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(application.run_polling())
-        else:
-            raise
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    logger.info("✅ Telegram Bot started")
+    
+    asyncio.create_task(market_scanner_loop())
+    
+    # إبقاء التطبيق حياً
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
-    threading.Thread(target=self_pinger, daemon=True).start()
-    threading.Thread(target=market_scanner_loop, daemon=True).start()
-    time.sleep(5)
-    run_telegram_bot()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 تم إيقاف البوت يدوياً (KeyboardInterrupt)")
+    except Exception as e:
+        logger.error(f"⚠️ توقف غير متوقع: {e}")
