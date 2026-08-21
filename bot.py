@@ -20,7 +20,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v7.5 - Stable with Updater"
+    return "✅ Elite Pro Bot v7.6 - Conflict Resolved"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -577,7 +577,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.5!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.6!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -588,7 +588,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v7.5*\n"
+        f"📊 *حالة البوت v7.6*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -668,7 +668,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v7.5 ...")
+    logger.info("🚀 بدء الماسح الاحترافي v7.6 ...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -716,7 +716,6 @@ async def main():
     flask_thread.start()
     logger.info("✅ Flask Server Started")
     
-    # بناء التطبيق وإضافة المعالجات
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("approve", approve))
@@ -724,18 +723,13 @@ async def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # تهيئة البوت وبدء الاستماع للأوامر باستخدام Updater
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    logger.info("✅ Telegram Bot started (Updater)")
-    
-    # تشغيل الماسح كـ Task خلفي
+    # تشغيل الماسح في الخلفية
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
     
-    # إبقاء التطبيق حياً
-    await asyncio.Event().wait()
+    # تشغيل البوت باستخدام run_polling (الطريقة الموصى بها لمنع التعارض)
+    logger.info("✅ Starting Telegram Bot...")
+    await application.run_polling()
 
 if __name__ == "__main__":
     try:
