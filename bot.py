@@ -20,7 +20,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Elite Pro Bot v7.8 - High Quality Signals"
+    return "✅ Elite Pro Bot v7.9 - Final Stable (post_init)"
 
 # -------------------- المتغيرات البيئية --------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -30,9 +30,9 @@ ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
 DB_PATH = "crypto_bot.db"
 RATE_LIMIT_DELAY = 0.1
 SEMAPHORE_LIMIT = 5
-COOLDOWN_MINUTES = 30                      # ↑ زيادة من 20
-MIN_VOLUME_USD = 300_000                   # ↑ زيادة من 200K
-SIGNAL_SCORE_THRESHOLD = 5.5               # ↑ زيادة من 4.5
+COOLDOWN_MINUTES = 30
+MIN_VOLUME_USD = 300_000
+SIGNAL_SCORE_THRESHOLD = 5.5
 RISK_PER_TRADE = 0.01
 MAX_POSITION_SIZE_PCT = 2.0
 
@@ -285,7 +285,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# -------------------- منطق تحديد الإشارة المعدل (قوة أعلى) --------------------
+# -------------------- منطق تحديد الإشارة (قوة عالية) --------------------
 def determine_signal_type(rsi, change_1h, score):
     if rsi > 75:
         return "🔴 **بيع / جني أرباح** (تشبع شرائي مفرط)"
@@ -295,9 +295,8 @@ def determine_signal_type(rsi, change_1h, score):
         return "🟢 **شراء قوي** (تشبع بيعي مفرط - فرصة ارتداد)"
     elif rsi < 30 and change_1h < 0:
         return "🟢 **شراء** (منطقة تشبع بيعي)"
-    # نطاق RSI الآمن مضيق (45-55 بدلاً من 40-60)
     elif 45 <= rsi <= 55:
-        if score >= 7.0 and change_1h > 0:  # رفع العتبة من 6.0 إلى 7.0
+        if score >= 7.0 and change_1h > 0:
             return "🟢 **شراء قوي** (زخم إيجابي في نطاق محايد)"
         elif score >= 7.0 and change_1h < 0:
             return "🔴 **بيع** (زخم سلبي في نطاق محايد)"
@@ -320,9 +319,8 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
     score = 0.0
     reasons = []
 
-    # 1. RSI - نقاط أكثر صرامة
     if 45 <= rsi <= 55:
-        score += 3.5  # زيادة من 3.0
+        score += 3.5
         reasons.append("زخم RSI في النطاق الآمن المثالي")
     elif 40 <= rsi < 45:
         score += 2.5
@@ -337,7 +335,6 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
         score += 0.5
         reasons.append("زخم ضعيف")
 
-    # 2. الحجم - عتبات أعلى
     if volume_ratio >= 2.5:
         score += 3.0
         reasons.append(f"🚀 انفجار حجم كبير ({volume_ratio:.1f}x)")
@@ -351,7 +348,6 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
         score += 0.3
         reasons.append("حجم ضعيف")
 
-    # 3. السيولة - عتبات أعلى
     if liquidity_usd > 2_000_000:
         score += 2.0
         reasons.append("سيولة عالية جداً (> $2M)")
@@ -365,7 +361,6 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
         score += 0.2
         reasons.append("سيولة منخفضة")
 
-    # 4. البولينجر
     if not price_near_upper_bollinger:
         score += 2.0
         reasons.append("مساحة للصعود (بعيد عن الحد العلوي)")
@@ -373,7 +368,6 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
         score += 0.5
         reasons.append("السعر قريب من الحد العلوي")
 
-    # 5. الزخم السعري
     if change_1h > 1.5:
         score += 1.0
         reasons.append(f"زخم سعري قوي ({change_1h:.1f}%)")
@@ -383,14 +377,12 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
     elif change_1h < -1.5:
         reasons.append(f"انهيار سعري ({change_1h:.1f}%)")
 
-    # 6. الاتجاه (EMA)
     if price_above_ema:
         score += 1.0
         reasons.append("السعر فوق EMA12 (اتجاه صاعد)")
     else:
         reasons.append("السعر تحت EMA12 (اتجاه هابط محتمل)")
 
-    # 7. اتجاهات 1h و 4h
     if trend_1h:
         score += 0.5
         reasons.append("اتجاه 1h صاعد")
@@ -596,7 +588,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.8!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v7.9!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -607,7 +599,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v7.8 - جودة عالية*\n"
+        f"📊 *حالة البوت v7.9 - جودة عالية*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -688,7 +680,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v7.8 (جودة عالية)...")
+    logger.info("🚀 بدء الماسح الاحترافي v7.9 (جودة عالية)...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -724,36 +716,42 @@ async def market_scanner_loop():
                 logger.info("✅ انتهت الدورة. انتظار 5 دقائق...")
                 await asyncio.sleep(300)
 
-# -------------------- تشغيل البوت --------------------
+# -------------------- تشغيل البوت (باستخدام post_init) --------------------
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
-async def main():
+# دالة مخصصة لتشغيل المهام غير المتزامنة عند بدء البوت
+async def post_init(application: Application):
     await init_db()
     
+    # تشغيل الماسح في الخلفية
+    asyncio.create_task(market_scanner_loop())
+    logger.info("✅ Scanner started as background task")
+
+def main():
+    # 1. تشغيل سيرفر Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask Server Started")
     
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # 2. بناء تطبيق التليجرام وربط دالة post_init
+    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    
+    # 3. إضافة الأوامر
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("approve", approve))
     application.add_handler(CommandHandler("adduser", add_user_manually))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # تشغيل الماسح في الخلفية
-    asyncio.create_task(market_scanner_loop())
-    logger.info("✅ Scanner started as background task")
-    
-    # تشغيل البوت باستخدام run_polling (الطريقة الصحيحة)
+    # 4. تشغيل البوت (بشكل متزامن وبدون await)
     logger.info("✅ Starting Telegram Bot...")
-    await application.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البوت يدوياً (KeyboardInterrupt)")
     except Exception as e:
