@@ -585,7 +585,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.3!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.4!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -596,7 +596,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v8.3 - Webhook نهائي*\n"
+        f"📊 *حالة البوت v8.4*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
@@ -677,7 +677,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v8.3 (جودة عالية)...")
+    logger.info("🚀 بدء الماسح الاحترافي v8.4...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -733,7 +733,7 @@ async def webhook():
 @app.route('/')
 @app.route('/healthcheck')
 def home():
-    return "✅ Elite Pro Bot v8.3 - Running with Webhook"
+    return "✅ Elite Pro Bot v8.4 - Running with Webhook"
 
 # -------------------- تشغيل البوت (باستخدام Webhook) --------------------
 def run_flask():
@@ -744,13 +744,16 @@ async def setup_webhook(application):
     """تعيين Webhook على تليجرام"""
     webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
     logger.info(f"🔗 Setting webhook to: {webhook_url}")
-    await application.bot.set_webhook(url=webhook_url)
-    logger.info("✅ Webhook set successfully")
-
-async def delete_webhook(application):
-    """حذف Webhook عند إيقاف البوت"""
+    
+    # حذف أي webhook قديم أولاً
     await application.bot.delete_webhook()
-    logger.info("✅ Webhook deleted")
+    
+    # تعيين webhook الجديد
+    result = await application.bot.set_webhook(url=webhook_url)
+    if result:
+        logger.info("✅ Webhook set successfully")
+    else:
+        logger.error("❌ Failed to set webhook")
 
 async def post_init(application):
     await init_db()
@@ -761,9 +764,6 @@ async def post_init(application):
     # تشغيل الماسح في الخلفية
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
-
-async def shutdown(application):
-    await delete_webhook(application)
 
 def main():
     global application
@@ -791,7 +791,6 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("🛑 Shutting down...")
-        asyncio.run(shutdown(application))
 
 if __name__ == "__main__":
     try:
