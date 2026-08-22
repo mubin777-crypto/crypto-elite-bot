@@ -24,15 +24,17 @@ ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
 RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "localhost")
 PORT = int(os.environ.get("PORT", 10000))
 
-# -------------------- إعدادات القوة العالية --------------------
+# -------------------- إعدادات القوة المتوازنة (v9.0) --------------------
 DB_PATH = "crypto_bot.db"
 RATE_LIMIT_DELAY = 0.1
 SEMAPHORE_LIMIT = 5
-COOLDOWN_MINUTES = 30
+COOLDOWN_MINUTES = 45                     # زيادة من 30 إلى 45 دقيقة
 MIN_VOLUME_USD = 300_000
-SIGNAL_SCORE_THRESHOLD = 5.5
+SIGNAL_SCORE_THRESHOLD = 4.0               # خفض من 5.5 إلى 4.0
 RISK_PER_TRADE = 0.01
 MAX_POSITION_SIZE_PCT = 2.0
+MIN_CHANGE_1H = 0.3                        # شرط الزخم الأدنى
+RSI_PERIOD = 6                             # تغيير من 14 إلى 6 لمطابقة المنصات
 
 # -------------------- دوال قاعدة البيانات غير المتزامنة --------------------
 async def init_db():
@@ -213,7 +215,8 @@ async def fetch_24hr_stats(session, symbol):
     return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0, "last": 0}
 
 # -------------------- المؤشرات الفنية المحسنة --------------------
-def calculate_rsi(prices, period=14):
+def calculate_rsi(prices, period=RSI_PERIOD):
+    """حساب RSI باستخدام Wilder's Smoothing - فترة 6 لمطابقة المنصات"""
     if len(prices) < period + 1:
         return 50.0
     gains = []
@@ -283,89 +286,91 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# -------------------- منطق تحديد الإشارة (قوة عالية) --------------------
-def determine_signal_type(rsi, change_1h, score):
+# -------------------- منطق تحديد الإشارة المتسق (v9.0) --------------------
+def determine_signal_type(rsi, change_1h, score, trend_1h, trend_4h):
+    """
+    تحديد نوع الإشارة بناءً على RSI أولاً، ثم الاتجاه، ثم الزخم.
+    المبدأ: لا بيع في اتجاه صاعد إلا إذا كان RSI > 75 (تشبع شرائي مفرط).
+    """
+    # 1. التشبع الشرائي المفرط (بيع قوي)
     if rsi > 75:
         return "🔴 **بيع / جني أرباح** (تشبع شرائي مفرط)"
-    elif rsi > 70 and change_1h > 0:
-        return "🔴 **بيع / جني أرباح** (اقتراب من القمة)"
-    elif rsi < 25:
+    
+    # 2. التشبع البيعي المفرط (شراء قوي)
+    if rsi < 25:
         return "🟢 **شراء قوي** (تشبع بيعي مفرط - فرصة ارتداد)"
-    elif rsi < 30 and change_1h < 0:
-        return "🟢 **شراء** (منطقة تشبع بيعي)"
-    elif 45 <= rsi <= 55:
-        if score >= 7.0 and change_1h > 0:
-            return "🟢 **شراء قوي** (زخم إيجابي في نطاق محايد)"
-        elif score >= 7.0 and change_1h < 0:
-            return "🔴 **بيع** (زخم سلبي في نطاق محايد)"
-        else:
-            return "🟡 **مراقبة** (زخم متوازن)"
-    elif 55 < rsi <= 65:
-        return "🟡 **مراقبة** (زخم مرتفع مع الحذر)"
-    else:
-        return "⚪ **حيادي** (لا توجد إشارة واضحة)"
+    
+    # 3. بيع في اتجاه صاعد فقط إذا كان RSI مرتفعاً مع زخم سلبي
+    if rsi > 70 and trend_1h and trend_4h and change_1h < 0:
+        return "🔴 **بيع** (RSI مرتفع مع انعكاس محتمل)"
+    
+    # 4. شراء في اتجاه صاعد مع RSI منخفض
+    if rsi < 40 and trend_1h and trend_4h and change_1h > 0:
+        return "🟢 **شراء** (ارتداد من منطقة تشبع بيعي مع اتجاه صاعد)"
+    
+    # 5. RSI في النطاق المحايد مع زخم إيجابي واتجاه صاعد
+    if 40 <= rsi <= 60 and score >= 6.0 and change_1h > 0.5 and trend_1h and trend_4h:
+        return "🟢 **شراء قوي** (زخم إيجابي مع اتجاه صاعد)"
+    
+    # 6. RSI في النطاق المحايد مع زخم سلبي واتجاه هابط
+    if 40 <= rsi <= 60 and score >= 6.0 and change_1h < -0.5 and not trend_1h and not trend_4h:
+        return "🔴 **بيع** (زخم سلبي مع اتجاه هابط)"
+    
+    # 7. مراقبة في حالة عدم وضوح الاتجاه
+    if 40 <= rsi <= 60:
+        return "🟡 **مراقبة** (زخم متوازن - انتظار تأكيد)"
+    
+    # 8. حيادي للباقي
+    return "⚪ **حيادي** (لا توجد إشارة واضحة)"
 
-def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger, change_1h, price_above_ema, trend_1h=None, trend_4h=None):
-    if rsi > 75:
+def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger, change_1h, price_above_ema, trend_1h, trend_4h):
+    """
+    تقييم الإشارة وإرجاع النقاط والأسباب. 
+    الأولوية: RSI > الاتجاه > الزخم > الحجم
+    """
+    # فلترة RSI المتطرفة
+    if rsi > 80 or rsi < 20:
         return {
             "status": "مرفوض",
             "score": 0.0,
-            "signal": "🔴 تجنب الدخول (تشبع شرائي)",
-            "reasons": ["RSI مرتفع جداً (> 75)"]
+            "signal": "🔴 تجنب الدخول (RSI متطرف)",
+            "reasons": ["RSI خارج النطاق الآمن (>80 أو <20)"]
         }
 
     score = 0.0
     reasons = []
 
+    # ---- 1. RSI (العامل الأهم) - 4 نقاط كحد أقصى ----
     if 45 <= rsi <= 55:
-        score += 3.5
+        score += 4.0
         reasons.append("زخم RSI في النطاق الآمن المثالي")
-    elif 40 <= rsi < 45:
-        score += 2.5
-        reasons.append("RSI منخفض - فرصة شراء محتملة")
-    elif 55 < rsi <= 65:
-        score += 1.5
-        reasons.append("RSI مرتفع - حذر")
-    elif 25 <= rsi < 40:
+    elif 40 <= rsi < 45 or 55 < rsi <= 60:
+        score += 3.0
+        reasons.append("RSI قريب من النطاق المثالي")
+    elif 30 <= rsi < 40:
         score += 2.0
-        reasons.append("منطقة تشبع بيعي (فرصة)")
+        reasons.append("منطقة تشبع بيعي (فرصة شراء محتملة)")
+    elif 60 < rsi <= 70:
+        score += 1.5
+        reasons.append("RSI مرتفع - حذر من القمة")
+    elif rsi < 30:
+        score += 1.0
+        reasons.append("تشبع بيعي شديد (انتظار تأكيد)")
     else:
         score += 0.5
         reasons.append("زخم ضعيف")
 
-    if volume_ratio >= 2.5:
+    # ---- 2. الاتجاه (العامل الثاني) - 3 نقاط كحد أقصى ----
+    if trend_1h and trend_4h:
         score += 3.0
-        reasons.append(f"🚀 انفجار حجم كبير ({volume_ratio:.1f}x)")
-    elif volume_ratio >= 1.8:
-        score += 2.0
-        reasons.append(f"نشاط حجم قوي ({volume_ratio:.1f}x)")
-    elif volume_ratio >= 1.3:
-        score += 1.0
-        reasons.append(f"نشاط حجم معتدل ({volume_ratio:.1f}x)")
-    else:
-        score += 0.3
-        reasons.append("حجم ضعيف")
-
-    if liquidity_usd > 2_000_000:
-        score += 2.0
-        reasons.append("سيولة عالية جداً (> $2M)")
-    elif liquidity_usd > 1_000_000:
+        reasons.append("اتجاه صاعد قوي (1h+4h)")
+    elif trend_1h or trend_4h:
         score += 1.5
-        reasons.append("سيولة عالية (> $1M)")
-    elif liquidity_usd > 500_000:
-        score += 0.5
-        reasons.append("سيولة جيدة (> $500K)")
+        reasons.append("اتجاه صاعد جزئي")
     else:
-        score += 0.2
-        reasons.append("سيولة منخفضة")
+        reasons.append("اتجاه هابط أو جانبي")
 
-    if not price_near_upper_bollinger:
-        score += 2.0
-        reasons.append("مساحة للصعود (بعيد عن الحد العلوي)")
-    else:
-        score += 0.5
-        reasons.append("السعر قريب من الحد العلوي")
-
+    # ---- 3. الزخم السعري - نقطة واحدة ----
     if change_1h > 1.5:
         score += 1.0
         reasons.append(f"زخم سعري قوي ({change_1h:.1f}%)")
@@ -374,22 +379,50 @@ def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger
         reasons.append(f"زخم سعري معتدل ({change_1h:.1f}%)")
     elif change_1h < -1.5:
         reasons.append(f"انهيار سعري ({change_1h:.1f}%)")
+    else:
+        reasons.append("زخم سعري ضعيف")
 
-    if price_above_ema:
+    # ---- 4. الحجم (عامل مساعد - نقطة واحدة كحد أقصى) ----
+    if volume_ratio >= 3.0:
         score += 1.0
+        reasons.append(f"🚀 انفجار حجم كبير ({volume_ratio:.1f}x)")
+    elif volume_ratio >= 2.0:
+        score += 0.7
+        reasons.append(f"نشاط حجم جيد ({volume_ratio:.1f}x)")
+    elif volume_ratio >= 1.3:
+        score += 0.4
+        reasons.append(f"نشاط حجم معتدل ({volume_ratio:.1f}x)")
+    else:
+        reasons.append("حجم ضعيف")
+
+    # ---- 5. السيولة (عامل مساعد - نقطة واحدة كحد أقصى) ----
+    if liquidity_usd > 2_000_000:
+        score += 1.0
+        reasons.append("سيولة عالية جداً (> $2M)")
+    elif liquidity_usd > 1_000_000:
+        score += 0.5
+        reasons.append("سيولة عالية (> $1M)")
+    else:
+        reasons.append("سيولة منخفضة")
+
+    # ---- 6. موقع السعر من البولينجر (عامل مساعد) ----
+    if not price_near_upper_bollinger:
+        score += 0.5
+        reasons.append("مساحة للصعود (بعيد عن الحد العلوي)")
+    else:
+        reasons.append("السعر قريب من الحد العلوي")
+
+    # ---- 7. السعر فوق EMA12 ----
+    if price_above_ema:
+        score += 0.5
         reasons.append("السعر فوق EMA12 (اتجاه صاعد)")
     else:
         reasons.append("السعر تحت EMA12 (اتجاه هابط محتمل)")
 
-    if trend_1h:
-        score += 0.5
-        reasons.append("اتجاه 1h صاعد")
-    if trend_4h:
-        score += 0.5
-        reasons.append("اتجاه 4h صاعد")
-
-    final_score = round(score, 1)
-    signal_label = determine_signal_type(rsi, change_1h, final_score)
+    final_score = round(min(score, 10.0), 1)  # الحد الأقصى 10 نقاط
+    
+    # تحديد نوع الإشارة باستخدام المنطق الجديد
+    signal_label = determine_signal_type(rsi, change_1h, final_score, trend_1h, trend_4h)
 
     return {
         "status": "مقبول",
@@ -428,6 +461,7 @@ async def advanced_analysis(session, symbol):
     lows_5m = data_5m['lows']
     volumes_5m = data_5m['volumes']
     
+    # اتجاهات 1h و 4h
     trend_1h = data_1h['prices'][-1] > calculate_sma(data_1h['prices'], 20) if len(data_1h['prices']) >= 20 else False
     trend_4h = data_4h['prices'][-1] > calculate_sma(data_4h['prices'], 20) if len(data_4h['prices']) >= 20 else False
     
@@ -436,7 +470,7 @@ async def advanced_analysis(session, symbol):
         return None
     
     current_price = prices_5m[-1]
-    rsi = calculate_rsi(prices_5m, 14)
+    rsi = calculate_rsi(prices_5m, RSI_PERIOD)
     if rsi >= 99 or rsi <= 1:
         return None
     
@@ -445,14 +479,17 @@ async def advanced_analysis(session, symbol):
     bb = calculate_bollinger(prices_5m, 20, 2)
     atr = calculate_atr(highs_5m, lows_5m, prices_5m, 14)
     
+    # حساب التغير خلال ساعة مع التحقق من الصفر
     if len(prices_5m) >= 6 and prices_5m[-6] > 0:
         change_1h = ((prices_5m[-1] - prices_5m[-6]) / prices_5m[-6]) * 100
     else:
         change_1h = 0.0
     
-    if abs(change_1h) < 0.2 and not (rsi < 30 or rsi > 70):
+    # تجاهل العملات الراكدة تماماً (لا حركة)
+    if abs(change_1h) < MIN_CHANGE_1H and not (rsi < 30 or rsi > 70):
         return None
     
+    # الحجم النسبي (آخر 12 شمعة = ساعة)
     avg_volume_12 = sum(volumes_5m[-12:]) / 12 if len(volumes_5m) >= 12 else 1
     current_volume = volumes_5m[-1] if volumes_5m else 0
     volume_ratio = current_volume / avg_volume_12 if avg_volume_12 > 0 else 0
@@ -463,13 +500,15 @@ async def advanced_analysis(session, symbol):
     
     eval_result = evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper, change_1h, price_above_ema, trend_1h, trend_4h)
     
+    # رفض الإشارات الضعيفة
     if eval_result['status'] == 'مرفوض' or eval_result['score'] < SIGNAL_SCORE_THRESHOLD:
         return None
     
-    min_stop_pct = 0.01
+    # إدارة المخاطر الديناميكية
+    min_stop_pct = 0.01  # 1%
     atr_stop = atr * 2 if atr > 0 else current_price * 0.015
     stop_loss = current_price - max(atr_stop, current_price * min_stop_pct)
-    take_profit = current_price + max(atr_stop * 2, current_price * 0.02)
+    take_profit = current_price + max(atr_stop * 2, current_price * 0.025)  # هدف 2.5% كحد أدنى
     
     price_precision = 8 if symbol in ["PEPEUSDT", "SHIBUSDT", "BONKUSDT"] else 6
     stop_loss = round(stop_loss, price_precision)
@@ -586,7 +625,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.8!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v9.0!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -597,15 +636,16 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v8.8 - مع Self-Pinger*\n"
+        f"📊 *حالة البوت v9.0 - متوازن*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
         f"💧 الحد الأدنى للسيولة: ${MIN_VOLUME_USD:,}\n"
-        f"📊 نظام التقييم: RSI (45-55 مثالي) + حجم (≥2.5x للانفجار)\n"
+        f"📊 نظام التقييم: RSI(6) أولاً + اتجاه (1h/4h) + زخم\n"
         f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%، حجم صفقة محسوب)\n"
-        f"🔹 عتبة النقاط: {SIGNAL_SCORE_THRESHOLD}/10 (إشارات قوية فقط)\n"
-        f"🔄 نظام إبقاء النشاط: Self-Pinger كل 10 دقائق",
+        f"🔹 عتبة النقاط: {SIGNAL_SCORE_THRESHOLD}/10 (إشارات متوازنة)\n"
+        f"⏱️ فترة التبريد: {COOLDOWN_MINUTES} دقيقة\n"
+        f"🔄 Self-Pinger: نشط (كل 10 دقائق)",
         parse_mode="Markdown"
     )
 
@@ -625,7 +665,7 @@ async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔹 النقاط: {analysis['score']}/10\n"
         f"🔹 الإشارة: {analysis['signal']}\n"
         f"💰 السعر: `{analysis['price']}`\n"
-        f"📊 RSI: `{analysis['rsi']}`\n"
+        f"📊 RSI(6): `{analysis['rsi']}`\n"
         f"📈 MACD: `{analysis['macd']['histogram']}`\n"
         f"📊 بولينجر: الأعلى `{analysis['bb']['upper']}` | الأدنى `{analysis['bb']['lower']}`\n"
         f"📈 تغير ساعة: `{analysis['change_1h']}%`\n"
@@ -641,6 +681,7 @@ async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------- حلقة المسح غير المتزامنة --------------------
 async def process_single_symbol(session, symbol, semaphore, send_session):
     async with semaphore:
+        # التحقق من التبريد من قاعدة البيانات
         cooldown_time = await get_cooldown(symbol)
         if cooldown_time:
             last_time = datetime.fromisoformat(cooldown_time)
@@ -661,7 +702,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             f"📊 *{analysis['symbol']}* | النقاط: {analysis['score']}/10\n"
             f"🔔 {analysis['signal']}\n\n"
             f"💰 السعر: `{analysis['price']}`\n"
-            f"📉 RSI: `{analysis['rsi']}` | MACD: `{analysis['macd']['histogram']}`\n"
+            f"📉 RSI(6): `{analysis['rsi']}` | MACD: `{analysis['macd']['histogram']}`\n"
             f"📊 بولينجر: الأعلى `{analysis['bb']['upper']}` | الأدنى `{analysis['bb']['lower']}`\n"
             f"📈 التغير (ساعة): `{analysis['change_1h']}%`\n"
             f"📊 الحجم النسبي: `{analysis['volume_ratio']}x`\n"
@@ -679,7 +720,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v8.8...")
+    logger.info("🚀 بدء الماسح الاحترافي v9.0 (متوازن)...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -717,8 +758,6 @@ async def market_scanner_loop():
 
 # -------------------- Self-Pinger (لمنع سكون Render) --------------------
 async def self_pinger():
-    """إرسال طلب إلى الخادم كل 10 دقائق لمنع السكون"""
-    # استخدام النطاق العام إذا كان متاحاً، وإلا localhost
     if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME != "localhost":
         url = f"https://{RENDER_EXTERNAL_HOSTNAME}"
     else:
@@ -736,7 +775,7 @@ async def self_pinger():
                         logger.warning(f"⚠️ Self-ping returned status {resp.status}")
         except Exception as e:
             logger.error(f"❌ Self-ping error: {e}")
-        await asyncio.sleep(600)  # 10 دقائق
+        await asyncio.sleep(600)
 
 # -------------------- تشغيل البوت --------------------
 def run_flask():
@@ -746,39 +785,32 @@ def run_flask():
 @app.route('/')
 @app.route('/healthcheck')
 def home():
-    return "✅ Elite Pro Bot v8.8 - Running (Self-Pinger Active)"
+    return "✅ Elite Pro Bot v9.0 - Running (Balanced Strategy)"
 
 async def post_init(application):
     await init_db()
-    # حذف Webhook لتجنب التعارض
     await application.bot.delete_webhook()
     logger.info("✅ Webhook deleted")
     
-    # تشغيل الماسح
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
     
-    # تشغيل Self-Pinger (لمنع السكون)
     asyncio.create_task(self_pinger())
     logger.info("✅ Self-Pinger started")
 
 def main():
-    # تشغيل Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask Server Started")
     
-    # بناء التطبيق
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     
-    # إضافة الأوامر
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("approve", approve))
     application.add_handler(CommandHandler("adduser", add_user_manually))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # تشغيل البوت باستخدام Polling
     logger.info("✅ Starting Telegram Bot with Polling...")
     application.run_polling(allowed_updates=["message", "callback_query"])
 
