@@ -8,7 +8,7 @@ import math
 import aiohttp
 import aiosqlite
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -22,6 +22,7 @@ app = Flask('')
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
 RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "localhost")
+PORT = int(os.environ.get("PORT", 10000))
 
 # -------------------- إعدادات القوة العالية --------------------
 DB_PATH = "crypto_bot.db"
@@ -56,7 +57,6 @@ async def init_db():
         await db.commit()
     logger.info("✅ قاعدة البيانات مهيأة (WAL mode)")
 
-# -------------------- دوال قاعدة البيانات --------------------
 async def get_subscribers():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM subscribers") as cursor:
@@ -586,7 +586,7 @@ async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await add_subscriber(user_id)
     try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.6!*", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v8.8!*", parse_mode="Markdown")
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
     except Exception as e:
         await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
@@ -597,14 +597,15 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = await get_pending()
     all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
     await update.message.reply_text(
-        f"📊 *حالة البوت v8.6*\n"
+        f"📊 *حالة البوت v8.8 - مع Self-Pinger*\n"
         f"📌 العملات: {len(all_syms)}\n"
         f"👥 المشتركين: {len(subscribers)}\n"
         f"⏳ في الانتظار: {len(pending)}\n"
         f"💧 الحد الأدنى للسيولة: ${MIN_VOLUME_USD:,}\n"
         f"📊 نظام التقييم: RSI (45-55 مثالي) + حجم (≥2.5x للانفجار)\n"
         f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%، حجم صفقة محسوب)\n"
-        f"🔹 عتبة النقاط: {SIGNAL_SCORE_THRESHOLD}/10 (إشارات قوية فقط)",
+        f"🔹 عتبة النقاط: {SIGNAL_SCORE_THRESHOLD}/10 (إشارات قوية فقط)\n"
+        f"🔄 نظام إبقاء النشاط: Self-Pinger كل 10 دقائق",
         parse_mode="Markdown"
     )
 
@@ -678,7 +679,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
         return analysis
 
 async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v8.6...")
+    logger.info("🚀 بدء الماسح الاحترافي v8.8...")
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     
     async with aiohttp.ClientSession() as session:
@@ -714,43 +715,54 @@ async def market_scanner_loop():
                 logger.info("✅ انتهت الدورة. انتظار 5 دقائق...")
                 await asyncio.sleep(300)
 
-# -------------------- نقطة نهاية Webhook --------------------
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"status": "error", "message": "No data"}), 400
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
-        return jsonify({"status": "ok"}), 200
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+# -------------------- Self-Pinger (لمنع سكون Render) --------------------
+async def self_pinger():
+    """إرسال طلب إلى الخادم كل 10 دقائق لمنع السكون"""
+    # استخدام النطاق العام إذا كان متاحاً، وإلا localhost
+    if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME != "localhost":
+        url = f"https://{RENDER_EXTERNAL_HOSTNAME}"
+    else:
+        url = f"http://localhost:{PORT}"
+    
+    logger.info(f"🔄 Self-Pinger started, pinging {url} every 10 minutes")
+    
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=5) as resp:
+                    if resp.status == 200:
+                        logger.info("✅ Self-ping successful")
+                    else:
+                        logger.warning(f"⚠️ Self-ping returned status {resp.status}")
+        except Exception as e:
+            logger.error(f"❌ Self-ping error: {e}")
+        await asyncio.sleep(600)  # 10 دقائق
 
-@app.route('/')
-@app.route('/healthcheck')
-def home():
-    return "✅ Elite Pro Bot v8.6 - Running"
-
-# -------------------- تشغيل البوت (Polling كحل بديل) --------------------
+# -------------------- تشغيل البوت --------------------
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
+@app.route('/')
+@app.route('/healthcheck')
+def home():
+    return "✅ Elite Pro Bot v8.8 - Running (Self-Pinger Active)"
+
 async def post_init(application):
     await init_db()
-    # حذف Webhook أولاً لضمان عدم التعارض
+    # حذف Webhook لتجنب التعارض
     await application.bot.delete_webhook()
     logger.info("✅ Webhook deleted")
     
     # تشغيل الماسح
     asyncio.create_task(market_scanner_loop())
     logger.info("✅ Scanner started as background task")
+    
+    # تشغيل Self-Pinger (لمنع السكون)
+    asyncio.create_task(self_pinger())
+    logger.info("✅ Self-Pinger started")
 
 def main():
-    global application
-    
     # تشغيل Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -766,7 +778,7 @@ def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("signal", signal_now))
     
-    # استخدام Polling بدلاً من Webhook (أكثر استقراراً)
+    # تشغيل البوت باستخدام Polling
     logger.info("✅ Starting Telegram Bot with Polling...")
     application.run_polling(allowed_updates=["message", "callback_query"])
 
