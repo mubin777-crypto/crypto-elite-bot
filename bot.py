@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - Stable Version
+Elite Signal Bot v14 - Full Production Version
 """
 
 import os
@@ -23,7 +23,33 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from config import Config
+# ===================================================================
+# 0. الإعدادات (Config)
+# ===================================================================
+
+class Config:
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+    ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
+    DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///elite_signal_bot.db")
+    BINANCE_BASE_URL = os.environ.get("BINANCE_BASE_URL", "https://api.binance.com")
+    BINANCE_TIMEOUT = 10
+    BINANCE_RETRIES = 3
+    MIN_VOLUME_USD = 300_000
+    MIN_VOLATILITY = 0.5
+    TOP_SYMBOLS_COUNT = 25
+    COOLDOWN_MINUTES = 45
+    SCAN_INTERVAL_SECONDS = 300
+    RSI_PERIOD = 6
+    ADX_PERIOD = 14
+    MIN_ADX_STRONG = 25
+    MIN_CHANGE_1H = 0.3
+    MAX_POSITION_SIZE_PCT = 2.0
+    MAX_TRADE_DURATION_HOURS = 48
+    RISK_PER_TRADE_PCT = 1.0
+    MIN_RISK_REWARD_RATIO = 1.5
+    SIGNAL_VALIDITY_MINUTES = 15
+    PERFORMANCE_UPDATE_INTERVAL_SECONDS = 60
+    PORT = int(os.environ.get("PORT", 10000))
 
 config = Config()
 
@@ -195,7 +221,7 @@ class Indicators:
         return {"upper": sma + std_dev * std, "middle": sma, "lower": sma - std_dev * std}
 
 # ===================================================================
-# 4. هيكل السوق
+# 4. هيكل السوق (Market Structure)
 # ===================================================================
 
 class MarketStructure:
@@ -270,7 +296,7 @@ class MarketStructure:
         return 'neutral'
 
 # ===================================================================
-# 5. جلب البيانات
+# 5. جلب البيانات (BinanceClient)
 # ===================================================================
 
 class BinanceClient:
@@ -347,7 +373,7 @@ class BinanceClient:
         return symbols
 
 # ===================================================================
-# 6. قاعدة البيانات
+# 6. قاعدة البيانات (SQLite)
 # ===================================================================
 
 class Database:
@@ -424,7 +450,7 @@ class Database:
             return await cursor.fetchone()
 
 # ===================================================================
-# 7. مستودع البيانات
+# 7. مستودع البيانات (Repository)
 # ===================================================================
 
 class Repository:
@@ -500,7 +526,7 @@ class Repository:
         )
 
 # ===================================================================
-# 8. محرك الاستراتيجية (مختصر)
+# 8. محرك الاستراتيجية (Strategy Engine)
 # ===================================================================
 
 class StrategyEngine:
@@ -682,7 +708,7 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 9. مقدم البيانات
+# 9. مقدم البيانات (DataProvider)
 # ===================================================================
 
 class DataProvider:
@@ -734,7 +760,7 @@ class DataProvider:
         return [c[0] for c in candidates[:config.TOP_SYMBOLS_COUNT]]
 
 # ===================================================================
-# 10. خدمات الخلفية
+# 10. خدمات الخلفية (Scanner, Tracker)
 # ===================================================================
 
 class Scanner:
@@ -856,7 +882,7 @@ class Tracker:
             logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
 
 # ===================================================================
-# 11. بوت تليجرام - المعدل النهائي
+# 11. بوت تليجرام (مع إصلاح الحلقة)
 # ===================================================================
 
 class CommandHandlers:
@@ -915,7 +941,7 @@ class CommandHandlers:
         )
 
     async def performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # حساب الأداء مباشرة
+        # حساب الأداء مباشرة من قاعدة البيانات
         gross_profit = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE status = 'WIN'")
         gross_loss = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE status = 'LOSS'")
         gross_profit = gross_profit[0] if gross_profit else 0.0
@@ -952,6 +978,7 @@ class CommandHandlers:
             parse_mode="HTML"
         )
 
+
 class SignalBot:
     def __init__(self, repo):
         self.repo = repo
@@ -978,8 +1005,9 @@ class SignalBot:
         if self.application:
             await self.application.stop()
 
+
 # ===================================================================
-# 12. التشغيل الرئيسي - الحل النهائي
+# 12. التشغيل الرئيسي - الحل النهائي المستقر
 # ===================================================================
 
 flask_app = Flask(__name__)
@@ -999,13 +1027,7 @@ scanner = None
 tracker = None
 bot = None
 background_tasks = []
-loop = None
-
-def signal_handler(sig, frame):
-    logger.info(f"Received signal {sig}")
-    if loop:
-        asyncio.run_coroutine_threadsafe(shutdown(), loop)
-    sys.exit(0)
+stop_event = None
 
 async def shutdown():
     logger.info("🔄 Shutting down...")
@@ -1020,8 +1042,9 @@ async def shutdown():
     logger.info("✅ Shutdown complete")
 
 async def main():
-    global db, provider, repo, scanner, tracker, bot, background_tasks, loop
-    loop = asyncio.get_running_loop()
+    global db, provider, repo, scanner, tracker, bot, background_tasks, stop_event
+    
+    stop_event = asyncio.Event()
     
     # 1. قاعدة البيانات
     db = Database()
@@ -1046,16 +1069,47 @@ async def main():
     background_tasks.append(asyncio.create_task(scanner.start()))
     background_tasks.append(asyncio.create_task(tracker.start()))
     
-    # 5. تشغيل بوت التليجرام (يحجب الحلقة)
-    await bot.start_polling()
+    # 5. تشغيل بوت التليجرام في مهمة منفصلة (لا تحجب الحلقة)
+    polling_task = asyncio.create_task(bot.start_polling())
+    
+    # 6. انتظار إشارة الإيقاف
+    await stop_event.wait()
+    
+    # 7. إلغاء مهمة polling وإيقاف البوت
+    polling_task.cancel()
+    try:
+        await polling_task
+    except asyncio.CancelledError:
+        pass
+    
+    # 8. إيقاف المهام الخلفية
+    await shutdown()
+
+def signal_handler(loop, sig):
+    logger.info(f"Received signal {sig}")
+    if stop_event:
+        asyncio.run_coroutine_threadsafe(stop_event.set(), loop)
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # إعداد معالجة الإشارات باستخدام loop.add_signal_handler
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, signal_handler, loop, sig)
+        except NotImplementedError:
+            pass
+    
     try:
-        asyncio.run(main())
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("🛑 Interrupted by user")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
-        sys.exit(1)
+    finally:
+        # إلغاء جميع المهام المتبقية
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+        loop.run_until_complete(asyncio.gather(*asyncio.all_tasks(loop), return_exceptions=True))
+        loop.close()
