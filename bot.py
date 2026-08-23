@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot V18 - الجزء الأول: الأساسيات والبنية التحتية
-يشمل: الإعدادات، النماذج، المؤشرات، هيكل السوق، عميل Binance، قاعدة البيانات
+Elite Signal Bot V19 - الإصدار النهائي المتكامل
+يشمل: Universe Engine, Ranking Engine, Market Regime, Correlation Filter, Portfolio Risk Engine
+يعمل بكفاءة على Render
 """
 
 import os
@@ -23,59 +24,87 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===================================================================
-# 1. الإعدادات (Config) - مع الإضافات الجديدة
+# 1. الإعدادات (Config) - النسخة النهائية المعدّلة
 # ===================================================================
 
 class Config:
+    # -------------------- إعدادات التشغيل الأساسية --------------------
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///elite_signal_bot.db")
     BINANCE_BASE_URL = os.environ.get("BINANCE_BASE_URL", "https://api.binance.com")
     BINANCE_TIMEOUT = 10
     BINANCE_RETRIES = 3
+    PORT = int(os.environ.get("PORT", 10000))
     
-    # إعدادات التوسع والتصفية (جديدة)
+    # -------------------- إعدادات الكون (Universe) --------------------
+    CORE_UNIVERSE = [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+        "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
+        "SUIUSDT", "TONUSDT", "LTCUSDT", "BCHUSDT", "NEARUSDT",
+        "APTUSDT", "ARBUSDT", "OPUSDT", "ATOMUSDT", "FILUSDT",
+        "INJUSDT", "TIAUSDT", "SEIUSDT", "WLDUSDT", "HBARUSDT"
+    ]
     MAX_UNIVERSE_SIZE = 70
-    MIN_VOLUME_USD = 500_000
+    CORE_SIZE = 25
+    DYNAMIC_SIZE = 45
+    
+    # -------------------- معايير التصفية الأساسية --------------------
+    MIN_VOLUME_USD = 1_000_000
     MIN_TRADES_24H = 500
-    MIN_VOLATILITY_DAILY = 1.5
+    MIN_VOLATILITY_DAILY = 1.0
     MAX_STABLE_COINS = ["USDC", "FDUSD", "TUSD", "BUSD", "DAI"]
     EXCLUDED_SYMBOLS = ["UP", "DOWN", "BULL", "BEAR", "HALF"]
     
-    # معايير تقييم الفرص (جديدة)
-    LIQUIDITY_WEIGHT = 0.30
-    MOMENTUM_WEIGHT = 0.25
-    VOLUME_EXPANSION_WEIGHT = 0.20
-    TREND_ALIGNMENT_WEIGHT = 0.15
-    VOLATILITY_WEIGHT = 0.10
+    # -------------------- أوزان تصنيف الفرص --------------------
+    LIQUIDITY_WEIGHT = 0.25
+    RELATIVE_VOLUME_WEIGHT = 0.20
+    MOMENTUM_WEIGHT = 0.20
+    VOLATILITY_WEIGHT = 0.15
+    TREND_STRENGTH_WEIGHT = 0.10
+    MARKET_STRUCTURE_WEIGHT = 0.10
     
-    # شروط الإشارة (جديدة)
-    MIN_SIGNAL_SCORE = 7.0
-    MAX_CORRELATED_EXPOSURE = 2
+    # -------------------- إعدادات جودة الإشارة --------------------
+    MIN_SIGNAL_SCORE = 70
+    SCORE_ELITE = 90
+    SCORE_STRONG = 80
+    SCORE_GOOD = 70
     
-    # إعدادات العملات الأساسية
-    COOLDOWN_MINUTES = 45
+    # -------------------- إعدادات إدارة المخاطر --------------------
+    MAX_OPEN_TRADES = 5
+    MAX_SECTOR_EXPOSURE = 2
+    DAILY_LOSS_LIMIT_PCT = 3.0
+    MAX_CONSECUTIVE_LOSSES = 3
+    CORRELATION_THRESHOLD = 0.80
+    
+    # -------------------- إعدادات المخاطرة لكل صفقة --------------------
+    RISK_PER_TRADE_PCT = 1.0
+    ALLOCATION_PCT = 2.0
+    MIN_RISK_REWARD_RATIO = 1.5
+    MAX_TRADE_DURATION_HOURS = 48
+    
+    # -------------------- إعدادات الماسح الضوئي --------------------
     SCAN_INTERVAL_SECONDS = 300
+    COOLDOWN_MINUTES = 45
+    
+    # -------------------- إعدادات المؤشرات الفنية --------------------
     RSI_PERIOD = 6
     ADX_PERIOD = 14
     MIN_ADX_STRONG = 25
     MIN_CHANGE_1H = 0.3
-    ALLOCATION_PCT = 2.0
-    MAX_TRADE_DURATION_HOURS = 48
-    RISK_PER_TRADE_PCT = 1.0
-    MIN_RISK_REWARD_RATIO = 1.5
-    PORT = int(os.environ.get("PORT", 10000))
     
-    # أقسام السوق (جديدة)
+    # -------------------- أقسام السوق (Sectors) --------------------
     SECTORS = {
-        "AI": ["FET", "RENDER", "TAO", "WLD", "AGIX", "OCEAN"],
-        "L1": ["ETH", "SOL", "BNB", "ADA", "AVAX", "NEAR", "APT", "SUI", "TON"],
-        "DeFi": ["UNI", "AAVE", "MKR", "CRV", "LDO", "PENDLE"],
-        "Meme": ["DOGE", "SHIB", "PEPE", "WIF", "BONK", "FLOKI"],
-        "RWA": ["ONDO", "ENA", "OM"],
-        "Gaming": ["IMX", "GALA", "SAND", "MANA"],
-        "Infra": ["LINK", "DOT", "ATOM", "FIL", "GRT"],
-        "Privacy": ["XMR", "ZEC", "DASH"]
+        "BTC_ECO": ["BTCUSDT", "STXUSDT", "ORDIUSDT"],
+        "ETH_ECO": ["ETHUSDT", "LDOUSDT", "ARBUSDT", "OPUSDT"],
+        "SOL_ECO": ["SOLUSDT", "JUPUSDT", "PYTHUSDT", "JTOUSDT"],
+        "AI": ["FETUSDT", "RENDERUSDT", "TAOUSDT", "WLDUSDT"],
+        "L1": ["BNBUSDT", "ADAUSDT", "AVAXUSDT", "NEARUSDT", "APTUSDT", "SUIUSDT", "TONUSDT"],
+        "DeFi": ["UNIUSDT", "AAVEUSDT", "MKRUSDT", "CRVUSDT", "PENDLEUSDT"],
+        "Meme": ["DOGEUSDT", "SHIBUSDT", "PEPEUSDT", "WIFUSDT", "BONKUSDT", "FLOKIUSDT"],
+        "RWA": ["ONDOUSDT", "ENAUSDT"],
+        "Gaming": ["IMXUSDT", "GALAUSDT", "SANDUSDT", "MANAUSDT"],
+        "Infra": ["LINKUSDT", "DOTUSDT", "ATOMUSDT", "FILUSDT", "GRTUSDT"]
     }
 
 config = Config()
@@ -139,7 +168,7 @@ class MarketStats:
     last: float
 
 # ===================================================================
-# 4. المؤشرات الفنية (Indicators) - نفس الكود السابق مع اختصار
+# 4. المؤشرات الفنية (Indicators)
 # ===================================================================
 
 class Indicators:
@@ -433,7 +462,9 @@ class Database:
                     profit_loss REAL,
                     duration_minutes INTEGER,
                     win BOOLEAN,
-                    entry_time TEXT
+                    entry_time TEXT,
+                    sector TEXT,
+                    quality_score INTEGER
                 )
             """)
             await db.execute("""
@@ -448,7 +479,9 @@ class Database:
                     avg_win REAL,
                     avg_loss REAL,
                     expectancy REAL,
-                    max_drawdown REAL
+                    max_drawdown REAL,
+                    sharpe_ratio REAL,
+                    consecutive_losses INTEGER
                 )
             """)
             if config.ADMIN_CHAT_ID:
@@ -475,8 +508,9 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(query, args)
             return await cursor.fetchone()
-            # ===================================================================
-# 8. مستودع البيانات (Repository)
+
+# ===================================================================
+# 8. مستودع البيانات (Repository) - معدل
 # ===================================================================
 
 class Repository:
@@ -513,15 +547,15 @@ class Repository:
             symbol, timestamp
         )
 
-    async def save_signal(self, symbol: str, signal_type: str, entry_price: float, stop_loss: float, take_profit: float) -> None:
+    async def save_signal(self, symbol: str, signal_type: str, entry_price: float, stop_loss: float, take_profit: float, sector: str = "OTHER", quality_score: int = 0) -> None:
         await self.db.execute(
-            "INSERT INTO signals_history (symbol, timestamp, signal_type, entry_price, stop_loss, take_profit, entry_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            symbol, datetime.now().isoformat(), signal_type, entry_price, stop_loss, take_profit, datetime.now().isoformat()
+            "INSERT INTO signals_history (symbol, timestamp, signal_type, entry_price, stop_loss, take_profit, entry_time, sector, quality_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            symbol, datetime.now().isoformat(), signal_type, entry_price, stop_loss, take_profit, datetime.now().isoformat(), sector, quality_score
         )
 
     async def get_open_signals(self) -> List[Tuple]:
         rows = await self.db.fetch(
-            "SELECT id, symbol, entry_time, entry_price, stop_loss, take_profit, signal_type FROM signals_history WHERE status = 'OPEN'"
+            "SELECT id, symbol, entry_time, entry_price, stop_loss, take_profit, signal_type, sector FROM signals_history WHERE status = 'OPEN'"
         )
         return rows
 
@@ -533,7 +567,7 @@ class Repository:
 
     async def get_latest_performance(self):
         return await self.db.fetchrow(
-            "SELECT total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown FROM performance_metrics ORDER BY id DESC LIMIT 1"
+            "SELECT total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown, sharpe_ratio, consecutive_losses FROM performance_metrics ORDER BY id DESC LIMIT 1"
         )
 
     async def update_performance(self, metrics: dict) -> None:
@@ -541,22 +575,96 @@ class Repository:
         await self.db.execute(
             """
             INSERT OR REPLACE INTO performance_metrics 
-            (date, total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (date, total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown, sharpe_ratio, consecutive_losses)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             today, metrics.get('total_trades', 0), metrics.get('wins', 0),
             metrics.get('losses', 0), metrics.get('win_rate', 0.0),
             metrics.get('profit_factor', 0.0), metrics.get('avg_win', 0.0),
             metrics.get('avg_loss', 0.0), metrics.get('expectancy', 0.0),
-            metrics.get('max_drawdown', 0.0)
+            metrics.get('max_drawdown', 0.0), metrics.get('sharpe_ratio', 0.0),
+            metrics.get('consecutive_losses', 0)
         )
 
+    async def get_daily_loss(self) -> float:
+        today = datetime.now().date().isoformat()
+        row = await self.db.fetchrow(
+            "SELECT SUM(profit_loss) FROM signals_history WHERE status IN ('LOSS', 'TIME_EXIT') AND date(timestamp) = ?",
+            today
+        )
+        return abs(row[0]) if row and row[0] else 0.0
+
+    async def get_consecutive_losses(self) -> int:
+        rows = await self.db.fetch(
+            "SELECT status FROM signals_history WHERE status IN ('LOSS', 'WIN') ORDER BY id DESC LIMIT ?",
+            config.MAX_CONSECUTIVE_LOSSES
+        )
+        if not rows:
+            return 0
+        consecutive = 0
+        for row in rows:
+            if row[0] == 'LOSS':
+                consecutive += 1
+            else:
+                break
+        return consecutive
+
 # ===================================================================
-# 9. المحركات المتقدمة (Advanced Engines) - جديدة
+# 9. المحركات المتقدمة (Advanced Engines)
 # ===================================================================
 
+class UniverseEngine:
+    """بناء الكون الديناميكي من 70 عملة (Core + Dynamic)"""
+    
+    def __init__(self, all_stats: List[Dict]):
+        self.all_stats = all_stats
+        self.core_symbols = config.CORE_UNIVERSE
+        self.dynamic_symbols = []
+    
+    def build(self) -> List[str]:
+        universe = set(self.core_symbols)
+        candidates = []
+        
+        for item in self.all_stats:
+            symbol = item.get("symbol", "")
+            if not symbol.endswith("USDT"):
+                continue
+            if symbol in universe:
+                continue
+            if any(stable in symbol for stable in config.MAX_STABLE_COINS):
+                continue
+            if any(ex in symbol for ex in config.EXCLUDED_SYMBOLS):
+                continue
+            
+            volume = float(item.get("quoteVolume", 0))
+            change = float(item.get("priceChangePercent", 0))
+            high = float(item.get("highPrice", 0))
+            low = float(item.get("lowPrice", 0))
+            count = float(item.get("count", 0))
+            
+            if volume < config.MIN_VOLUME_USD:
+                continue
+            if count < config.MIN_TRADES_24H:
+                continue
+            if abs(change) < config.MIN_VOLATILITY_DAILY:
+                continue
+            
+            volatility = (high - low) / low * 100 if low > 0 else 0
+            score = (
+                (volume / 10_000_000) * 0.4 +
+                (abs(change) / 10) * 0.3 +
+                (volatility / 20) * 0.3
+            )
+            candidates.append({"symbol": symbol, "score": score})
+        
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        dynamic_selected = [c["symbol"] for c in candidates[:config.DYNAMIC_SIZE]]
+        universe.update(dynamic_selected)
+        return list(universe)[:config.MAX_UNIVERSE_SIZE]
+
+
 class LiquidityRankingEngine:
-    """محرك تقييم الفرص بناءً على السيولة والزخم والاتجاه"""
+    """تقييم الفرص بناءً على السيولة والزخم والاتجاه"""
     
     def __init__(self, all_stats: List[Dict]):
         self.all_stats = all_stats
@@ -568,10 +676,8 @@ class LiquidityRankingEngine:
             symbol = item.get("symbol", "")
             if not symbol.endswith("USDT"):
                 continue
-            # استبعاد العملات المستقرة
             if any(stable in symbol for stable in config.MAX_STABLE_COINS):
                 continue
-            # استبعاد الرافعات
             if any(ex in symbol for ex in config.EXCLUDED_SYMBOLS):
                 continue
             
@@ -595,7 +701,7 @@ class LiquidityRankingEngine:
             score = (
                 (volume / 100_000_000) * config.LIQUIDITY_WEIGHT +
                 (momentum / 10) * config.MOMENTUM_WEIGHT +
-                (volume_expansion / 50) * config.VOLUME_EXPANSION_WEIGHT +
+                (volume_expansion / 50) * config.RELATIVE_VOLUME_WEIGHT +
                 (volatility / 20) * config.VOLATILITY_WEIGHT
             )
             
@@ -619,46 +725,45 @@ class MarketRegimeEngine:
     """تحديد حالة السوق بدقة عالية"""
     
     @staticmethod
-    def detect(data_4h: CandleData, data_1h: CandleData) -> str:
+    def detect(data_4h: CandleData, data_1h: CandleData) -> Dict:
         prices_4h = data_4h.closed_prices()
         prices_1h = data_1h.closed_prices()
         
         if len(prices_4h) < 50 or len(prices_1h) < 50:
-            return "RANGE"
+            return {"regime": "NEUTRAL", "volatility": 0.0}
         
         sma20_4h = sum(prices_4h[-20:]) / 20
         sma50_4h = sum(prices_4h[-50:]) / 50
         current_4h = prices_4h[-1]
         
         if current_4h > sma20_4h and sma20_4h > sma50_4h:
-            if current_4h > sma20_4h * 1.03:
-                return "STRONG_UPTREND"
-            return "WEAK_UPTREND"
+            if current_4h > sma20_4h * 1.05:
+                regime = "STRONG_TREND"
+            else:
+                regime = "WEAK_TREND"
         elif current_4h < sma20_4h and sma20_4h < sma50_4h:
-            if current_4h < sma20_4h * 0.97:
-                return "STRONG_DOWNTREND"
-            return "WEAK_DOWNTREND"
-        
-        atr = Indicators.calculate_atr(
-            data_4h.closed_highs(), data_4h.closed_lows(), prices_4h, 14
-        )
-        avg_price = sum(prices_4h[-20:]) / 20
-        volatility_ratio = (atr / avg_price) * 100 if avg_price > 0 else 0
+            if current_4h < sma20_4h * 0.95:
+                regime = "STRONG_TREND"
+            else:
+                regime = "WEAK_TREND"
+        else:
+            atr = Indicators.calculate_atr(
+                data_4h.closed_highs(), data_4h.closed_lows(), prices_4h, 14
+            )
+            avg_price = sum(prices_4h[-20:]) / 20
+            volatility_ratio = (atr / avg_price) * 100 if avg_price > 0 else 0
+            
+            if volatility_ratio > 3:
+                regime = "HIGH_VOLATILITY"
+            elif volatility_ratio < 1:
+                regime = "LOW_VOLATILITY"
+            else:
+                regime = "RANGE"
         
         bb = Indicators.calculate_bollinger(prices_4h, 20, 2)
-        if bb["upper"] and bb["lower"] and bb["middle"] > 0:
-            bandwidth = (bb["upper"] - bb["lower"]) / bb["middle"] * 100
-            if bandwidth < 5:
-                return "COMPRESSION"
-            elif bandwidth > 20:
-                return "EXPANSION"
+        volatility = (bb["upper"] - bb["lower"]) / bb["middle"] * 100 if bb["middle"] > 0 else 0
         
-        if volatility_ratio > 3:
-            return "HIGH_VOLATILITY"
-        elif volatility_ratio < 1:
-            return "LOW_LIQUIDITY"
-        
-        return "RANGE"
+        return {"regime": regime, "volatility": volatility}
 
 
 class RelativeStrengthEngine:
@@ -703,8 +808,74 @@ class SectorRotationEngine:
                 return self.sector_scores.get(sector, 999)
         return 999
 
+
+class CorrelationFilter:
+    """منع الإشارات المتشابهة في نفس القطاع"""
+    
+    @staticmethod
+    def get_sector(symbol: str) -> str:
+        for sector, members in config.SECTORS.items():
+            if symbol in members:
+                return sector
+        return "OTHER"
+    
+    @staticmethod
+    def is_allowed(symbol: str, open_signals: List[Tuple]) -> Tuple[bool, str]:
+        sector = CorrelationFilter.get_sector(symbol)
+        if sector == "OTHER":
+            return True, ""
+        
+        sector_count = 0
+        for signal in open_signals:
+            sig_sector = CorrelationFilter.get_sector(signal[7])  # signal[7] = sector (مخزن في DB)
+            if sig_sector == sector:
+                sector_count += 1
+        
+        if sector_count >= config.MAX_SECTOR_EXPOSURE:
+            return False, f"قطاع {sector} لديه {sector_count} صفقات مفتوحة (الحد {config.MAX_SECTOR_EXPOSURE})"
+        
+        return True, ""
+
+
+class PortfolioRiskEngine:
+    """إدارة المخاطر على مستوى المحفظة"""
+    
+    def __init__(self, repo: Repository):
+        self.repo = repo
+    
+    async def check_daily_loss_limit(self) -> bool:
+        daily_loss = await self.repo.get_daily_loss()
+        if daily_loss >= config.DAILY_LOSS_LIMIT_PCT:
+            logger.warning(f"⚠️ حد الخسارة اليومي {config.DAILY_LOSS_LIMIT_PCT}% تم تجاوزه ({daily_loss:.2f}%)")
+            return False
+        return True
+    
+    async def check_consecutive_losses(self) -> bool:
+        consecutive = await self.repo.get_consecutive_losses()
+        if consecutive >= config.MAX_CONSECUTIVE_LOSSES:
+            logger.warning(f"⚠️ {consecutive} خسائر متتالية، تقليل المخاطرة")
+            return False
+        return True
+    
+    async def get_open_trades_count(self) -> int:
+        rows = await self.repo.db.fetch("SELECT id FROM signals_history WHERE status = 'OPEN'")
+        return len(rows)
+    
+    async def can_trade(self) -> Tuple[bool, str]:
+        open_count = await self.get_open_trades_count()
+        if open_count >= config.MAX_OPEN_TRADES:
+            return False, f"الحد الأقصى للصفقات المفتوحة ({config.MAX_OPEN_TRADES}) تم الوصول إليه"
+        
+        if not await self.check_daily_loss_limit():
+            return False, "تم تجاوز حد الخسارة اليومي"
+        
+        if not await self.check_consecutive_losses():
+            return False, f"{config.MAX_CONSECUTIVE_LOSSES} خسائر متتالية"
+        
+        return True, ""
+
 # ===================================================================
-# 10. محرك الاستراتيجية (StrategyEngine) - مع إضافة Market Regime و MIN_SIGNAL_SCORE
+# 10. محرك الاستراتيجية (StrategyEngine) - معدل
 # ===================================================================
 
 class StrategyEngine:
@@ -714,6 +885,7 @@ class StrategyEngine:
         self.data_1h = data_1h
         self.data_4h = data_4h
         self.stats = stats
+        self.action = None
         self._setup()
 
     def _setup(self):
@@ -733,10 +905,11 @@ class StrategyEngine:
         self.last_swing_high = self.structure.get_last_swing_high()
         self.last_swing_low = self.structure.get_last_swing_low()
         self.directional_bias = self._calculate_directional_bias()
-        self.market_regime = MarketRegimeEngine.detect(self.data_4h, self.data_1h)
+        self.regime_data = MarketRegimeEngine.detect(self.data_4h, self.data_1h)
+        self.market_regime = self.regime_data["regime"]
         self.change_1h = self._calculate_change_1h()
         self.volume_ratio = self._calculate_volume_ratio()
-        self.score = 0.0
+        self.score = 0
         self.reasons = []
 
     def _calculate_directional_bias(self) -> str:
@@ -774,99 +947,130 @@ class StrategyEngine:
         curr_vol = self.volumes_5m[-1] if self.volumes_5m else 0.0
         return curr_vol / median_vol if median_vol > 0 else 0.0
 
-    def _compute_score(self) -> None:
-        score = 0.0
-        reasons = []
+    def _calculate_quality_score(self) -> int:
+        """حساب درجة جودة الإشارة (من 100)"""
+        score = 0
         
-        if self.directional_bias == 'bullish':
-            score += 3.0; reasons.append("اتجاه صاعد")
-        elif self.directional_bias == 'bearish':
-            score += 3.0; reasons.append("اتجاه هابط")
+        # اتجاه 4H (15 نقطة)
+        if self.directional_bias == 'bullish' or self.directional_bias == 'bearish':
+            score += 15
         
-        if self.trend == 'bullish':
-            score += 2.0; reasons.append("هيكل صاعد")
-        elif self.trend == 'bearish':
-            score += 2.0; reasons.append("هيكل هابط")
+        # اتجاه 1H (15 نقطة)
+        if self.trend != 'neutral':
+            score += 15
         
-        if 40 <= self.rsi <= 60:
-            score += 2.0; reasons.append(f"RSI {self.rsi:.1f} - محايد")
-        elif 60 < self.rsi <= 70:
-            score += 1.0; reasons.append(f"RSI {self.rsi:.1f} - مرتفع")
-        elif 30 <= self.rsi < 40:
-            score += 1.0; reasons.append(f"RSI {self.rsi:.1f} - منخفض")
-        else:
-            score += 0.3; reasons.append(f"RSI {self.rsi:.1f} - متطرف")
+        # هيكل 5M (15 نقطة)
+        if self.structure.get_trend() != 'neutral':
+            score += 15
         
-        if self.change_1h > 1.5:
-            score += 1.5; reasons.append(f"زخم صاعد {self.change_1h:.1f}%")
-        elif self.change_1h < -1.5:
-            score += 1.5; reasons.append(f"زخم هابط {abs(self.change_1h):.1f}%")
+        # Momentum (15 نقطة)
+        if abs(self.change_1h) > 1.0:
+            score += 15
         elif abs(self.change_1h) > 0.5:
-            score += 0.5; reasons.append(f"زخم خفيف {self.change_1h:.1f}%")
-        else:
-            score += 0.0; reasons.append("زخم ضعيف")
+            score += 8
         
-        if self.volume_ratio > 2.5:
-            score += 1.0; reasons.append(f"حجم استثنائي {self.volume_ratio:.1f}x")
+        # Volume (15 نقطة)
+        if self.volume_ratio > 2.0:
+            score += 15
         elif self.volume_ratio > 1.5:
-            score += 0.5; reasons.append(f"حجم جيد {self.volume_ratio:.1f}x")
-        else:
-            score += 0.0; reasons.append("حجم عادي")
+            score += 8
         
-        # مكافأة للأنظمة القوية
-        if self.market_regime in ["STRONG_UPTREND", "STRONG_DOWNTREND"]:
-            score += 1.0; reasons.append(f"سوق اتجاهي قوي ({self.market_regime})")
-        elif self.market_regime == "COMPRESSION":
-            score += 0.5; reasons.append("انضغاط - انتظار انفجار")
+        # ADX (10 نقاط)
+        if self.adx > 30:
+            score += 10
+        elif self.adx > 25:
+            score += 5
         
-        self.score = round(min(score, 10.0), 1)
-        self.reasons = reasons
+        # RSI Position (5 نقاط)
+        if 40 <= self.rsi <= 60:
+            score += 5
+        
+        # Risk/Reward (5 نقاط)
+        if self.atr > 0 and self.action:
+            if self.action == 'BUY':
+                rr_ratio = (self.take_profit - self.entry_price) / (self.entry_price - self.stop_loss) if self.stop_loss > 0 else 0
+            else:
+                rr_ratio = (self.entry_price - self.take_profit) / (self.stop_loss - self.entry_price) if self.stop_loss > 0 else 0
+            if rr_ratio >= 2.0:
+                score += 5
+            elif rr_ratio >= 1.5:
+                score += 3
+        
+        # Market Regime (5 نقاط)
+        if self.market_regime in ["STRONG_TREND", "WEAK_TREND"]:
+            score += 5
+        
+        return min(score, 100)
 
     def generate_signal(self):
+        # 1. التحقق من التغير خلال ساعة
         if abs(self.change_1h) < config.MIN_CHANGE_1H:
             return self._signal_result("WATCH", [f"التغير خلال ساعة {self.change_1h:.2f}% أقل من الحد الأدنى"])
         
+        # 2. التحقق من قوة الاتجاه
         if self.adx < config.MIN_ADX_STRONG:
             return self._signal_result("NO_TRADE", ["السوق ليس اتجاهياً (ADX ضعيف)"])
         
+        # 3. التحقق من الاتجاه
         if self.directional_bias == 'neutral':
             return self._signal_result("NO_TRADE", ["الاتجاه غير واضح"])
         
-        # حساب النقاط قبل الشروط
-        self._compute_score()
+        # 4. نظام السوق
+        if self.market_regime == "RANGE" and self.trend != 'neutral':
+            return self._signal_result("WATCH", ["السوق في نطاق جانبي، إشارات الاختراق غير موثوقة"])
         
-        # شرط الحد الأدنى للثقة (جديد)
-        if self.score < config.MIN_SIGNAL_SCORE:
-            return self._signal_result("WATCH", [f"درجة الثقة {self.score} أقل من الحد الأدنى {config.MIN_SIGNAL_SCORE}"])
+        if self.market_regime == "HIGH_VOLATILITY":
+            # توسيع وقف الخسارة بنسبة 20%
+            volatility_multiplier = 1.2
+        else:
+            volatility_multiplier = 1.0
         
+        # 5. التحقق من الهيكل
         if self.trend == 'neutral':
-            return self._signal_result("WATCH", self.reasons)
+            return self._signal_result("WATCH", ["هيكل السوق محايد"])
         
+        # 6. التحقق من RSI
         if self.rsi > 80 or self.rsi < 20:
             return self._signal_result("WATCH", ["RSI متطرف"])
         
+        # 7. التحقق من إشارات MACD
         if self.directional_bias == 'bullish':
             if not (40 <= self.rsi <= 70 and self.macd['histogram'] > 0):
-                return self._signal_result("WATCH", self.reasons)
+                return self._signal_result("WATCH", ["ظروف الشراء غير مكتملة"])
             if self.trend != 'bullish':
-                return self._signal_result("WATCH", self.reasons)
+                return self._signal_result("WATCH", ["الهيكل لا يدعم الشراء"])
+            self.action = "BUY"
         else:
             if not (30 <= self.rsi <= 60 and self.macd['histogram'] < 0):
-                return self._signal_result("WATCH", self.reasons)
+                return self._signal_result("WATCH", ["ظروف البيع غير مكتملة"])
             if self.trend != 'bearish':
-                return self._signal_result("WATCH", self.reasons)
+                return self._signal_result("WATCH", ["الهيكل لا يدعم البيع"])
+            self.action = "SELL"
         
+        # 8. التحقق من الحجم
         if self.volume_ratio < 1.5:
-            return self._signal_result("WATCH", self.reasons + ["حجم ضعيف"])
+            return self._signal_result("WATCH", ["حجم ضعيف"])
         
-        action = "BUY" if self.directional_bias == 'bullish' else "SELL"
-        stop_loss, take_profit, allocation_pct = self._calculate_risk(action)
+        # 9. حساب المخاطر
+        stop_loss, take_profit, allocation_pct = self._calculate_risk(self.action, volatility_multiplier)
         if stop_loss == 0.0 or take_profit == 0.0 or allocation_pct == 0.0:
             return self._signal_result("NO_TRADE", ["إدارة المخاطر غير صالحة"])
         
-        return self._signal_result(action, self.reasons, stop_loss, take_profit, allocation_pct)
+        self.entry_price = self.current_price
+        self.stop_loss = stop_loss
+        self.take_profit = take_profit
+        
+        # 10. حساب درجة الجودة (100)
+        quality_score = self._calculate_quality_score()
+        
+        # 11. التحقق من الحد الأدنى للجودة
+        if quality_score < config.MIN_SIGNAL_SCORE:
+            return self._signal_result("WATCH", [f"درجة الجودة {quality_score} أقل من الحد الأدنى {config.MIN_SIGNAL_SCORE}"])
+        
+        # 12. إرسال الإشارة
+        return self._signal_result(self.action, ["إشارة جيدة"], stop_loss, take_profit, allocation_pct, quality_score)
 
-    def _signal_result(self, action: str, reasons: List[str], stop_loss: float = 0.0, take_profit: float = 0.0, allocation_pct: float = 0.0):
+    def _signal_result(self, action: str, reasons: List[str], stop_loss: float = 0.0, take_profit: float = 0.0, allocation_pct: float = 0.0, quality_score: int = 0):
         return {
             "symbol": self.symbol,
             "action": action,
@@ -874,7 +1078,7 @@ class StrategyEngine:
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "allocation_pct": allocation_pct * 100,
-            "score": self.score,
+            "quality_score": quality_score,
             "reasons": reasons,
             "adx": self.adx,
             "rsi": self.rsi,
@@ -884,16 +1088,16 @@ class StrategyEngine:
             "is_actionable": action in ("BUY", "SELL")
         }
 
-    def _calculate_risk(self, action: str) -> Tuple[float, float, float]:
+    def _calculate_risk(self, action: str, volatility_multiplier: float = 1.0) -> Tuple[float, float, float]:
         if action not in ('BUY', 'SELL'):
             return 0.0, 0.0, 0.0
         
         min_stop_pct = 0.01
-        atr_stop = self.atr * 2 if self.atr > 0 else self.current_price * 0.015
+        atr_stop = self.atr * 2 * volatility_multiplier if self.atr > 0 else self.current_price * 0.015
         max_stop_distance = max(atr_stop, self.current_price * min_stop_pct)
         
         if action == 'BUY' and self.last_swing_low is not None:
-            stop_loss = self.last_swing_low - self.atr * 0.25
+            stop_loss = self.last_swing_low - self.atr * 0.25 * volatility_multiplier
             if self.current_price - stop_loss < max_stop_distance:
                 stop_loss = self.current_price - max_stop_distance
             if stop_loss > self.current_price * 0.98:
@@ -908,7 +1112,7 @@ class StrategyEngine:
             return stop_loss, take_profit, allocation_pct
         
         elif action == 'SELL' and self.last_swing_high is not None:
-            stop_loss = self.last_swing_high + self.atr * 0.25
+            stop_loss = self.last_swing_high + self.atr * 0.25 * volatility_multiplier
             if stop_loss - self.current_price < max_stop_distance:
                 stop_loss = self.current_price + max_stop_distance
             if stop_loss < self.current_price * 1.02:
@@ -925,7 +1129,7 @@ class StrategyEngine:
         return 0.0, 0.0, 0.0
 
 # ===================================================================
-# 11. مقدم البيانات (DataProvider) - مع دمج المحركات الجديدة
+# 11. مقدم البيانات (DataProvider) - معدل
 # ===================================================================
 
 class DataProvider:
@@ -964,25 +1168,35 @@ class DataProvider:
             return data if isinstance(data, list) else []
 
     async def filter_symbols(self) -> List[str]:
-        """تصفية ديناميكية باستخدام Liquidity Ranking Engine + Sector Rotation"""
+        """تصفية ديناميكية باستخدام Universe Engine + Ranking Engine + Sector Rotation"""
         all_stats = await self.get_all_24hr_stats()
         if not all_stats:
             return []
         
-        # 1. تشغيل محرك التصنيف
-        ranking_engine = LiquidityRankingEngine(all_stats)
+        # 1. بناء الكون الديناميكي
+        universe_engine = UniverseEngine(all_stats)
+        universe = universe_engine.build()
+        
+        # 2. تصفية الإحصائيات للعملات المختارة فقط
+        filtered_stats = []
+        for item in all_stats:
+            if item.get("symbol") in universe:
+                filtered_stats.append(item)
+        
+        # 3. تشغيل محرك التصنيف
+        ranking_engine = LiquidityRankingEngine(filtered_stats)
         ranked = ranking_engine.filter_and_rank()
         
         if not ranked:
             return []
         
-        # 2. جلب إحصائيات BTC و ETH للقوة النسبية
+        # 4. جلب إحصائيات BTC و ETH للقوة النسبية
         btc_stats = await self.fetch_stats("BTCUSDT")
         eth_stats = await self.fetch_stats("ETHUSDT")
         btc_change = btc_stats.change_24h if btc_stats else 0.0
         eth_change = eth_stats.change_24h if eth_stats else 0.0
         
-        # 3. بناء قائمة للإحصائيات لـ Sector Rotation
+        # 5. بناء قائمة للإحصائيات لـ Sector Rotation
         stats_list = []
         for item in ranked:
             stats = MarketStats(
@@ -992,10 +1206,10 @@ class DataProvider:
             )
             stats_list.append((item["symbol"], stats))
         
-        # 4. تشغيل محرك القطاعات
+        # 6. تشغيل محرك القطاعات
         sector_engine = SectorRotationEngine(stats_list)
         
-        # 5. إضافة القوة النسبية وأولوية القطاع
+        # 7. إضافة القوة النسبية وأولوية القطاع
         for item in ranked:
             rel = RelativeStrengthEngine.calculate(
                 item["symbol"], item["change"], btc_change, eth_change
@@ -1004,7 +1218,7 @@ class DataProvider:
             item["eth_relative"] = rel["eth_relative"]
             item["sector_priority"] = sector_engine.get_priority(item["symbol"])
         
-        # 6. حساب النتيجة النهائية
+        # 8. حساب النتيجة النهائية
         for item in ranked:
             sector_bonus = (1 - item["sector_priority"] / 10) if item["sector_priority"] < 999 else 0
             item["final_score"] = (
@@ -1018,7 +1232,7 @@ class DataProvider:
         return [item["symbol"] for item in ranked[:config.MAX_UNIVERSE_SIZE]]
 
 # ===================================================================
-# 12. الماسح الضوئي (Scanner)
+# 12. الماسح الضوئي (Scanner) - معدل
 # ===================================================================
 
 class Scanner:
@@ -1067,12 +1281,21 @@ class Scanner:
 
     async def _process_symbol(self, symbol: str, sem: asyncio.Semaphore):
         async with sem:
+            # 1. التحقق من فترة التبريد
             cooldown = await self.repo.get_cooldown(symbol)
             if cooldown:
                 last_time = datetime.fromisoformat(cooldown)
                 if (datetime.now() - last_time) < timedelta(minutes=config.COOLDOWN_MINUTES):
                     return None
             
+            # 2. التحقق من المخاطر على مستوى المحفظة
+            risk_engine = PortfolioRiskEngine(self.repo)
+            can_trade, reason = await risk_engine.can_trade()
+            if not can_trade:
+                logger.warning(f"⛔ {reason}")
+                return None
+            
+            # 3. جلب البيانات
             data_5m = await self.provider.fetch_klines(symbol, '5m', 100)
             data_1h = await self.provider.fetch_klines(symbol, '1h', 100)
             data_4h = await self.provider.fetch_klines(symbol, '4h', 60)
@@ -1081,6 +1304,14 @@ class Scanner:
             if not all([data_5m, data_1h, data_4h, stats]) or stats.volume < config.MIN_VOLUME_USD:
                 return None
             
+            # 4. التحقق من القطاع
+            open_signals = await self.repo.get_open_signals()
+            allowed, reason = CorrelationFilter.is_allowed(symbol, open_signals)
+            if not allowed:
+                logger.warning(f"⛔ {reason}")
+                return None
+            
+            # 5. تحليل الإشارة
             engine = StrategyEngine(symbol, data_5m, data_1h, data_4h, stats)
             signal = engine.generate_signal()
             
@@ -1089,14 +1320,18 @@ class Scanner:
             if signal['stop_loss'] == 0.0 or signal['take_profit'] == 0.0:
                 return None
             
+            # 6. حفظ الإشارة
+            sector = CorrelationFilter.get_sector(symbol)
             await self.repo.save_signal(
                 signal['symbol'], signal['action'],
-                signal['entry_price'], signal['stop_loss'], signal['take_profit']
+                signal['entry_price'], signal['stop_loss'], signal['take_profit'],
+                sector, signal.get('quality_score', 0)
             )
             
+            # 7. إرسال الإشارة
             await self._broadcast_signal(signal)
             await self.repo.set_cooldown(symbol, datetime.now().isoformat())
-            logger.info(f"✅ Signal generated for {symbol}: {signal['action']}")
+            logger.info(f"✅ Signal generated for {symbol}: {signal['action']} (Score: {signal.get('quality_score', 0)})")
             return signal
 
     async def _broadcast_signal(self, signal: dict):
@@ -1109,6 +1344,8 @@ class Scanner:
             logger.warning("📢 لا يوجد مشتركين")
             return
         
+        quality_label = "ELITE" if signal.get('quality_score', 0) >= config.SCORE_ELITE else "STRONG" if signal.get('quality_score', 0) >= config.SCORE_STRONG else "GOOD"
+        
         msg = (
             f"🚨 *إشارة تداول جديدة*\n\n"
             f"📊 العملة: `{signal['symbol']}`\n"
@@ -1117,10 +1354,10 @@ class Scanner:
             f"🛑 وقف الخسارة: `{signal['stop_loss']:.4f}`\n"
             f"🎯 جني الأرباح: `{signal['take_profit']:.4f}`\n"
             f"📊 تخصيص رأس المال: `{signal.get('allocation_pct', 0):.1f}%`\n"
-            f"📈 الثقة (Score): `{signal['score']}/10`\n"
-            f"📝 الأسباب: {', '.join(signal['reasons'][:3])}\n"
-            f"📊 ADX: {signal['adx']:.1f} | RSI: {signal['rsi']:.1f}\n"
-            f"📉 نظام السوق: `{signal.get('market_regime', 'N/A')}`"
+            f"⭐ جودة الإشارة: `{signal.get('quality_score', 0)}/100` ({quality_label})\n"
+            f"📈 ADX: {signal['adx']:.1f} | RSI: {signal['rsi']:.1f}\n"
+            f"📉 نظام السوق: `{signal.get('market_regime', 'N/A')}`\n"
+            f"📝 الأسباب: {', '.join(signal['reasons'][:3])}"
         )
         
         for user_id in subscribers:
@@ -1135,7 +1372,7 @@ class Scanner:
                 logger.error(f"فشل إرسال الإشارة لـ {user_id}: {e}")
 
 # ===================================================================
-# 13. المتتبع (Tracker) - مع دقة 1 دقيقة وحساب Max Drawdown
+# 13. المتتبع (Tracker) - معدل
 # ===================================================================
 
 class Tracker:
@@ -1166,7 +1403,7 @@ class Tracker:
             return
         
         for signal in open_signals:
-            signal_id, symbol, entry_time, entry_price, stop_loss, take_profit, signal_type = signal
+            signal_id, symbol, entry_time, entry_price, stop_loss, take_profit, signal_type, sector = signal
             
             data_1m = await self.provider.fetch_klines(symbol, '1m', 60)
             if not data_1m:
@@ -1218,6 +1455,7 @@ class Tracker:
             logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
 
     async def _update_global_performance(self):
+        """تحديث مقاييس الأداء الكلية مع Max Drawdown و Sharpe Ratio"""
         stats = await self.repo.db.fetchrow(
             """
             SELECT 
@@ -1243,22 +1481,36 @@ class Tracker:
         
         expectancy = (win_rate * (avg_win or 0)) - ((1 - win_rate) * abs(avg_loss or 0))
         
-        # حساب Max Drawdown الحقيقي
-        equity_curve = []
+        # حساب Max Drawdown
         rows = await self.repo.db.fetch(
             "SELECT profit_loss FROM signals_history WHERE status IN ('WIN', 'LOSS', 'TIME_EXIT') ORDER BY timestamp"
         )
         cumulative = 0.0
         peak = 0.0
         max_drawdown = 0.0
+        returns = []
+        
         for row in rows:
-            cumulative += row[0] if row[0] else 0.0
+            pl = row[0] if row[0] else 0.0
+            cumulative += pl
+            returns.append(pl)
             if cumulative > peak:
                 peak = cumulative
             if peak > 0:
                 drawdown = (peak - cumulative) / peak
                 if drawdown > max_drawdown:
                     max_drawdown = drawdown
+        
+        # حساب Sharpe Ratio (بسيط)
+        sharpe_ratio = 0.0
+        if returns and len(returns) > 1:
+            avg_return = sum(returns) / len(returns)
+            variance = sum((r - avg_return) ** 2 for r in returns) / len(returns)
+            std_dev = math.sqrt(variance) if variance > 0 else 0.01
+            sharpe_ratio = (avg_return / std_dev) * math.sqrt(365) if std_dev > 0 else 0.0
+        
+        # حساب الخسائر المتتالية
+        consecutive_losses = await self.repo.get_consecutive_losses()
         
         metrics = {
             'total_trades': total,
@@ -1269,11 +1521,14 @@ class Tracker:
             'avg_win': avg_win or 0.0,
             'avg_loss': avg_loss or 0.0,
             'expectancy': expectancy,
-            'max_drawdown': max_drawdown
+            'max_drawdown': max_drawdown,
+            'sharpe_ratio': sharpe_ratio,
+            'consecutive_losses': consecutive_losses
         }
         await self.repo.update_performance(metrics)
-        logger.info(f"📈 تم تحديث الأداء: {wins}/{total} ربح ({win_rate*100:.1f}%) | MaxDD: {max_drawdown*100:.1f}%")
-        # ===================================================================
+        logger.info(f"📈 أداء: {wins}/{total} ربح ({win_rate*100:.1f}%) | MaxDD: {max_drawdown*100:.1f}% | Sharpe: {sharpe_ratio:.2f}")
+
+# ===================================================================
 # 14. أوامر التليجرام (CommandHandlers)
 # ===================================================================
 
@@ -1328,23 +1583,27 @@ class CommandHandlers:
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         subscribers = await self.repo.get_subscribers()
         pending = await self.repo.get_pending()
+        open_count = len(await self.repo.get_open_signals())
         await update.message.reply_text(
             f"📊 <b>حالة البوت</b>\n"
             f"👥 المشتركين: {len(subscribers)}\n"
             f"⏳ في الانتظار: {len(pending)}\n"
+            f"📊 الصفقات المفتوحة: {open_count}/{config.MAX_OPEN_TRADES}\n"
             f"⏱️ فترة التبريد: {config.COOLDOWN_MINUTES} دقيقة\n"
             f"🔄 قاعدة البيانات: SQLite",
             parse_mode="HTML"
         )
 
     async def performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # جلب أحدث المقاييس من قاعدة البيانات
         latest = await self.repo.get_latest_performance()
         if not latest:
             await update.message.reply_text("📊 لا توجد بيانات أداء كافية حتى الآن.")
             return
         
-        total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown = latest
+        total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown, sharpe_ratio, consecutive_losses = latest
+        
+        # تصنيف الأداء
+        rating = "🌟 ممتاز" if win_rate >= 0.6 and sharpe_ratio > 1.0 else "👍 جيد" if win_rate >= 0.5 else "📊 يحتاج تحسين"
         
         await update.message.reply_text(
             f"📈 <b>أداء البوت المتقدم</b>\n\n"
@@ -1356,12 +1615,15 @@ class CommandHandlers:
             f"📉 متوسط الخسارة: {avg_loss:.2f}%\n"
             f"📊 معامل الربح: {profit_factor:.2f}\n"
             f"📈 العائد المتوقع: {expectancy:.2f}%\n"
-            f"📉 أقصى انخفاض: {max_drawdown*100:.1f}%",
+            f"📉 أقصى انخفاض: {max_drawdown*100:.1f}%\n"
+            f"📊 نسبة شارب: {sharpe_ratio:.2f}\n"
+            f"📉 خسائر متتالية: {consecutive_losses}\n"
+            f"🏆 التقييم: {rating}",
             parse_mode="HTML"
         )
 
 # ===================================================================
-# 15. بوت التليجرام (SignalBot) - مع إعادة المحاولة عند التعارض
+# 15. بوت التليجرام (SignalBot)
 # ===================================================================
 
 class SignalBot:
@@ -1388,7 +1650,6 @@ class SignalBot:
             await self.application.bot.delete_webhook()
             logger.info("✅ Webhook deleted")
             
-            # تأخير بسيط لإعطاء فرصة للعملية القديمة للإغلاق
             await asyncio.sleep(3)
             
             await self.application.initialize()
@@ -1397,7 +1658,6 @@ class SignalBot:
             await self.application.start()
             logger.info("✅ Application started")
             
-            # محاولة بدء polling مع إعادة المحاولة عند التعارض
             max_retries = 5
             for attempt in range(max_retries):
                 try:
@@ -1448,7 +1708,7 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot V18 - Fully Operational"
+        return "✅ Elite Signal Bot V19 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
@@ -1545,7 +1805,7 @@ class ServiceManager:
         logger.info("✅ تم إيقاف جميع الخدمات وتنظيف الموارد")
 
 # ===================================================================
-# 18. الدالة الرئيسية (main_async)
+# 18. الدالة الرئيسية
 # ===================================================================
 
 async def main_async():
