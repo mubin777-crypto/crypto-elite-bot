@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - Production Stable (No Event Loop Errors)
+Elite Signal Bot v14 - STABLE VERSION
+يعمل على Render دون أخطاء حلقة الأحداث.
 """
 
 import os
@@ -23,7 +24,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===================================================================
-# 0. الإعدادات (Config)
+# 1. الإعدادات (Config)
 # ===================================================================
 
 class Config:
@@ -51,7 +52,7 @@ class Config:
 config = Config()
 
 # ===================================================================
-# 1. إعدادات التسجيل
+# 2. إعدادات التسجيل
 # ===================================================================
 
 logging.basicConfig(
@@ -61,7 +62,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ===================================================================
-# 2. نماذج البيانات
+# 3. نماذج البيانات (Data Models)
 # ===================================================================
 
 @dataclass
@@ -109,7 +110,7 @@ class MarketStats:
     last: float
 
 # ===================================================================
-# 3. المؤشرات الفنية
+# 4. المؤشرات الفنية (Indicators)
 # ===================================================================
 
 class Indicators:
@@ -218,7 +219,7 @@ class Indicators:
         return {"upper": sma + std_dev * std, "middle": sma, "lower": sma - std_dev * std}
 
 # ===================================================================
-# 4. هيكل السوق (Market Structure)
+# 5. هيكل السوق (MarketStructure)
 # ===================================================================
 
 class MarketStructure:
@@ -293,7 +294,7 @@ class MarketStructure:
         return 'neutral'
 
 # ===================================================================
-# 5. جلب البيانات (BinanceClient)
+# 6. جلب البيانات (BinanceClient)
 # ===================================================================
 
 class BinanceClient:
@@ -370,7 +371,7 @@ class BinanceClient:
         return symbols
 
 # ===================================================================
-# 6. قاعدة البيانات (SQLite)
+# 7. قاعدة البيانات (SQLite)
 # ===================================================================
 
 class Database:
@@ -447,7 +448,7 @@ class Database:
             return await cursor.fetchone()
 
 # ===================================================================
-# 7. مستودع البيانات (Repository)
+# 8. مستودع البيانات (Repository)
 # ===================================================================
 
 class Repository:
@@ -523,7 +524,7 @@ class Repository:
         )
 
 # ===================================================================
-# 8. محرك الاستراتيجية (Strategy Engine)
+# 9. محرك الاستراتيجية (StrategyEngine)
 # ===================================================================
 
 class StrategyEngine:
@@ -705,7 +706,7 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 9. مقدم البيانات (DataProvider)
+# 10. مقدم البيانات (DataProvider)
 # ===================================================================
 
 class DataProvider:
@@ -757,7 +758,7 @@ class DataProvider:
         return [c[0] for c in candidates[:config.TOP_SYMBOLS_COUNT]]
 
 # ===================================================================
-# 10. خدمات الخلفية (Scanner, Tracker)
+# 11. خدمات الخلفية (Scanner, Tracker)
 # ===================================================================
 
 class Scanner:
@@ -879,7 +880,7 @@ class Tracker:
             logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
 
 # ===================================================================
-# 11. بوت تليجرام (Telegram)
+# 12. بوت تليجرام (Telegram Bot)
 # ===================================================================
 
 class CommandHandlers:
@@ -942,7 +943,7 @@ class CommandHandlers:
         gross_loss = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE status = 'LOSS'")
         gross_profit = gross_profit[0] if gross_profit else 0.0
         gross_loss = abs(gross_loss[0]) if gross_loss else 0.0
-        
+
         stats = await self.repo.db.fetchrow("SELECT COUNT(*), SUM(win), AVG(profit_loss) FROM signals_history WHERE status IN ('WIN', 'LOSS')")
         if not stats or stats[0] == 0:
             await update.message.reply_text("📊 لا توجد بيانات أداء كافية حتى الآن.")
@@ -997,45 +998,51 @@ class SignalBot:
         await self.application.run_polling(allowed_updates=["message", "callback_query"])
 
 # ===================================================================
-# 12. التشغيل الرئيسي - الحل النهائي (بدون إغلاق الحلقة)
+# 13. التشغيل الرئيسي (Main)
 # ===================================================================
 
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-@flask_app.route('/healthcheck')
-def healthcheck():
-    return "✅ Elite Signal Bot v14 - Running"
-
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
-
 async def main():
+    logger.info("🚀 Starting Elite Signal Bot v14...")
+
     # 1. قاعدة البيانات
     db = Database()
     if not await db.connect():
         logger.error("❌ Failed to connect to database")
         return
-    
+
     repo = Repository(db)
     provider = DataProvider()
-    
+
     # 2. تشغيل Flask في خيط منفصل
+    flask_app = Flask(__name__)
+
+    @flask_app.route('/')
+    @flask_app.route('/healthcheck')
+    def healthcheck():
+        return "✅ Elite Signal Bot v14 - Running"
+
+    def run_flask():
+        flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
+
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask server started")
-    
+
     # 3. إنشاء خدمات الخلفية
     scanner = Scanner(provider, repo)
     tracker = Tracker(provider, repo)
     bot = SignalBot(repo)
-    
+
     # 4. تشغيل المهام الخلفية كـ Tasks
     asyncio.create_task(scanner.start())
     asyncio.create_task(tracker.start())
-    
+
     # 5. تشغيل بوت التليجرام (يحجب الحلقة)
     await bot.start_polling()
+
+# ===================================================================
+# 14. نقطة الدخول
+# ===================================================================
 
 if __name__ == "__main__":
     try:
