@@ -2,15 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot - الإصدار النهائي المعدّل بالكامل
-تم تطبيق جميع التعديلات المطلوبة:
-- إزالة signal_handler غير الآمن
-- استخدام طلب API واحد لجلب إحصائيات العملات
-- إصلاح منطق TIME_EXIT
-- إصلاح Scanner.start لتجنب المسح المزدوج
-- تحسين إيقاف الخدمات بشكل منظم
-- تغيير position_size إلى allocation_pct
-- تحسين معالجة CancelledError
+Elite Signal Bot - الإصدار النهائي مع حل التعارض
+تم إضافة إعادة المحاولة عند بدء polling وتحسين إيقاف الخدمات
 """
 
 import os
@@ -49,7 +42,7 @@ class Config:
     ADX_PERIOD = 14
     MIN_ADX_STRONG = 25
     MIN_CHANGE_1H = 0.3
-    ALLOCATION_PCT = 2.0  # نسبة رأس المال المخصصة للصفقة (تم تعديل الاسم)
+    ALLOCATION_PCT = 2.0
     MAX_TRADE_DURATION_HOURS = 48
     RISK_PER_TRADE_PCT = 1.0
     MIN_RISK_REWARD_RATIO = 1.5
@@ -601,7 +594,6 @@ class StrategyEngine:
         return curr_vol / avg_vol if avg_vol > 0 else 0.0
 
     def _compute_score(self) -> None:
-        """نظام النقاط المعدل - لا نقاط للاتجاه المحايد"""
         score = 0.0
         reasons = []
         
@@ -659,7 +651,6 @@ class StrategyEngine:
         self.reasons = reasons
 
     def generate_signal(self):
-        # شرط التغير الأدنى
         if abs(self.change_1h) < config.MIN_CHANGE_1H:
             return self._signal_result("WATCH", [f"التغير خلال ساعة {self.change_1h:.2f}% أقل من الحد الأدنى {config.MIN_CHANGE_1H}%"])
         
@@ -710,7 +701,7 @@ class StrategyEngine:
             "entry_price": self.current_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
-            "allocation_pct": allocation_pct * 100,  # تحويل إلى نسبة مئوية
+            "allocation_pct": allocation_pct * 100,
             "score": self.score,
             "reasons": reasons,
             "adx": self.adx,
@@ -722,7 +713,6 @@ class StrategyEngine:
         }
 
     def _calculate_risk(self, action: str) -> Tuple[float, float, float]:
-        """حساب وقف الخسارة، جني الأرباح، ونسبة تخصيص رأس المال"""
         if action not in ('BUY', 'SELL'):
             return 0.0, 0.0, 0.0
         
@@ -767,7 +757,7 @@ class StrategyEngine:
         return 0.0, 0.0, 0.0
 
 # ===================================================================
-# 10. مقدم البيانات (DataProvider) - تم إعادة بنائه بالكامل
+# 10. مقدم البيانات (DataProvider)
 # ===================================================================
 
 class DataProvider:
@@ -800,14 +790,12 @@ class DataProvider:
             return await client.get_exchange_info() or []
 
     async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
-        """جلب إحصائيات 24 ساعة لجميع العملات في طلب واحد (محسّن)"""
         session = await self._get_session()
         async with BinanceClient(session) as client:
             data = await client._request('/api/v3/ticker/24hr')
             return data if isinstance(data, list) else []
 
     async def filter_symbols(self) -> List[str]:
-        """تصفية العملات باستخدام طلب واحد فقط (محسّن جذرياً)"""
         all_stats = await self.get_all_24hr_stats()
         if not all_stats:
             return []
@@ -840,7 +828,6 @@ class Scanner:
         self.is_running = False
 
     async def start(self):
-        """بدء الماسح - تم إصلاح المسح المزدوج"""
         if self.is_running:
             return
         self.is_running = True
@@ -910,7 +897,6 @@ class Scanner:
             return signal
 
     async def _broadcast_signal(self, signal: dict):
-        """إرسال الإشارة لجميع المشتركين"""
         if not self.bot_app:
             logger.error("❌ Bot application not set for broadcasting")
             return
@@ -1020,7 +1006,6 @@ class Tracker:
             logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
 
     async def _update_global_performance(self):
-        """حساب وتحديث مقاييس الأداء الكلية"""
         stats = await self.repo.db.fetchrow(
             """
             SELECT 
@@ -1166,7 +1151,7 @@ class CommandHandlers:
         )
 
 # ===================================================================
-# 13. بوت التليجرام - تم تحسين الإيقاف
+# 13. بوت التليجرام (مع إعادة المحاولة عند التعارض)
 # ===================================================================
 
 class SignalBot:
@@ -1192,24 +1177,44 @@ class SignalBot:
         try:
             await self.application.bot.delete_webhook()
             logger.info("✅ Webhook deleted")
+            
             await self.application.initialize()
             logger.info("✅ Application initialized")
+            
             await self.application.start()
             logger.info("✅ Application started")
-            await self.application.updater.start_polling()
-            logger.info("✅ Polling started")
-            self.is_running = True
+            
+            # محاولة بدء polling مع إعادة المحاولة عند التعارض
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    await self.application.updater.start_polling()
+                    logger.info("✅ Polling started successfully")
+                    self.is_running = True
+                    return
+                except Exception as e:
+                    if "Conflict" in str(e) and attempt < max_retries - 1:
+                        logger.warning(f"⚠️ تعارض توكن، إعادة محاولة {attempt+1}/{max_retries} بعد 5 ثوان...")
+                        await asyncio.sleep(5)
+                        await self.application.bot.delete_webhook()
+                    else:
+                        raise
+            
         except Exception as e:
             logger.error(f"❌ Failed to start bot: {e}")
             raise
 
     async def stop(self):
-        """إيقاف آمن مع معالجة CancelledError"""
         if not self.application:
             return
         try:
-            if self.application.updater and self.application.updater.running:
-                await self.application.updater.stop()
+            if self.application.updater:
+                try:
+                    if self.application.updater.running:
+                        await self.application.updater.stop()
+                except:
+                    pass
+            
             if self.application.running:
                 await self.application.stop()
             await self.application.shutdown()
@@ -1230,11 +1235,11 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot v17 - Fully Operational"
+        return "✅ Elite Signal Bot v18 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
-# 15. المدير الرئيسي للخدمات - تم تحسين الإيقاف
+# 15. المدير الرئيسي للخدمات (مع تحسين الإيقاف)
 # ===================================================================
 
 class ServiceManager:
@@ -1281,7 +1286,6 @@ class ServiceManager:
             await asyncio.sleep(60)
 
     async def shutdown(self):
-        """إيقاف منظم مع معالجة CancelledError"""
         logger.info("🛑 بدء إيقاف الخدمات...")
         self.is_running = False
         
@@ -1304,16 +1308,21 @@ class ServiceManager:
         
         if self.bot:
             try:
+                if self.bot.application and self.bot.application.updater:
+                    try:
+                        await self.bot.application.updater.stop()
+                    except:
+                        pass
                 await self.bot.stop()
             except Exception:
                 logger.exception("❌ خطأ أثناء إغلاق Telegram")
+            self.bot.is_running = False
         
         if self.provider:
             try:
                 await self.provider.close()
             except Exception:
                 logger.exception("❌ خطأ أثناء إغلاق DataProvider")
-        
         if self.db:
             try:
                 await self.db.close()
@@ -1323,7 +1332,7 @@ class ServiceManager:
         logger.info("✅ تم إيقاف جميع الخدمات وتنظيف الموارد")
 
 # ===================================================================
-# 16. الدالة الرئيسية - مع إعادة رفع CancelledError
+# 16. الدالة الرئيسية (مع إعادة رفع CancelledError)
 # ===================================================================
 
 async def main_async():
@@ -1347,7 +1356,7 @@ async def main_async():
         await manager.shutdown()
 
 # ===================================================================
-# 17. نقطة الدخول الرئيسية - بدون signal_handler
+# 17. نقطة الدخول الرئيسية
 # ===================================================================
 
 if __name__ == "__main__":
