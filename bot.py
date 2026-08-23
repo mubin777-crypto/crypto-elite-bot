@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - Full Production Version
+Elite Signal Bot v14 - Production Ready (Fixed Event Loop)
 """
 
 import os
@@ -11,7 +11,6 @@ import time
 import logging
 import asyncio
 import threading
-import signal
 import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
@@ -47,8 +46,6 @@ class Config:
     MAX_TRADE_DURATION_HOURS = 48
     RISK_PER_TRADE_PCT = 1.0
     MIN_RISK_REWARD_RATIO = 1.5
-    SIGNAL_VALIDITY_MINUTES = 15
-    PERFORMANCE_UPDATE_INTERVAL_SECONDS = 60
     PORT = int(os.environ.get("PORT", 10000))
 
 config = Config()
@@ -882,7 +879,7 @@ class Tracker:
             logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
 
 # ===================================================================
-# 11. بوت تليجرام (مع إصلاح الحلقة)
+# 11. بوت تليجرام
 # ===================================================================
 
 class CommandHandlers:
@@ -941,7 +938,6 @@ class CommandHandlers:
         )
 
     async def performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # حساب الأداء مباشرة من قاعدة البيانات
         gross_profit = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE status = 'WIN'")
         gross_loss = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE status = 'LOSS'")
         gross_profit = gross_profit[0] if gross_profit else 0.0
@@ -1001,13 +997,8 @@ class SignalBot:
         logger.info("✅ Webhook deleted, starting polling...")
         await self.application.run_polling(allowed_updates=["message", "callback_query"])
 
-    async def stop(self):
-        if self.application:
-            await self.application.stop()
-
-
 # ===================================================================
-# 12. التشغيل الرئيسي - الحل النهائي المستقر
+# 12. التشغيل الرئيسي - الحل النهائي البسيط
 # ===================================================================
 
 flask_app = Flask(__name__)
@@ -1020,31 +1011,15 @@ def healthcheck():
 def run_flask():
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
 
-db = None
+# متغيرات عالمية
 provider = None
 repo = None
 scanner = None
 tracker = None
-bot = None
 background_tasks = []
-stop_event = None
-
-async def shutdown():
-    logger.info("🔄 Shutting down...")
-    if scanner: await scanner.stop()
-    if tracker: await tracker.stop()
-    if bot: await bot.stop()
-    if provider: await provider.close()
-    if db: await db.close()
-    for task in background_tasks:
-        if not task.done():
-            task.cancel()
-    logger.info("✅ Shutdown complete")
 
 async def main():
-    global db, provider, repo, scanner, tracker, bot, background_tasks, stop_event
-    
-    stop_event = asyncio.Event()
+    global provider, repo, scanner, tracker, background_tasks
     
     # 1. قاعدة البيانات
     db = Database()
@@ -1069,47 +1044,22 @@ async def main():
     background_tasks.append(asyncio.create_task(scanner.start()))
     background_tasks.append(asyncio.create_task(tracker.start()))
     
-    # 5. تشغيل بوت التليجرام في مهمة منفصلة (لا تحجب الحلقة)
-    polling_task = asyncio.create_task(bot.start_polling())
-    
-    # 6. انتظار إشارة الإيقاف
-    await stop_event.wait()
-    
-    # 7. إلغاء مهمة polling وإيقاف البوت
-    polling_task.cancel()
-    try:
-        await polling_task
-    except asyncio.CancelledError:
-        pass
-    
-    # 8. إيقاف المهام الخلفية
-    await shutdown()
+    # 5. تشغيل بوت التليجرام (يحجب الحلقة)
+    await bot.start_polling()
 
-def signal_handler(loop, sig):
+def signal_handler(sig, frame):
     logger.info(f"Received signal {sig}")
-    if stop_event:
-        asyncio.run_coroutine_threadsafe(stop_event.set(), loop)
+    sys.exit(0)
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # إعداد معالجة الإشارات باستخدام loop.add_signal_handler
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, signal_handler, loop, sig)
-        except NotImplementedError:
-            pass
+    # معالجة الإشارات بشكل بسيط
+    import signal
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        loop.run_until_complete(main())
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("🛑 Interrupted by user")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
-    finally:
-        # إلغاء جميع المهام المتبقية
-        for task in asyncio.all_tasks(loop):
-            task.cancel()
-        loop.run_until_complete(asyncio.gather(*asyncio.all_tasks(loop), return_exceptions=True))
-        loop.close()
