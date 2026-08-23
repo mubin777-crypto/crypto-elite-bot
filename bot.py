@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - SQLite Version (Fixed Telegram Response)
+Elite Signal Bot v14 - SQLite Version (Fixed)
 """
 
 import os
@@ -270,7 +270,7 @@ class MarketStructure:
         return 'neutral'
 
 # ===================================================================
-# 5. جلب البيانات (Data Provider)
+# 5. جلب البيانات (Binance Client)
 # ===================================================================
 
 class BinanceClient:
@@ -895,11 +895,11 @@ class PerformanceService:
         return metrics
 
 # ===================================================================
-# 11. بوت تليجرام (Telegram Bot) - تم إصلاحه
+# 11. بوت تليجرام (Telegram Bot) - المعدل
 # ===================================================================
 
 class CommandHandlers:
-    def __init__(self, repo: Repository):
+    def __init__(self, repo):
         self.repo = repo
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -971,7 +971,7 @@ class CommandHandlers:
         )
 
 class SignalBot:
-    def __init__(self, repo: Repository):
+    def __init__(self, repo):
         self.repo = repo
         self.handlers = CommandHandlers(repo)
         self.application = None
@@ -988,7 +988,8 @@ class SignalBot:
     async def start(self):
         if not self.application:
             self.build()
-        await self.application.delete_webhook()
+        # ✅ التصحيح: استخدام bot.delete_webhook() بدلاً من application.delete_webhook()
+        await self.application.bot.delete_webhook()
         logger.info("✅ Webhook deleted, starting polling...")
         await self.application.run_polling(allowed_updates=["message", "callback_query"])
 
@@ -997,7 +998,7 @@ class SignalBot:
             await self.application.stop()
 
 # ===================================================================
-# 12. التشغيل الرئيسي (Main) - معدل
+# 12. التشغيل الرئيسي (Main) - معدل لتجنب إغلاق الحلقة
 # ===================================================================
 
 flask_app = Flask(__name__)
@@ -1030,7 +1031,7 @@ async def main():
     repo = Repository(db)
     provider = DataProvider()
     
-    # 2. تشغيل Flask في خيط منفصل
+    # 2. تشغيل Flask في خيط منفصل (لا يؤثر على حلقة asyncio)
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask server started")
