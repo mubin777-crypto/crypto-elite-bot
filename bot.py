@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot V25 - الإصدار النهائي المتكامل
-مع جميع التعديلات: INCONCLUSIVE, Atomic Commit, Outbox, Supervisor, Tracker Coverage
-يعمل على Render مع خادم Flask الصحي لمنع السكون
+Elite Signal Bot V26 - الإصدار النهائي مع تحسينات جلب البيانات وسجلات تفصيلية
 """
 
 import os
@@ -49,7 +47,7 @@ class Config:
     CORE_SIZE = 25
     DYNAMIC_SIZE = 45
     
-    # Filters - خفض الحد الأدنى لضمان ظهور عملات
+    # Filters
     MIN_VOLUME_USD = 50_000
     MIN_TRADES_24H = 100
     MIN_VOLATILITY_DAILY = 0.3
@@ -350,7 +348,7 @@ class MarketStructure:
         return 'neutral'
 
 # ===================================================================
-# 6. جلب البيانات (BinanceClient) - مع RateLimiter مشترك
+# 6. جلب البيانات (BinanceClient) - مع RateLimiter مشترك وتحسين السجلات
 # ===================================================================
 
 class BinanceRateLimiter:
@@ -384,14 +382,25 @@ class BinanceClient:
                 async with self.session.get(url, params=params, timeout=self.timeout) as resp:
                     if resp.status == 200:
                         return await resp.json()
-                    elif resp.status == 429:
-                        retry_after = int(resp.headers.get('Retry-After', 10))
-                        logger.warning(f"⚠️ Rate limit hit, waiting {retry_after}s")
-                        await asyncio.sleep(retry_after)
                     else:
-                        break
+                        # سجل تفصيلي عن فشل الطلب
+                        logger.warning(f"⚠️ Binance API request failed: {resp.status} - {resp.reason} for {url}")
+                        # إذا كان 429، انتظر وأعد المحاولة
+                        if resp.status == 429:
+                            retry_after = int(resp.headers.get('Retry-After', 10))
+                            logger.warning(f"⏳ Rate limit, waiting {retry_after}s")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        else:
+                            break
+            except asyncio.TimeoutError:
+                logger.error(f"⏱️ Timeout on attempt {attempt+1} for {url}")
+                if attempt < self.retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    return None
             except Exception as e:
-                logger.error(f"Request error: {e}")
+                logger.error(f"❌ Exception on attempt {attempt+1}: {e}")
                 if attempt < self.retries - 1:
                     await asyncio.sleep(2 ** attempt)
                 else:
@@ -428,7 +437,13 @@ class BinanceClient:
 
     async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
         data = await self._request('/api/v3/ticker/24hr')
-        return data if isinstance(data, list) else []
+        if data is None:
+            logger.error("❌ Binance /ticker/24hr returned None")
+            return None
+        if not isinstance(data, list):
+            logger.error(f"❌ Binance /ticker/24hr returned unexpected type: {type(data)}")
+            return None
+        return data
 
 # ===================================================================
 # 7. قاعدة البيانات (Database)
@@ -787,7 +802,7 @@ class Repository:
         return returns
 
 # ===================================================================
-# 9. المحركات المتقدمة (Advanced Engines) - مع سجلات إضافية
+# 9. المحركات المتقدمة (Advanced Engines) - بدون تغيير
 # ===================================================================
 
 class UniverseEngine:
@@ -1216,7 +1231,7 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 11. مقدم البيانات (DataProvider) - مع سجلات إضافية
+# 11. مقدم البيانات (DataProvider) - مع سجلات محسنة وإعادة محاولة
 # ===================================================================
 
 class DataProvider:
@@ -1253,15 +1268,21 @@ class DataProvider:
         now = time.time()
         if self._stats_cache is not None and (now - self._stats_cache_time) < self._cache_ttl:
             return self._stats_cache
+
         client = await self._ensure_client()
-        data = await client.get_all_24hr_stats()
-        if data:
-            self._stats_cache = data
-            self._stats_cache_time = now
-            logger.info(f"📊 تم جلب إحصائيات {len(data)} عملة من Binance")
-        else:
-            logger.warning("⚠️ فشل جلب إحصائيات Binance")
-        return data
+        # محاولة جلب البيانات مع إعادة محاولة بسيطة
+        for attempt in range(3):
+            data = await client.get_all_24hr_stats()
+            if data is not None and isinstance(data, list) and len(data) > 0:
+                self._stats_cache = data
+                self._stats_cache_time = now
+                logger.info(f"📊 تم جلب إحصائيات {len(data)} عملة من Binance")
+                return data
+            logger.warning(f"⚠️ محاولة {attempt+1}/3 فشل جلب إحصائيات Binance, إعادة المحاولة بعد 2 ثانية...")
+            await asyncio.sleep(2)
+
+        logger.error("❌ فشل جلب إحصائيات Binance بعد 3 محاولات")
+        return None
 
     async def filter_symbols(self) -> List[str]:
         all_stats = await self.get_all_24hr_stats()
@@ -1436,7 +1457,7 @@ class Scanner:
         )
 
 # ===================================================================
-# 13. Outbox Worker - مع سجلات إضافية
+# 13. Outbox Worker
 # ===================================================================
 
 class OutboxWorker:
@@ -1723,7 +1744,7 @@ class Tracker:
         logger.info(f"📈 أداء: {wins}/{decisive_total} ربح ({win_rate*100:.1f}%) | عائد: {total_return:.2f}% | MaxDD: {max_drawdown*100:.1f}%")
 
 # ===================================================================
-# 15. أوامر التليجرام (CommandHandlers) - مع سجلات إضافية
+# 15. أوامر التليجرام (CommandHandlers)
 # ===================================================================
 
 class CommandHandlers:
@@ -1876,7 +1897,7 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot V25 - Fully Operational"
+        return "✅ Elite Signal Bot V26 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
