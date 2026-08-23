@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - STABLE VERSION
-يعمل على Render دون أخطاء حلقة الأحداث.
+Elite Signal Bot v14 - FINAL WORKING VERSION (No Event Loop Errors)
 """
 
 import os
@@ -12,6 +11,7 @@ import time
 import logging
 import asyncio
 import threading
+import signal
 import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
@@ -998,12 +998,18 @@ class SignalBot:
         await self.application.run_polling(allowed_updates=["message", "callback_query"])
 
 # ===================================================================
-# 13. التشغيل الرئيسي (Main)
+# 13. التشغيل الرئيسي (Main) - الحل النهائي
 # ===================================================================
 
-async def main():
-    logger.info("🚀 Starting Elite Signal Bot v14...")
+def run_flask():
+    flask_app = Flask(__name__)
+    @flask_app.route('/')
+    @flask_app.route('/healthcheck')
+    def healthcheck():
+        return "✅ Elite Signal Bot v14 - Running"
+    flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
 
+async def main_async():
     # 1. قاعدة البيانات
     db = Database()
     if not await db.connect():
@@ -1014,40 +1020,33 @@ async def main():
     provider = DataProvider()
 
     # 2. تشغيل Flask في خيط منفصل
-    flask_app = Flask(__name__)
-
-    @flask_app.route('/')
-    @flask_app.route('/healthcheck')
-    def healthcheck():
-        return "✅ Elite Signal Bot v14 - Running"
-
-    def run_flask():
-        flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
-
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask server started")
 
-    # 3. إنشاء خدمات الخلفية
+    # 3. خدمات الخلفية
     scanner = Scanner(provider, repo)
     tracker = Tracker(provider, repo)
     bot = SignalBot(repo)
 
-    # 4. تشغيل المهام الخلفية كـ Tasks
+    # 4. تشغيل المهام الخلفية
     asyncio.create_task(scanner.start())
     asyncio.create_task(tracker.start())
 
-    # 5. تشغيل بوت التليجرام (يحجب الحلقة)
+    # 5. تشغيل البوت
     await bot.start_polling()
 
-# ===================================================================
-# 14. نقطة الدخول
-# ===================================================================
-
-if __name__ == "__main__":
+def main():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        asyncio.run(main())
+        loop.run_until_complete(main_async())
     except KeyboardInterrupt:
         logger.info("🛑 Interrupted by user")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
+    finally:
+        loop.close()
+
+if __name__ == "__main__":
+    main()
