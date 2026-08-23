@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - SQLite Version
+Elite Signal Bot v14 - SQLite Version (Fixed Telegram Response)
 """
 
 import os
@@ -13,7 +13,6 @@ import asyncio
 import threading
 import signal
 import math
-import sqlite3
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta
@@ -357,7 +356,6 @@ class Database:
         self._closed = False
 
     async def connect(self):
-        # إنشاء قاعدة البيانات والجداول
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS subscribers (user_id TEXT PRIMARY KEY)
@@ -426,7 +424,7 @@ class Database:
             return await cursor.fetchone()
 
 # ===================================================================
-# 7. مستودع البيانات (Repository) - معدل لـ SQLite
+# 7. مستودع البيانات (Repository)
 # ===================================================================
 
 class Repository:
@@ -502,7 +500,7 @@ class Repository:
         )
 
 # ===================================================================
-# 8. محرك الاستراتيجية (Strategy Engine) - نفس الكود
+# 8. محرك الاستراتيجية (Strategy Engine)
 # ===================================================================
 
 class StrategyEngine:
@@ -897,7 +895,7 @@ class PerformanceService:
         return metrics
 
 # ===================================================================
-# 11. بوت تليجرام (Telegram Bot)
+# 11. بوت تليجرام (Telegram Bot) - تم إصلاحه
 # ===================================================================
 
 class CommandHandlers:
@@ -999,7 +997,7 @@ class SignalBot:
             await self.application.stop()
 
 # ===================================================================
-# 12. التشغيل الرئيسي (Main)
+# 12. التشغيل الرئيسي (Main) - معدل
 # ===================================================================
 
 flask_app = Flask(__name__)
@@ -1018,27 +1016,36 @@ repo = None
 scanner = None
 tracker = None
 bot = None
+background_tasks = []
 
 async def main():
-    global db, provider, repo, scanner, tracker, bot
+    global db, provider, repo, scanner, tracker, bot, background_tasks
+    
+    # 1. قاعدة البيانات
     db = Database()
     if not await db.connect():
         logger.error("❌ Failed to connect to database")
         return
+    
     repo = Repository(db)
     provider = DataProvider()
-    scanner = Scanner(provider, repo)
-    tracker = Tracker(provider, repo)
-    bot = SignalBot(repo)
+    
+    # 2. تشغيل Flask في خيط منفصل
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask server started")
-    await asyncio.gather(
-        scanner.start(),
-        tracker.start(),
-        bot.start(),
-        return_exceptions=True
-    )
+    
+    # 3. إنشاء خدمات الخلفية
+    scanner = Scanner(provider, repo)
+    tracker = Tracker(provider, repo)
+    bot = SignalBot(repo)
+    
+    # 4. تشغيل المهام الخلفية كـ Tasks منفصلة
+    background_tasks.append(asyncio.create_task(scanner.start()))
+    background_tasks.append(asyncio.create_task(tracker.start()))
+    
+    # 5. تشغيل بوت التليجرام (يحجب الحلقة)
+    await bot.start()
 
 async def shutdown():
     logger.info("🔄 Shutting down...")
@@ -1047,6 +1054,9 @@ async def shutdown():
     if bot: await bot.stop()
     if provider: await provider.close()
     if db: await db.close()
+    for task in background_tasks:
+        if not task.done():
+            task.cancel()
     logger.info("✅ Shutdown complete")
 
 def signal_handler(sig, frame):
