@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot - الإصدار النهائي المُعدّل بالكامل
-تم إصلاح جميع أخطاء asyncio، الخيوط، وإدارة الجلسات
-يعمل بحلقة أحداث واحدة مركزية
+Elite Signal Bot - الإصدار النهائي (يعمل على Render)
+تم إصلاح أخطاء Updater.initialize و Closing event loop
 """
 
 import os
@@ -669,7 +668,7 @@ class StrategyEngine:
         return {
             "symbol": self.symbol,
             "action": action,
-            "entry_price": self.current_price,   # تعديل: استخدام السعر الحالي بدلاً من ref_price
+            "entry_price": self.current_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "score": self.score,
@@ -977,7 +976,7 @@ class CommandHandlers:
         )
 
 # ===================================================================
-# 13. بوت التليجرام (SignalBot) - تم تعديله لتشغيل polling بشكل صحيح
+# 13. بوت التليجرام - تم إصلاح مشكلة Updater.initialize
 # ===================================================================
 
 class SignalBot:
@@ -985,6 +984,7 @@ class SignalBot:
         self.repo = repo
         self.handlers = CommandHandlers(repo)
         self.application = None
+        self.is_running = False
 
     def build(self):
         self.application = Application.builder().token(config.TELEGRAM_TOKEN).build()
@@ -996,39 +996,62 @@ class SignalBot:
         return self.application
 
     async def start_polling(self):
+        """التسلسل الصحيح لبدء البوت حسب إصدار v20+"""
         if not self.application:
             self.build()
-        # حذف webhook لضمان polling
-        await self.application.bot.delete_webhook()
-        logger.info("✅ Webhook deleted, starting polling...")
-        # تشغيل polling بشكل غير محظور (يعمل كـ coroutine)
-        await self.application.updater.start_polling()
-        # نبدأ التطبيق (يظل يعمل في الخلفية)
-        await self.application.start()
-        logger.info("✅ Telegram bot is polling")
+        
+        try:
+            # الخطوة 1: حذف webhook
+            await self.application.bot.delete_webhook()
+            logger.info("✅ Webhook deleted")
+            
+            # الخطوة 2: تهيئة التطبيق (الأمر الجديد في v20+)
+            await self.application.initialize()
+            logger.info("✅ Application initialized")
+            
+            # الخطوة 3: بدء التطبيق
+            await self.application.start()
+            logger.info("✅ Application started")
+            
+            # الخطوة 4: بدء polling
+            await self.application.updater.start_polling()
+            logger.info("✅ Polling started")
+            
+            self.is_running = True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to start bot: {e}")
+            raise
 
     async def stop(self):
-        if self.application:
+        """إيقاف البوت بشكل آمن"""
+        if not self.is_running or not self.application:
+            return
+        
+        try:
             await self.application.updater.stop()
             await self.application.stop()
             await self.application.shutdown()
+            self.is_running = False
             logger.info("✅ Telegram bot stopped")
+        except Exception as e:
+            logger.error(f"❌ Error stopping bot: {e}")
 
 # ===================================================================
 # 14. تشغيل Flask (في خيط منفصل)
 # ===================================================================
 
 def run_flask():
-    """تشغيل Flask في خيط منفصل (هذا هو الاستثناء الوحيد المسموح به)"""
+    """تشغيل Flask في خيط منفصل"""
     flask_app = Flask(__name__)
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot v14 - Running with SINGLE EVENT LOOP"
+        return "✅ Elite Signal Bot v15 - Running"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
-# 15. المدير الرئيسي للخدمات (حلقة أحداث واحدة)
+# 15. المدير الرئيسي للخدمات - تم إعادة هيكلته بالكامل
 # ===================================================================
 
 class ServiceManager:
@@ -1040,6 +1063,7 @@ class ServiceManager:
         self.tracker = None
         self.bot = None
         self._tasks = []
+        self.is_running = False
 
     async def initialize(self):
         """تهيئة جميع الموارد بشكل غير متزامن"""
@@ -1051,33 +1075,36 @@ class ServiceManager:
         self.repo = Repository(self.db)
         self.scanner = Scanner(self.provider, self.repo)
         self.tracker = Tracker(self.provider, self.repo)
-        
-        # بناء البوت
         self.bot = SignalBot(self.repo)
         self.bot.build()
         
-        logger.info("✅ تم تهيئة جميع الخدمات بنجاح تحت حلقة حدث واحدة")
+        logger.info("✅ تم تهيئة جميع الخدمات بنجاح")
 
     async def start_services(self):
-        """بدء جميع الخدمات كـ Tasks داخل نفس الحلقة"""
-        # 1. تشغيل الماسح والمتتبع في الخلفية
+        """بدء جميع الخدمات"""
+        self.is_running = True
+        
+        # 1. بدء الماسح والمتتبع
         scanner_task = asyncio.create_task(self.scanner.start(), name="Scanner")
         tracker_task = asyncio.create_task(self.tracker.start(), name="Tracker")
         self._tasks.extend([scanner_task, tracker_task])
-        logger.info("🔄 تم تشغيل Scanner و Tracker كـ Background Tasks")
+        logger.info("🔄 تم تشغيل Scanner و Tracker")
 
-        # 2. تشغيل بوت التليجرام
-        logger.info("🤖 بدء تشغيل Telegram Bot Polling...")
-        await self.bot.start_polling()
-        logger.info("✅ جميع الخدمات تعمل الآن بكفاءة")
+        # 2. بدء بوت التليجرام
+        try:
+            await self.bot.start_polling()
+        except Exception as e:
+            logger.error(f"❌ فشل بدء التليجرام: {e}")
+            raise
 
-        # 3. إبقاء الحلقة حية (الانتظار حتى يتم إلغاء المهام أو إنهاء البرنامج)
-        while True:
-            await asyncio.sleep(3600)  # استمرار الحلقة
+        # 3. إبقاء الحلقة حية
+        while self.is_running:
+            await asyncio.sleep(60)
 
-    async def shutdown(self):
-        """إيقاف جميع الخدمات وتنظيف الموارد بشكل آمن"""
+    async def shutdown(self, error: bool = False):
+        """إيقاف جميع الخدمات بشكل آمن"""
         logger.info("🛑 بدء إيقاف الخدمات...")
+        self.is_running = False
         
         # 1. إيقاف الماسح والمتتبع
         if self.scanner:
@@ -1085,74 +1112,82 @@ class ServiceManager:
         if self.tracker:
             self.tracker.is_running = False
         
-        # 2. إلغاء المهام الخلفية
+        # 2. إلغاء المهام
         for task in self._tasks:
             if not task.done():
                 task.cancel()
                 try:
                     await task
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, Exception):
                     pass
         
-        # 3. إيقاف بوت التليجرام
+        # 3. إيقاف البوت (حتى لو كان هناك خطأ)
         if self.bot:
-            await self.bot.stop()
+            try:
+                await self.bot.stop()
+            except Exception as e:
+                logger.error(f"❌ خطأ أثناء إيقاف البوت: {e}")
         
         # 4. إغلاق الموارد
         if self.provider:
-            await self.provider.close()
-        if self.db:
-            await self.db.close()
+            try:
+                await self.provider.close()
+            except Exception as e:
+                logger.error(f"❌ خطأ أثناء إغلاق provider: {e}")
         
-        logger.info("✅ تم إيقاف جميع الخدمات وتنظيف الموارد بنجاح")
+        if self.db:
+            try:
+                await self.db.close()
+            except Exception as e:
+                logger.error(f"❌ خطأ أثناء إغلاق db: {e}")
+        
+        logger.info("✅ تم إيقاف جميع الخدمات وتنظيف الموارد")
 
 # ===================================================================
-# 16. الدالة الرئيسية غير المتزامنة (نقطة الدخول الوحيدة)
+# 16. الدالة الرئيسية
 # ===================================================================
 
 async def main_async():
     """نقطة الدخول غير المتزامنة الرئيسية"""
     manager = ServiceManager()
+    
     try:
         await manager.initialize()
         
-        # تشغيل Flask في خيط منفصل (آمن)
+        # تشغيل Flask في خيط منفصل
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        logger.info("🌐 تم تشغيل Flask في خيط منفصل")
-
-        # بدء الخدمات غير المتزامنة
+        logger.info("🌐 تم تشغيل Flask")
+        
+        # بدء الخدمات
         await manager.start_services()
             
     except asyncio.CancelledError:
         logger.info("تم إلغاء المهام الرئيسية")
     except Exception as e:
-        logger.error(f"❌ حدث خطأ فادح في الحلقة الرئيسية: {e}", exc_info=True)
+        logger.error(f"❌ حدث خطأ فادح: {e}")
     finally:
-        # التنظيف النهائي
-        await manager.shutdown()
+        await manager.shutdown(error=True)
 
 # ===================================================================
-# 17. معالج الإشارات ونقطة الدخول الرئيسية
+# 17. نقطة الدخول الرئيسية
 # ===================================================================
 
 def signal_handler(sig, frame):
-    """معالج الإشارات لإنهاء الحلقة بشكل آمن"""
-    logger.info(f"📡 استلام إشارة {sig}. جارٍ الإيقاف الآمن...")
+    """معالج الإشارات"""
+    logger.info(f"📡 استلام إشارة {sig}. جارٍ الإيقاف...")
     sys.exit(0)
 
 if __name__ == "__main__":
-    # تسجيل معالجات الإشارات
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    logger.info("🚀 تشغيل البوت بحلقة حدث واحدة مركزية...")
+    logger.info("🚀 تشغيل البوت...")
     try:
-        # تشغيل الحلقة غير المتزامنة الرئيسية (مرة واحدة فقط)
         asyncio.run(main_async())
     except KeyboardInterrupt:
-        logger.info("🛑 تم إيقاف التطبيق بواسطة المستخدم")
+        logger.info("🛑 تم الإيقاف بواسطة المستخدم")
     except Exception as e:
         logger.error(f"💥 فشل التشغيل: {e}")
     finally:
-        logger.info("🏁 تم إنهاء التطبيق بالكامل")
+        logger.info("🏁 تم إنهاء التطبيق")
