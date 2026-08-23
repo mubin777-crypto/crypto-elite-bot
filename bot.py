@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - Production Ready (Fixed Event Loop)
+Elite Signal Bot v14 - Production Stable (No Event Loop Errors)
 """
 
 import os
@@ -879,7 +879,7 @@ class Tracker:
             logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
 
 # ===================================================================
-# 11. بوت تليجرام
+# 11. بوت تليجرام (Telegram)
 # ===================================================================
 
 class CommandHandlers:
@@ -974,7 +974,6 @@ class CommandHandlers:
             parse_mode="HTML"
         )
 
-
 class SignalBot:
     def __init__(self, repo):
         self.repo = repo
@@ -998,7 +997,7 @@ class SignalBot:
         await self.application.run_polling(allowed_updates=["message", "callback_query"])
 
 # ===================================================================
-# 12. التشغيل الرئيسي - الحل النهائي البسيط
+# 12. التشغيل الرئيسي - الحل النهائي (بدون إغلاق الحلقة)
 # ===================================================================
 
 flask_app = Flask(__name__)
@@ -1011,16 +1010,7 @@ def healthcheck():
 def run_flask():
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
 
-# متغيرات عالمية
-provider = None
-repo = None
-scanner = None
-tracker = None
-background_tasks = []
-
 async def main():
-    global provider, repo, scanner, tracker, background_tasks
-    
     # 1. قاعدة البيانات
     db = Database()
     if not await db.connect():
@@ -1040,23 +1030,14 @@ async def main():
     tracker = Tracker(provider, repo)
     bot = SignalBot(repo)
     
-    # 4. تشغيل المهام الخلفية كـ Tasks منفصلة
-    background_tasks.append(asyncio.create_task(scanner.start()))
-    background_tasks.append(asyncio.create_task(tracker.start()))
+    # 4. تشغيل المهام الخلفية كـ Tasks
+    asyncio.create_task(scanner.start())
+    asyncio.create_task(tracker.start())
     
     # 5. تشغيل بوت التليجرام (يحجب الحلقة)
     await bot.start_polling()
 
-def signal_handler(sig, frame):
-    logger.info(f"Received signal {sig}")
-    sys.exit(0)
-
 if __name__ == "__main__":
-    # معالجة الإشارات بشكل بسيط
-    import signal
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
