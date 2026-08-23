@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot V26 - الإصدار النهائي مع تحسينات جلب البيانات وسجلات تفصيلية
+Elite Signal Bot V27 - إصلاح استقرار اتصال Binance وتحسين جلب البيانات
 """
 
 import os
@@ -23,7 +23,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===================================================================
-# 1. الإعدادات (Config)
+# 1. الإعدادات (Config) - مع زيادة المهلة
 # ===================================================================
 
 class Config:
@@ -31,8 +31,8 @@ class Config:
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///elite_signal_bot.db")
     BINANCE_BASE_URL = os.environ.get("BINANCE_BASE_URL", "https://api.binance.com")
-    BINANCE_TIMEOUT = 10
-    BINANCE_RETRIES = 3
+    BINANCE_TIMEOUT = 30  # زيادة المهلة
+    BINANCE_RETRIES = 5   # زيادة عدد المحاولات
     PORT = int(os.environ.get("PORT", 10000))
     
     # Universe
@@ -348,7 +348,7 @@ class MarketStructure:
         return 'neutral'
 
 # ===================================================================
-# 6. جلب البيانات (BinanceClient) - مع RateLimiter مشترك وتحسين السجلات
+# 6. جلب البيانات (BinanceClient) - مع تحسينات الاستقرار
 # ===================================================================
 
 class BinanceRateLimiter:
@@ -382,15 +382,14 @@ class BinanceClient:
                 async with self.session.get(url, params=params, timeout=self.timeout) as resp:
                     if resp.status == 200:
                         return await resp.json()
+                    elif resp.status == 429:
+                        retry_after = int(resp.headers.get('Retry-After', 10))
+                        logger.warning(f"⏳ Rate limit, waiting {retry_after}s (attempt {attempt+1}/{self.retries})")
+                        await asyncio.sleep(retry_after)
                     else:
-                        # سجل تفصيلي عن فشل الطلب
-                        logger.warning(f"⚠️ Binance API request failed: {resp.status} - {resp.reason} for {url}")
-                        # إذا كان 429، انتظر وأعد المحاولة
-                        if resp.status == 429:
-                            retry_after = int(resp.headers.get('Retry-After', 10))
-                            logger.warning(f"⏳ Rate limit, waiting {retry_after}s")
-                            await asyncio.sleep(retry_after)
-                            continue
+                        logger.warning(f"⚠️ Binance API status {resp.status} for {url}, attempt {attempt+1}")
+                        if attempt < self.retries - 1:
+                            await asyncio.sleep(2 ** attempt)
                         else:
                             break
             except asyncio.TimeoutError:
@@ -399,8 +398,14 @@ class BinanceClient:
                     await asyncio.sleep(2 ** attempt)
                 else:
                     return None
+            except aiohttp.ClientError as e:
+                logger.error(f"🌐 Client error on attempt {attempt+1}: {e}")
+                if attempt < self.retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    return None
             except Exception as e:
-                logger.error(f"❌ Exception on attempt {attempt+1}: {e}")
+                logger.error(f"❌ Unexpected error on attempt {attempt+1}: {e}")
                 if attempt < self.retries - 1:
                     await asyncio.sleep(2 ** attempt)
                 else:
@@ -438,7 +443,7 @@ class BinanceClient:
     async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
         data = await self._request('/api/v3/ticker/24hr')
         if data is None:
-            logger.error("❌ Binance /ticker/24hr returned None")
+            logger.error("❌ Binance /ticker/24hr returned None after retries")
             return None
         if not isinstance(data, list):
             logger.error(f"❌ Binance /ticker/24hr returned unexpected type: {type(data)}")
@@ -1231,7 +1236,7 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 11. مقدم البيانات (DataProvider) - مع سجلات محسنة وإعادة محاولة
+# 11. مقدم البيانات (DataProvider) - مع تحسين جلب البيانات وإعادة المحاولة
 # ===================================================================
 
 class DataProvider:
@@ -1241,7 +1246,7 @@ class DataProvider:
         self._rate_limiter = BinanceRateLimiter()
         self._stats_cache = None
         self._stats_cache_time = 0
-        self._cache_ttl = 300
+        self._cache_ttl = 300  # 5 دقائق
 
     async def _ensure_client(self):
         if self._session is None:
@@ -1266,22 +1271,36 @@ class DataProvider:
 
     async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
         now = time.time()
+        # استخدام الكاش إذا كان حديثاً
         if self._stats_cache is not None and (now - self._stats_cache_time) < self._cache_ttl:
             return self._stats_cache
 
         client = await self._ensure_client()
-        # محاولة جلب البيانات مع إعادة محاولة بسيطة
-        for attempt in range(3):
-            data = await client.get_all_24hr_stats()
-            if data is not None and isinstance(data, list) and len(data) > 0:
-                self._stats_cache = data
-                self._stats_cache_time = now
-                logger.info(f"📊 تم جلب إحصائيات {len(data)} عملة من Binance")
-                return data
-            logger.warning(f"⚠️ محاولة {attempt+1}/3 فشل جلب إحصائيات Binance, إعادة المحاولة بعد 2 ثانية...")
-            await asyncio.sleep(2)
+        # محاولات متعددة مع تأخير تصاعدي
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            try:
+                data = await client.get_all_24hr_stats()
+                if data is not None and isinstance(data, list) and len(data) > 0:
+                    self._stats_cache = data
+                    self._stats_cache_time = now
+                    logger.info(f"📊 تم جلب إحصائيات {len(data)} عملة من Binance")
+                    return data
+                else:
+                    logger.warning(f"⚠️ محاولة {attempt+1}/{max_attempts}: بيانات غير صالحة (None أو فارغة)")
+                    if attempt < max_attempts - 1:
+                        delay = 2 ** attempt  # 1, 2, 4, 8 ثواني
+                        logger.info(f"⏳ انتظار {delay} ثانية قبل المحاولة التالية...")
+                        await asyncio.sleep(delay)
+            except Exception as e:
+                logger.error(f"❌ محاولة {attempt+1}/{max_attempts} فشلت: {e}")
+                if attempt < max_attempts - 1:
+                    delay = 2 ** attempt
+                    await asyncio.sleep(delay)
+                else:
+                    return None
 
-        logger.error("❌ فشل جلب إحصائيات Binance بعد 3 محاولات")
+        logger.error(f"❌ فشل جلب إحصائيات Binance بعد {max_attempts} محاولات")
         return None
 
     async def filter_symbols(self) -> List[str]:
@@ -1897,7 +1916,7 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot V26 - Fully Operational"
+        return "✅ Elite Signal Bot V27 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
