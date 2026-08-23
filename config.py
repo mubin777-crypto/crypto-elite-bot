@@ -6,8 +6,8 @@ class Config:
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
     
-    # Database
-    DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:pass@localhost:5432/elite_signal_bot")
+    # Database (SQLite)
+    DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///elite_signal_bot.db")
     
     # Binance API
     BINANCE_BASE_URL = os.environ.get("BINANCE_BASE_URL", "https://api.binance.com")
@@ -19,7 +19,7 @@ class Config:
     MIN_VOLATILITY = 0.5
     TOP_SYMBOLS_COUNT = 25
     COOLDOWN_MINUTES = 45
-    SCAN_INTERVAL_SECONDS = 300  # 5 minutes
+    SCAN_INTERVAL_SECONDS = 300
     
     # Indicators
     RSI_PERIOD = 6
