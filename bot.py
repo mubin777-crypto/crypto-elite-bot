@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - SQLite Version (Fixed)
+Elite Signal Bot v14 - Stable Version
 """
 
 import os
@@ -28,7 +28,7 @@ from config import Config
 config = Config()
 
 # ===================================================================
-# 1. إعدادات التسجيل (Logging)
+# 1. إعدادات التسجيل
 # ===================================================================
 
 logging.basicConfig(
@@ -38,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ===================================================================
-# 2. نماذج البيانات (Data Models)
+# 2. نماذج البيانات
 # ===================================================================
 
 @dataclass
@@ -86,7 +86,7 @@ class MarketStats:
     last: float
 
 # ===================================================================
-# 3. مؤشرات فنية (Indicators)
+# 3. المؤشرات الفنية
 # ===================================================================
 
 class Indicators:
@@ -195,7 +195,7 @@ class Indicators:
         return {"upper": sma + std_dev * std, "middle": sma, "lower": sma - std_dev * std}
 
 # ===================================================================
-# 4. هيكل السوق (Market Structure)
+# 4. هيكل السوق
 # ===================================================================
 
 class MarketStructure:
@@ -270,7 +270,7 @@ class MarketStructure:
         return 'neutral'
 
 # ===================================================================
-# 5. جلب البيانات (Binance Client)
+# 5. جلب البيانات
 # ===================================================================
 
 class BinanceClient:
@@ -347,7 +347,7 @@ class BinanceClient:
         return symbols
 
 # ===================================================================
-# 6. قاعدة البيانات (SQLite باستخدام aiosqlite)
+# 6. قاعدة البيانات
 # ===================================================================
 
 class Database:
@@ -424,7 +424,7 @@ class Database:
             return await cursor.fetchone()
 
 # ===================================================================
-# 7. مستودع البيانات (Repository)
+# 7. مستودع البيانات
 # ===================================================================
 
 class Repository:
@@ -500,7 +500,7 @@ class Repository:
         )
 
 # ===================================================================
-# 8. محرك الاستراتيجية (Strategy Engine)
+# 8. محرك الاستراتيجية (مختصر)
 # ===================================================================
 
 class StrategyEngine:
@@ -682,7 +682,7 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 9. مقدم البيانات (Data Provider)
+# 9. مقدم البيانات
 # ===================================================================
 
 class DataProvider:
@@ -734,7 +734,7 @@ class DataProvider:
         return [c[0] for c in candidates[:config.TOP_SYMBOLS_COUNT]]
 
 # ===================================================================
-# 10. خدمات المسح والتتبع والأداء
+# 10. خدمات الخلفية
 # ===================================================================
 
 class Scanner:
@@ -855,47 +855,8 @@ class Tracker:
             await self.repo.close_signal(signal_id, status, exit_price, profit_loss, duration_minutes, win)
             logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
 
-class PerformanceService:
-    def __init__(self, repo: Repository):
-        self.repo = repo
-
-    async def update_metrics(self) -> Dict:
-        async def get_sum(condition: str):
-            rows = await self.repo.db.fetch(f"SELECT SUM(profit_loss) FROM signals_history WHERE {condition}")
-            return rows[0][0] if rows else 0.0
-        gross_profit = await get_sum("status = 'WIN'")
-        gross_loss = abs(await get_sum("status = 'LOSS'"))
-        stats = await self.repo.db.fetch("SELECT COUNT(*), SUM(win), AVG(profit_loss) FROM signals_history WHERE status IN ('WIN', 'LOSS')")
-        total, wins, avg_profit = stats[0] if stats else (0, 0, 0.0)
-        wins = wins or 0
-        losses = total - wins
-        win_rate = wins / total if total > 0 else 0.0
-        avg_win, avg_loss = 0.0, 0.0
-        if wins > 0:
-            avg_win_row = await self.repo.db.fetch("SELECT AVG(profit_loss) FROM signals_history WHERE status = 'WIN'")
-            avg_win = avg_win_row[0][0] if avg_win_row else 0.0
-        if losses > 0:
-            avg_loss_row = await self.repo.db.fetch("SELECT AVG(profit_loss) FROM signals_history WHERE status = 'LOSS'")
-            avg_loss = avg_loss_row[0][0] if avg_loss_row else 0.0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
-        expectancy = (win_rate * avg_win) - ((1 - win_rate) * abs(avg_loss)) if total > 0 else 0.0
-        max_drawdown = 0.0
-        metrics = {
-            'total_trades': total,
-            'wins': wins,
-            'losses': losses,
-            'win_rate': win_rate,
-            'profit_factor': profit_factor,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'expectancy': expectancy,
-            'max_drawdown': max_drawdown
-        }
-        await self.repo.update_performance(metrics)
-        return metrics
-
 # ===================================================================
-# 11. بوت تليجرام (Telegram Bot) - المعدل
+# 11. بوت تليجرام - المعدل النهائي
 # ===================================================================
 
 class CommandHandlers:
@@ -954,19 +915,40 @@ class CommandHandlers:
         )
 
     async def performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        perf = PerformanceService(self.repo)
-        metrics = await perf.update_metrics()
+        # حساب الأداء مباشرة
+        gross_profit = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE status = 'WIN'")
+        gross_loss = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE status = 'LOSS'")
+        gross_profit = gross_profit[0] if gross_profit else 0.0
+        gross_loss = abs(gross_loss[0]) if gross_loss else 0.0
+        
+        stats = await self.repo.db.fetchrow("SELECT COUNT(*), SUM(win), AVG(profit_loss) FROM signals_history WHERE status IN ('WIN', 'LOSS')")
+        if not stats or stats[0] == 0:
+            await update.message.reply_text("📊 لا توجد بيانات أداء كافية حتى الآن.")
+            return
+        total, wins, avg_profit = stats
+        wins = wins or 0
+        losses = total - wins
+        win_rate = wins / total if total > 0 else 0.0
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+        avg_win = 0.0
+        avg_loss = 0.0
+        if wins > 0:
+            avg_win_row = await self.repo.db.fetchrow("SELECT AVG(profit_loss) FROM signals_history WHERE status = 'WIN'")
+            avg_win = avg_win_row[0] if avg_win_row else 0.0
+        if losses > 0:
+            avg_loss_row = await self.repo.db.fetchrow("SELECT AVG(profit_loss) FROM signals_history WHERE status = 'LOSS'")
+            avg_loss = avg_loss_row[0] if avg_loss_row else 0.0
+        expectancy = (win_rate * avg_win) - ((1 - win_rate) * abs(avg_loss)) if total > 0 else 0.0
         await update.message.reply_text(
             f"📈 <b>أداء البوت</b>\n\n"
-            f"📊 إجمالي الصفقات: {metrics['total_trades']}\n"
-            f"✅ الصفقات الرابحة: {metrics['wins']}\n"
-            f"❌ الصفقات الخاسرة: {metrics['losses']}\n"
-            f"📈 نسبة الربح: {metrics['win_rate']*100:.1f}%\n"
-            f"💰 متوسط الربح: {metrics['avg_win']:.2f}%\n"
-            f"📉 متوسط الخسارة: {metrics['avg_loss']:.2f}%\n"
-            f"📊 معامل الربح: {metrics['profit_factor']:.2f}\n"
-            f"📈 العائد المتوقع: {metrics['expectancy']:.2f}%\n"
-            f"📉 الحد الأقصى للتراجع: {metrics['max_drawdown']:.2f}%",
+            f"📊 إجمالي الصفقات: {total}\n"
+            f"✅ الصفقات الرابحة: {wins}\n"
+            f"❌ الصفقات الخاسرة: {losses}\n"
+            f"📈 نسبة الربح: {win_rate*100:.1f}%\n"
+            f"💰 متوسط الربح: {avg_win:.2f}%\n"
+            f"📉 متوسط الخسارة: {avg_loss:.2f}%\n"
+            f"📊 معامل الربح: {profit_factor:.2f}\n"
+            f"📈 العائد المتوقع: {expectancy:.2f}%",
             parse_mode="HTML"
         )
 
@@ -985,10 +967,9 @@ class SignalBot:
         logger.info("✅ Telegram bot built")
         return self.application
 
-    async def start(self):
+    async def start_polling(self):
         if not self.application:
             self.build()
-        # ✅ التصحيح: استخدام bot.delete_webhook() بدلاً من application.delete_webhook()
         await self.application.bot.delete_webhook()
         logger.info("✅ Webhook deleted, starting polling...")
         await self.application.run_polling(allowed_updates=["message", "callback_query"])
@@ -998,7 +979,7 @@ class SignalBot:
             await self.application.stop()
 
 # ===================================================================
-# 12. التشغيل الرئيسي (Main) - معدل لتجنب إغلاق الحلقة
+# 12. التشغيل الرئيسي - الحل النهائي
 # ===================================================================
 
 flask_app = Flask(__name__)
@@ -1006,7 +987,7 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 @flask_app.route('/healthcheck')
 def healthcheck():
-    return "✅ Elite Signal Bot v14 - Running (SQLite)"
+    return "✅ Elite Signal Bot v14 - Running"
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
@@ -1018,9 +999,29 @@ scanner = None
 tracker = None
 bot = None
 background_tasks = []
+loop = None
+
+def signal_handler(sig, frame):
+    logger.info(f"Received signal {sig}")
+    if loop:
+        asyncio.run_coroutine_threadsafe(shutdown(), loop)
+    sys.exit(0)
+
+async def shutdown():
+    logger.info("🔄 Shutting down...")
+    if scanner: await scanner.stop()
+    if tracker: await tracker.stop()
+    if bot: await bot.stop()
+    if provider: await provider.close()
+    if db: await db.close()
+    for task in background_tasks:
+        if not task.done():
+            task.cancel()
+    logger.info("✅ Shutdown complete")
 
 async def main():
-    global db, provider, repo, scanner, tracker, bot, background_tasks
+    global db, provider, repo, scanner, tracker, bot, background_tasks, loop
+    loop = asyncio.get_running_loop()
     
     # 1. قاعدة البيانات
     db = Database()
@@ -1031,7 +1032,7 @@ async def main():
     repo = Repository(db)
     provider = DataProvider()
     
-    # 2. تشغيل Flask في خيط منفصل (لا يؤثر على حلقة asyncio)
+    # 2. تشغيل Flask في خيط منفصل
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask server started")
@@ -1046,24 +1047,7 @@ async def main():
     background_tasks.append(asyncio.create_task(tracker.start()))
     
     # 5. تشغيل بوت التليجرام (يحجب الحلقة)
-    await bot.start()
-
-async def shutdown():
-    logger.info("🔄 Shutting down...")
-    if scanner: await scanner.stop()
-    if tracker: await tracker.stop()
-    if bot: await bot.stop()
-    if provider: await provider.close()
-    if db: await db.close()
-    for task in background_tasks:
-        if not task.done():
-            task.cancel()
-    logger.info("✅ Shutdown complete")
-
-def signal_handler(sig, frame):
-    logger.info(f"Received signal {sig}")
-    asyncio.create_task(shutdown())
-    sys.exit(0)
+    await bot.start_polling()
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
