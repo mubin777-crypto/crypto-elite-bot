@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot V24 - الإصدار النهائي المتكامل
-مع جميع الإصلاحات: INCONCLUSIVE, Atomic Commit, Outbox, Supervisor, Tracker Coverage
+Elite Signal Bot V25 - الإصدار النهائي المتكامل
+مع جميع التعديلات: INCONCLUSIVE, Atomic Commit, Outbox, Supervisor, Tracker Coverage
+يعمل على Render مع خادم Flask الصحي لمنع السكون
 """
 
 import os
@@ -24,11 +25,11 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===================================================================
-# 1. الإعدادات (Config) - المعدلة
+# 1. الإعدادات (Config)
 # ===================================================================
 
 class Config:
-    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8947724831:AAEyG4SynRJflgZe10XUpbzkhssn84ar1Qg")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///elite_signal_bot.db")
     BINANCE_BASE_URL = os.environ.get("BINANCE_BASE_URL", "https://api.binance.com")
@@ -48,10 +49,10 @@ class Config:
     CORE_SIZE = 25
     DYNAMIC_SIZE = 45
     
-    # Filters - خفض الحد الأدنى للحجم لضمان ظهور عملات
-    MIN_VOLUME_USD = 200_000
-    MIN_TRADES_24H = 200
-    MIN_VOLATILITY_DAILY = 0.5
+    # Filters - خفض الحد الأدنى لضمان ظهور عملات
+    MIN_VOLUME_USD = 50_000
+    MIN_TRADES_24H = 100
+    MIN_VOLATILITY_DAILY = 0.3
     MAX_STABLE_COINS = ["USDC", "FDUSD", "TUSD", "BUSD", "DAI"]
     EXCLUDED_SYMBOLS = ["UP", "DOWN", "BULL", "BEAR", "HALF"]
     
@@ -601,7 +602,6 @@ class Repository:
             async with conn.cursor() as cursor:
                 await cursor.execute("BEGIN IMMEDIATE")
                 
-                # إعادة فحص cooldown داخل المعاملة
                 cursor2 = await conn.execute("SELECT last_signal_time FROM signal_cooldown WHERE symbol = ?", (symbol,))
                 cooldown_row = await cursor2.fetchone()
                 if cooldown_row:
@@ -611,7 +611,6 @@ class Repository:
                         logger.info(f"⏳ {symbol}: cooldown نشط أثناء المعاملة")
                         return None
                 
-                # إعادة فحص عدد الصفقات المفتوحة
                 cursor2 = await conn.execute("SELECT COUNT(*) FROM signals_history WHERE status = 'OPEN'")
                 open_count = (await cursor2.fetchone())[0]
                 if open_count >= config.MAX_OPEN_TRADES:
@@ -788,7 +787,7 @@ class Repository:
         return returns
 
 # ===================================================================
-# 9. المحركات المتقدمة (Advanced Engines) - مختصر
+# 9. المحركات المتقدمة (Advanced Engines) - مع سجلات إضافية
 # ===================================================================
 
 class UniverseEngine:
@@ -1006,7 +1005,7 @@ class PortfolioRiskEngine:
         return True, ""
 
 # ===================================================================
-# 10. محرك الاستراتيجية (StrategyEngine) - مختصر مع التحسينات
+# 10. محرك الاستراتيجية (StrategyEngine)
 # ===================================================================
 
 class StrategyEngine:
@@ -1217,7 +1216,7 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 11. مقدم البيانات (DataProvider)
+# 11. مقدم البيانات (DataProvider) - مع سجلات إضافية
 # ===================================================================
 
 class DataProvider:
@@ -1259,22 +1258,34 @@ class DataProvider:
         if data:
             self._stats_cache = data
             self._stats_cache_time = now
+            logger.info(f"📊 تم جلب إحصائيات {len(data)} عملة من Binance")
+        else:
+            logger.warning("⚠️ فشل جلب إحصائيات Binance")
         return data
 
     async def filter_symbols(self) -> List[str]:
         all_stats = await self.get_all_24hr_stats()
         if not all_stats:
+            logger.warning("⚠️ لا توجد بيانات إحصائيات لتصفية العملات")
             return []
+        
+        logger.info(f"🔍 بدء تصفية العملات من {len(all_stats)} عملة")
+        
         universe_engine = UniverseEngine(all_stats)
         universe = universe_engine.build()
+        logger.info(f"🌌 الكون الأساسي: {len(universe)} عملة")
+        
         filtered_stats = []
         for item in all_stats:
             if item.get("symbol") in universe:
                 filtered_stats.append(item)
+        
         ranking_engine = LiquidityRankingEngine(filtered_stats)
         ranked = ranking_engine.filter_and_rank()
         if not ranked:
+            logger.warning("⚠️ لا توجد عملات بعد التصنيف")
             return []
+        
         btc_stats = await self.fetch_stats("BTCUSDT")
         eth_stats = await self.fetch_stats("ETHUSDT")
         btc_change = btc_stats.change_24h if btc_stats else 0.0
@@ -1293,7 +1304,9 @@ class DataProvider:
             sector_bonus = (1 - item["sector_priority"] / 10) if item["sector_priority"] < 999 else 0
             item["final_score"] = item["score"] * 0.60 + item["btc_relative"] * 0.15 + item["eth_relative"] * 0.10 + sector_bonus * 0.15
         ranked.sort(key=lambda x: x["final_score"], reverse=True)
-        return [item["symbol"] for item in ranked[:config.MAX_UNIVERSE_SIZE]]
+        result = [item["symbol"] for item in ranked[:config.MAX_UNIVERSE_SIZE]]
+        logger.info(f"✅ تم اختيار {len(result)} عملة: {', '.join(result[:10])}{'...' if len(result)>10 else ''}")
+        return result
 
 # ===================================================================
 # 12. الماسح الضوئي (Scanner)
@@ -1332,6 +1345,8 @@ class Scanner:
                 self.dynamic_watch_list = new_list
                 self.last_filter_time = time.time()
                 logger.info(f"🔍 Updated watchlist: {len(self.dynamic_watch_list)} symbols")
+            else:
+                logger.warning("⚠️ watchlist فارغة، قد تكون هناك مشكلة في البيانات")
         except Exception as e:
             logger.error(f"Error updating watchlist: {e}")
 
@@ -1386,6 +1401,7 @@ class Scanner:
             if subscribers:
                 msg = self._build_message(signal)
                 await self.repo.add_to_outbox(signal_id, subscribers, msg)
+                logger.info(f"📨 تم إضافة إشارة {signal_id} إلى Outbox لـ {len(subscribers)} مشترك")
 
             logger.info(f"✅ Signal generated for {symbol}: {signal['action']} (Score: {signal.get('quality_score', 0)})")
             return signal
@@ -1420,7 +1436,7 @@ class Scanner:
         )
 
 # ===================================================================
-# 13. Outbox Worker
+# 13. Outbox Worker - مع سجلات إضافية
 # ===================================================================
 
 class OutboxWorker:
@@ -1447,6 +1463,7 @@ class OutboxWorker:
         pending = await self.repo.get_pending_notifications(limit=20)
         if not pending:
             return
+        logger.info(f"📤 معالجة {len(pending)} إشعار معلق في Outbox")
         for notif_id, signal_id, user_id, message, retry_count in pending:
             try:
                 await self.bot_app.bot.send_message(
@@ -1466,7 +1483,7 @@ class OutboxWorker:
                     logger.warning(f"⚠️ فشل إرسال الإشعار {notif_id}: {e}")
 
 # ===================================================================
-# 14. المتتبع (Tracker) - مع فجوات البيانات و timezone
+# 14. المتتبع (Tracker)
 # ===================================================================
 
 class Tracker:
@@ -1706,7 +1723,7 @@ class Tracker:
         logger.info(f"📈 أداء: {wins}/{decisive_total} ربح ({win_rate*100:.1f}%) | عائد: {total_return:.2f}% | MaxDD: {max_drawdown*100:.1f}%")
 
 # ===================================================================
-# 15. أوامر التليجرام (CommandHandlers)
+# 15. أوامر التليجرام (CommandHandlers) - مع سجلات إضافية
 # ===================================================================
 
 class CommandHandlers:
@@ -1715,6 +1732,7 @@ class CommandHandlers:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
+        logger.info(f"📩 أمر /start من {user_id}")
         subscribers = await self.repo.get_subscribers()
         pending = await self.repo.get_pending()
         if user_id in subscribers:
@@ -1749,6 +1767,8 @@ class CommandHandlers:
             await update.message.reply_text("❌ غير موجود في قائمة الانتظار.")
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = str(update.effective_user.id)
+        logger.info(f"📩 أمر /status من {user_id}")
         subscribers = await self.repo.get_subscribers()
         pending = await self.repo.get_pending()
         open_signals = await self.repo.get_open_signals()
@@ -1848,7 +1868,7 @@ class SignalBot:
             logger.error(f"❌ Error stopping bot: {e}")
 
 # ===================================================================
-# 17. تشغيل Flask (Health Server)
+# 17. تشغيل Flask (Health Server) - يمنع السكون في Render
 # ===================================================================
 
 def run_flask():
@@ -1856,7 +1876,7 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot V24 - Fully Operational"
+        return "✅ Elite Signal Bot V25 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
@@ -2006,7 +2026,7 @@ async def main_async():
         await manager.initialize()
         flask_thread = threading.Thread(target=run_flask, daemon=True, name="FlaskHealthServer")
         flask_thread.start()
-        logger.info("🌐 تم تشغيل Flask")
+        logger.info("🌐 تم تشغيل Flask (يمنع السكون في Render)")
         await manager.start_services()
     except asyncio.CancelledError:
         logger.info("⚠️ تم إلغاء التطبيق")
