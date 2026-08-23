@@ -2,16 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot - الإصدار النهائي (متكامل 100%)
-تم إصلاح جميع الأخطاء وإضافة جميع التحسينات المطلوبة
-يعمل بكفاءة على Render
+Elite Signal Bot - الإصدار النهائي المعدّل بالكامل
+تم تطبيق جميع التعديلات المطلوبة:
+- إزالة signal_handler غير الآمن
+- استخدام طلب API واحد لجلب إحصائيات العملات
+- إصلاح منطق TIME_EXIT
+- إصلاح Scanner.start لتجنب المسح المزدوج
+- تحسين إيقاف الخدمات بشكل منظم
+- تغيير position_size إلى allocation_pct
+- تحسين معالجة CancelledError
 """
 
 import os
 import sys
 import time
 import math
-import signal
 import logging
 import asyncio
 import threading
@@ -44,7 +49,7 @@ class Config:
     ADX_PERIOD = 14
     MIN_ADX_STRONG = 25
     MIN_CHANGE_1H = 0.3
-    MAX_POSITION_SIZE_PCT = 2.0
+    ALLOCATION_PCT = 2.0  # نسبة رأس المال المخصصة للصفقة (تم تعديل الاسم)
     MAX_TRADE_DURATION_HOURS = 48
     RISK_PER_TRADE_PCT = 1.0
     MIN_RISK_REWARD_RATIO = 1.5
@@ -600,25 +605,20 @@ class StrategyEngine:
         score = 0.0
         reasons = []
         
-        # الاتجاه الرئيسي - نقاط فقط للاتجاهات الواضحة
         if self.directional_bias == 'bullish':
             score += 3.0
             reasons.append("اتجاه صاعد")
         elif self.directional_bias == 'bearish':
             score += 3.0
             reasons.append("اتجاه هابط")
-        # لا نقاط للاتجاه المحايد
         
-        # هيكل السوق
         if self.trend == 'bullish':
             score += 2.0
             reasons.append("هيكل صاعد")
         elif self.trend == 'bearish':
             score += 2.0
             reasons.append("هيكل هابط")
-        # لا نقاط للهيكل المحايد
         
-        # RSI
         if 40 <= self.rsi <= 60:
             score += 2.0
             reasons.append(f"RSI {self.rsi:.1f} - محايد")
@@ -632,7 +632,6 @@ class StrategyEngine:
             score += 0.3
             reasons.append(f"RSI {self.rsi:.1f} - متطرف")
         
-        # الزخم
         if self.change_1h > 1.5:
             score += 1.5
             reasons.append(f"زخم صاعد {self.change_1h:.1f}%")
@@ -646,7 +645,6 @@ class StrategyEngine:
             score += 0.0
             reasons.append("زخم ضعيف")
         
-        # الحجم
         if self.volume_ratio > 2.5:
             score += 1.0
             reasons.append(f"حجم استثنائي {self.volume_ratio:.1f}x")
@@ -661,7 +659,7 @@ class StrategyEngine:
         self.reasons = reasons
 
     def generate_signal(self):
-        # شرط التغير الأدنى (MIN_CHANGE_1H)
+        # شرط التغير الأدنى
         if abs(self.change_1h) < config.MIN_CHANGE_1H:
             return self._signal_result("WATCH", [f"التغير خلال ساعة {self.change_1h:.2f}% أقل من الحد الأدنى {config.MIN_CHANGE_1H}%"])
         
@@ -698,21 +696,21 @@ class StrategyEngine:
             return self._signal_result("WATCH", self.reasons + ["حجم ضعيف"])
         
         action = "BUY" if self.directional_bias == 'bullish' else "SELL"
-        stop_loss, take_profit, position_size = self._calculate_risk(action)
-        if stop_loss == 0.0 or take_profit == 0.0 or position_size == 0.0:
+        stop_loss, take_profit, allocation_pct = self._calculate_risk(action)
+        if stop_loss == 0.0 or take_profit == 0.0 or allocation_pct == 0.0:
             return self._signal_result("NO_TRADE", ["إدارة المخاطر غير صالحة"])
         
         self._compute_score()
-        return self._signal_result(action, self.reasons, stop_loss, take_profit, position_size)
+        return self._signal_result(action, self.reasons, stop_loss, take_profit, allocation_pct)
 
-    def _signal_result(self, action: str, reasons: List[str], stop_loss: float = 0.0, take_profit: float = 0.0, position_size: float = 0.0):
+    def _signal_result(self, action: str, reasons: List[str], stop_loss: float = 0.0, take_profit: float = 0.0, allocation_pct: float = 0.0):
         return {
             "symbol": self.symbol,
             "action": action,
             "entry_price": self.current_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
-            "position_size": position_size,
+            "allocation_pct": allocation_pct * 100,  # تحويل إلى نسبة مئوية
             "score": self.score,
             "reasons": reasons,
             "adx": self.adx,
@@ -724,7 +722,7 @@ class StrategyEngine:
         }
 
     def _calculate_risk(self, action: str) -> Tuple[float, float, float]:
-        """حساب وقف الخسارة، جني الأرباح، وحجم العقد"""
+        """حساب وقف الخسارة، جني الأرباح، ونسبة تخصيص رأس المال"""
         if action not in ('BUY', 'SELL'):
             return 0.0, 0.0, 0.0
         
@@ -740,15 +738,14 @@ class StrategyEngine:
                 return 0.0, 0.0, 0.0
             take_profit = self.current_price + (self.current_price - stop_loss) * config.MIN_RISK_REWARD_RATIO
             
-            # حساب حجم العقد
             stop_distance = abs(self.current_price - stop_loss) / self.current_price
             if stop_distance > 0:
                 risk_amount = config.RISK_PER_TRADE_PCT / 100
-                position_size = min(risk_amount / stop_distance, config.MAX_POSITION_SIZE_PCT / 100)
+                allocation_pct = min(risk_amount / stop_distance, config.ALLOCATION_PCT / 100)
             else:
-                position_size = 0.0
+                allocation_pct = 0.0
             
-            return stop_loss, take_profit, position_size
+            return stop_loss, take_profit, allocation_pct
         
         elif action == 'SELL' and self.last_swing_high is not None:
             stop_loss = self.last_swing_high + self.atr * 0.25
@@ -758,20 +755,19 @@ class StrategyEngine:
                 return 0.0, 0.0, 0.0
             take_profit = self.current_price - (stop_loss - self.current_price) * config.MIN_RISK_REWARD_RATIO
             
-            # حساب حجم العقد
             stop_distance = abs(self.current_price - stop_loss) / self.current_price
             if stop_distance > 0:
                 risk_amount = config.RISK_PER_TRADE_PCT / 100
-                position_size = min(risk_amount / stop_distance, config.MAX_POSITION_SIZE_PCT / 100)
+                allocation_pct = min(risk_amount / stop_distance, config.ALLOCATION_PCT / 100)
             else:
-                position_size = 0.0
+                allocation_pct = 0.0
             
-            return stop_loss, take_profit, position_size
+            return stop_loss, take_profit, allocation_pct
         
         return 0.0, 0.0, 0.0
 
 # ===================================================================
-# 10. مقدم البيانات (DataProvider)
+# 10. مقدم البيانات (DataProvider) - تم إعادة بنائه بالكامل
 # ===================================================================
 
 class DataProvider:
@@ -803,35 +799,32 @@ class DataProvider:
         async with BinanceClient(session) as client:
             return await client.get_exchange_info() or []
 
+    async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
+        """جلب إحصائيات 24 ساعة لجميع العملات في طلب واحد (محسّن)"""
+        session = await self._get_session()
+        async with BinanceClient(session) as client:
+            data = await client._request('/api/v3/ticker/24hr')
+            return data if isinstance(data, list) else []
+
     async def filter_symbols(self) -> List[str]:
-        """تصفية العملات حسب الحجم والتقلب - تم إصلاح مشكلة القطع المبكر"""
-        all_symbols = await self.get_active_symbols()
-        if not all_symbols:
+        """تصفية العملات باستخدام طلب واحد فقط (محسّن جذرياً)"""
+        all_stats = await self.get_all_24hr_stats()
+        if not all_stats:
             return []
         
-        logger.info(f"📊 جاري تحليل {len(all_symbols)} عملة لتصفيتها...")
-        
-        # جلب الإحصائيات للجميع (بدون قطع)
-        sem = asyncio.Semaphore(20)
-        async def fetch_with_limit(sym: str):
-            async with sem:
-                return sym, await self.fetch_stats(sym)
-        
-        tasks = [fetch_with_limit(sym) for sym in all_symbols]
-        results = await asyncio.gather(*tasks)
-        
         candidates = []
-        for sym, stats in results:
-            if stats and stats.volume > config.MIN_VOLUME_USD:
-                if abs(stats.change_24h) >= config.MIN_VOLATILITY:
-                    candidates.append((sym, stats.volume))
+        for item in all_stats:
+            symbol = item.get("symbol", "")
+            if not symbol.endswith("USDT"):
+                continue
+            if float(item.get("quoteVolume", 0)) < config.MIN_VOLUME_USD:
+                continue
+            if abs(float(item.get("priceChangePercent", 0))) < config.MIN_VOLATILITY:
+                continue
+            candidates.append((symbol, float(item.get("quoteVolume", 0))))
         
-        # الترتيب حسب الحجم (تنازلي) ثم أخذ الأعلى فقط
         candidates.sort(key=lambda x: x[1], reverse=True)
-        top_symbols = [c[0] for c in candidates[:config.TOP_SYMBOLS_COUNT]]
-        
-        logger.info(f"✅ تم اختيار {len(top_symbols)} عملة من أصل {len(candidates)} مؤهلة")
-        return top_symbols
+        return [sym for sym, _ in candidates[:config.TOP_SYMBOLS_COUNT]]
 
 # ===================================================================
 # 11. خدمات الخلفية (Scanner, Tracker)
@@ -847,16 +840,15 @@ class Scanner:
         self.is_running = False
 
     async def start(self):
+        """بدء الماسح - تم إصلاح المسح المزدوج"""
         if self.is_running:
             return
         self.is_running = True
-        
-        # 🔥 مسح فوري عند بدء التشغيل
-        await self._scan()
-        
         while self.is_running:
             try:
                 await self._scan()
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"Scanner error: {e}")
             await asyncio.sleep(config.SCAN_INTERVAL_SECONDS)
@@ -907,31 +899,27 @@ class Scanner:
             if signal['stop_loss'] == 0.0 or signal['take_profit'] == 0.0:
                 return None
             
-            # حفظ الإشارة في قاعدة البيانات
             await self.repo.save_signal(
                 signal['symbol'], signal['action'],
                 signal['entry_price'], signal['stop_loss'], signal['take_profit']
             )
             
-            # 🔥 الإصلاح الجوهري: إرسال الإشارة للمشتركين
             await self._broadcast_signal(signal)
-            
             await self.repo.set_cooldown(symbol, datetime.now().isoformat())
             logger.info(f"✅ Signal generated for {symbol}: {signal['action']}")
             return signal
 
     async def _broadcast_signal(self, signal: dict):
-        """إرسال الإشارة لجميع المشتركين عبر Telegram"""
+        """إرسال الإشارة لجميع المشتركين"""
         if not self.bot_app:
             logger.error("❌ Bot application not set for broadcasting")
             return
         
         subscribers = await self.repo.get_subscribers()
         if not subscribers:
-            logger.warning("📢 لا يوجد مشتركين لإرسال الإشارة إليهم")
+            logger.warning("📢 لا يوجد مشتركين")
             return
         
-        # بناء نص الإشارة
         msg = (
             f"🚨 *إشارة تداول جديدة*\n\n"
             f"📊 العملة: `{signal['symbol']}`\n"
@@ -939,13 +927,12 @@ class Scanner:
             f"💰 سعر الدخول: `{signal['entry_price']:.4f}`\n"
             f"🛑 وقف الخسارة: `{signal['stop_loss']:.4f}`\n"
             f"🎯 جني الأرباح: `{signal['take_profit']:.4f}`\n"
-            f"📊 حجم العقد: `{signal.get('position_size', 0)*100:.1f}%`\n"
+            f"📊 تخصيص رأس المال: `{signal.get('allocation_pct', 0):.1f}%`\n"
             f"📈 الثقة (Score): `{signal['score']}/10`\n"
             f"📝 الأسباب: {', '.join(signal['reasons'][:3])}\n"
             f"📊 ADX: {signal['adx']:.1f} | RSI: {signal['rsi']:.1f}"
         )
         
-        # إرسال للجميع
         for user_id in subscribers:
             try:
                 await self.bot_app.bot.send_message(
@@ -970,6 +957,8 @@ class Tracker:
         while self.is_running:
             try:
                 await self._track()
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"Tracker error: {e}")
             await asyncio.sleep(60)
@@ -1002,31 +991,32 @@ class Tracker:
             now = datetime.now()
             duration_hours = (now - datetime.fromisoformat(entry_time)).total_seconds() / 3600
             
-            # 🔥 الإصلاح: معالجة تضارب SL/TP
             status, exit_price, profit_loss, win = 'OPEN', data.get_current_price(), 0.0, False
             
             if hit_sl and hit_tp:
-                # لا يمكن تحديد الأسبق بدون بيانات Intrabar
                 status = 'INCONCLUSIVE'
                 exit_price = data.get_current_price()
                 profit_loss = 0.0
                 win = False
-                logger.warning(f"⚠️ الصفقة {signal_id} ضربت كلا من SL و TP في نفس الشمعة. تم وضعها Inconclusive.")
+                logger.warning(f"⚠️ الصفقة {signal_id} ضربت كلا من SL و TP في نفس الشمعة.")
             elif hit_sl:
                 status, exit_price, profit_loss = 'LOSS', stop_loss, ((stop_loss - entry_price) / entry_price) * 100 if signal_type == 'BUY' else ((entry_price - stop_loss) / entry_price) * 100
             elif hit_tp:
                 status, exit_price, profit_loss, win = 'WIN', take_profit, ((take_profit - entry_price) / entry_price) * 100 if signal_type == 'BUY' else ((entry_price - take_profit) / entry_price) * 100, True
             elif duration_hours >= config.MAX_TRADE_DURATION_HOURS:
-                status, exit_price, profit_loss, win = 'TIME_EXIT', data.get_current_price(), ((exit_price - entry_price) / entry_price) * 100 if signal_type == 'BUY' else ((entry_price - exit_price) / entry_price) * 100, profit_loss > 0
+                status = "TIME_EXIT"
+                exit_price = data.get_current_price()
+                if signal_type == "BUY":
+                    profit_loss = ((exit_price - entry_price) / entry_price) * 100
+                else:
+                    profit_loss = ((entry_price - exit_price) / entry_price) * 100
+                win = profit_loss > 0
             else:
                 continue
             
             duration_minutes = int(duration_hours * 60)
             await self.repo.close_signal(signal_id, status, exit_price, profit_loss, duration_minutes, win)
-            
-            # 🔥 تحديث الأداء العام
             await self._update_global_performance()
-            
             logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
 
     async def _update_global_performance(self):
@@ -1048,7 +1038,6 @@ class Tracker:
         total, wins, losses, avg_win, avg_loss = stats
         win_rate = wins / total if total > 0 else 0.0
         
-        # حساب Profit Factor
         gross_profit_row = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE win = 1")
         gross_loss_row = await self.repo.db.fetchrow("SELECT SUM(profit_loss) FROM signals_history WHERE win = 0 AND status IN ('LOSS', 'TIME_EXIT')")
         gross_profit = gross_profit_row[0] if gross_profit_row and gross_profit_row[0] else 0.0
@@ -1177,7 +1166,7 @@ class CommandHandlers:
         )
 
 # ===================================================================
-# 13. بوت التليجرام
+# 13. بوت التليجرام - تم تحسين الإيقاف
 # ===================================================================
 
 class SignalBot:
@@ -1197,41 +1186,40 @@ class SignalBot:
         return self.application
 
     async def start_polling(self):
-        """التسلسل الصحيح لبدء البوت حسب إصدار v20+"""
         if not self.application:
             self.build()
         
         try:
             await self.application.bot.delete_webhook()
             logger.info("✅ Webhook deleted")
-            
             await self.application.initialize()
             logger.info("✅ Application initialized")
-            
             await self.application.start()
             logger.info("✅ Application started")
-            
             await self.application.updater.start_polling()
             logger.info("✅ Polling started")
-            
             self.is_running = True
-            
         except Exception as e:
             logger.error(f"❌ Failed to start bot: {e}")
             raise
 
     async def stop(self):
-        if not self.is_running or not self.application:
+        """إيقاف آمن مع معالجة CancelledError"""
+        if not self.application:
             return
-        
         try:
-            await self.application.updater.stop()
-            await self.application.stop()
+            if self.application.updater and self.application.updater.running:
+                await self.application.updater.stop()
+            if self.application.running:
+                await self.application.stop()
             await self.application.shutdown()
             self.is_running = False
             logger.info("✅ Telegram bot stopped")
-        except Exception as e:
-            logger.error(f"❌ Error stopping bot: {e}")
+        except asyncio.CancelledError:
+            logger.info("⚠️ Telegram shutdown cancelled")
+            raise
+        except Exception:
+            logger.exception("❌ Error stopping Telegram bot")
 
 # ===================================================================
 # 14. تشغيل Flask
@@ -1242,11 +1230,11 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot v16 - Fully Operational"
+        return "✅ Elite Signal Bot v17 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
-# 15. المدير الرئيسي للخدمات
+# 15. المدير الرئيسي للخدمات - تم تحسين الإيقاف
 # ===================================================================
 
 class ServiceManager:
@@ -1293,88 +1281,82 @@ class ServiceManager:
             await asyncio.sleep(60)
 
     async def shutdown(self):
+        """إيقاف منظم مع معالجة CancelledError"""
         logger.info("🛑 بدء إيقاف الخدمات...")
         self.is_running = False
         
         if self.scanner:
-            self.scanner.is_running = False
+            await self.scanner.stop()
         if self.tracker:
-            self.tracker.is_running = False
+            await self.tracker.stop()
         
         for task in self._tasks:
             if not task.done():
                 task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        
+        for task in self._tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("❌ خطأ أثناء إنهاء مهمة")
         
         if self.bot:
             try:
                 await self.bot.stop()
-            except Exception as e:
-                logger.error(f"❌ خطأ أثناء إيقاف البوت: {e}")
+            except Exception:
+                logger.exception("❌ خطأ أثناء إغلاق Telegram")
         
         if self.provider:
             try:
                 await self.provider.close()
-            except Exception as e:
-                logger.error(f"❌ خطأ أثناء إغلاق provider: {e}")
+            except Exception:
+                logger.exception("❌ خطأ أثناء إغلاق DataProvider")
         
         if self.db:
             try:
                 await self.db.close()
-            except Exception as e:
-                logger.error(f"❌ خطأ أثناء إغلاق db: {e}")
+            except Exception:
+                logger.exception("❌ خطأ أثناء إغلاق Database")
         
         logger.info("✅ تم إيقاف جميع الخدمات وتنظيف الموارد")
 
 # ===================================================================
-# 16. الدالة الرئيسية
+# 16. الدالة الرئيسية - مع إعادة رفع CancelledError
 # ===================================================================
 
 async def main_async():
     manager = ServiceManager()
-    
     try:
         await manager.initialize()
-        
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread = threading.Thread(
+            target=run_flask,
+            daemon=True,
+            name="FlaskHealthServer"
+        )
         flask_thread.start()
         logger.info("🌐 تم تشغيل Flask")
-        
         await manager.start_services()
-            
     except asyncio.CancelledError:
-        logger.info("تم إلغاء المهام الرئيسية")
-    except Exception as e:
-        logger.error(f"❌ حدث خطأ فادح: {e}")
+        logger.info("⚠️ تم إلغاء التطبيق")
+        raise
+    except Exception:
+        logger.exception("❌ حدث خطأ فادح")
     finally:
         await manager.shutdown()
 
 # ===================================================================
-# 17. نقطة الدخول الرئيسية
+# 17. نقطة الدخول الرئيسية - بدون signal_handler
 # ===================================================================
 
-def signal_handler(sig, frame):
-    """معالج الإشارات - إيقاف منظم"""
-    logger.info(f"📡 استلام إشارة {sig}. جارٍ الإيقاف المنظم...")
-    try:
-        loop = asyncio.get_running_loop()
-        loop.stop()
-    except RuntimeError:
-        sys.exit(0)
-
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
     logger.info("🚀 تشغيل البوت...")
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
         logger.info("🛑 تم الإيقاف بواسطة المستخدم")
-    except Exception as e:
-        logger.error(f"💥 فشل التشغيل: {e}")
+    except Exception:
+        logger.exception("💥 فشل التشغيل")
     finally:
         logger.info("🏁 تم إنهاء التطبيق")
