@@ -2,12 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot V23 - الإصدار النهائي مع جميع التعديلات
-- INCONCLUSIVE منفصلة عن الإحصائيات
-- Atomic Commit مع BEGIN IMMEDIATE
-- Tracker مع فحص فجوات البيانات
-- Supervisor مع backoff
-- Transactional Outbox للإرسال
+Elite Signal Bot V24 - الإصدار النهائي المتكامل
+مع جميع الإصلاحات: INCONCLUSIVE, Atomic Commit, Outbox, Supervisor, Tracker Coverage
 """
 
 import os
@@ -28,7 +24,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===================================================================
-# 1. الإعدادات (Config)
+# 1. الإعدادات (Config) - المعدلة
 # ===================================================================
 
 class Config:
@@ -52,10 +48,10 @@ class Config:
     CORE_SIZE = 25
     DYNAMIC_SIZE = 45
     
-    # Filters
-    MIN_VOLUME_USD = 1_000_000
-    MIN_TRADES_24H = 500
-    MIN_VOLATILITY_DAILY = 1.0
+    # Filters - خفض الحد الأدنى للحجم لضمان ظهور عملات
+    MIN_VOLUME_USD = 200_000
+    MIN_TRADES_24H = 200
+    MIN_VOLATILITY_DAILY = 0.5
     MAX_STABLE_COINS = ["USDC", "FDUSD", "TUSD", "BUSD", "DAI"]
     EXCLUDED_SYMBOLS = ["UP", "DOWN", "BULL", "BEAR", "HALF"]
     
@@ -434,7 +430,7 @@ class BinanceClient:
         return data if isinstance(data, list) else []
 
 # ===================================================================
-# 7. قاعدة البيانات (Database) - مع دعم الاتصال الموحد
+# 7. قاعدة البيانات (Database)
 # ===================================================================
 
 class Database:
@@ -529,7 +525,6 @@ class Database:
             self._connection = None
 
     async def get_connection(self):
-        """الحصول على اتصال للمعاملات"""
         if self._connection is None or self._closed:
             self._connection = await aiosqlite.connect(self.db_path)
             await self._connection.execute("PRAGMA journal_mode=WAL")
@@ -601,7 +596,6 @@ class Repository:
                             stop_loss: float, take_profit: float, sector: str = "OTHER",
                             quality_score: int = 0, position_fraction: float = 0.02,
                             capital: float = 10000.0, cooldown_time: str = None) -> Optional[int]:
-        """حفظ الإشارة و cooldown في معاملة ذرية واحدة"""
         try:
             conn = await self.db.get_connection()
             async with conn.cursor() as cursor:
@@ -625,7 +619,6 @@ class Repository:
                     logger.warning(f"⛔ {symbol}: تجاوز الحد الأقصى للصفقات المفتوحة أثناء المعاملة")
                     return None
                 
-                # حفظ الإشارة
                 now_utc = datetime.now(timezone.utc).isoformat()
                 await cursor.execute(
                     """INSERT INTO signals_history 
@@ -637,7 +630,6 @@ class Repository:
                 )
                 signal_id = cursor.lastrowid
                 
-                # حفظ cooldown
                 if cooldown_time:
                     await cursor.execute(
                         "INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)",
@@ -652,7 +644,6 @@ class Repository:
             return None
 
     async def add_to_outbox(self, signal_id: int, user_ids: List[str], message: str) -> None:
-        """إضافة إشعارات إلى الـ Outbox"""
         now_utc = datetime.now(timezone.utc).isoformat()
         for user_id in user_ids:
             await self.db.execute(
@@ -1015,7 +1006,7 @@ class PortfolioRiskEngine:
         return True, ""
 
 # ===================================================================
-# 10. محرك الاستراتيجية (StrategyEngine)
+# 10. محرك الاستراتيجية (StrategyEngine) - مختصر مع التحسينات
 # ===================================================================
 
 class StrategyEngine:
@@ -1305,7 +1296,7 @@ class DataProvider:
         return [item["symbol"] for item in ranked[:config.MAX_UNIVERSE_SIZE]]
 
 # ===================================================================
-# 12. الماسح الضوئي (Scanner) - مع Outbox
+# 12. الماسح الضوئي (Scanner)
 # ===================================================================
 
 class Scanner:
@@ -1357,7 +1348,6 @@ class Scanner:
 
     async def _process_symbol(self, symbol: str, sem: asyncio.Semaphore):
         async with sem:
-            # == المرحلة 1: تحليل موازي (بدون قفل) ==
             cooldown = await self.repo.get_cooldown(symbol)
             if cooldown:
                 last_time = datetime.fromisoformat(cooldown)
@@ -1378,7 +1368,6 @@ class Scanner:
             if signal['stop_loss'] == 0.0 or signal['take_profit'] == 0.0:
                 return None
 
-            # == المرحلة 2: التنفيذ الذري (معاملة DB) ==
             sector = CorrelationFilter.get_sector(symbol)
             capital = await self.risk_engine.get_current_capital()
             cooldown_time = datetime.now(timezone.utc).isoformat()
@@ -1393,7 +1382,6 @@ class Scanner:
             if signal_id is None:
                 return None
 
-            # == المرحلة 3: إضافة إلى Outbox (خارج المعاملة) ==
             subscribers = await self.repo.get_subscribers()
             if subscribers:
                 msg = self._build_message(signal)
@@ -1432,7 +1420,7 @@ class Scanner:
         )
 
 # ===================================================================
-# 13. Outbox Worker (معالج الإشعارات)
+# 13. Outbox Worker
 # ===================================================================
 
 class OutboxWorker:
@@ -1469,10 +1457,9 @@ class OutboxWorker:
                 await self.repo.mark_notification_sent(notif_id)
                 logger.info(f"📨 تم إرسال الإشارة (ID: {signal_id}) للمستخدم {user_id}")
             except Exception as e:
-                # حذف المستخدمين المحظورين
                 if "Forbidden" in str(e) or "bot was blocked" in str(e):
                     await self.repo.remove_subscriber(str(user_id))
-                    await self.repo.mark_notification_sent(notif_id)  # تجاهل
+                    await self.repo.mark_notification_sent(notif_id)
                     logger.warning(f"🚫 المستخدم {user_id} محظور، تم حذفه")
                 else:
                     await self.repo.mark_notification_failed(notif_id, str(e))
@@ -1527,7 +1514,6 @@ class Tracker:
             
             timestamps = [ts.astimezone(timezone.utc) for ts in data_1m.timestamps]
             
-            # التحقق من تغطية وقت الدخول
             first_timestamp = timestamps[0]
             last_timestamp = timestamps[-1]
             
@@ -1541,7 +1527,6 @@ class Tracker:
                 if first_timestamp > entry_time:
                     continue
             
-            # التحقق من فجوات البيانات
             gap_detected = False
             for prev_ts, curr_ts in zip(timestamps, timestamps[1:]):
                 if curr_ts - prev_ts > timedelta(minutes=2):
@@ -1555,7 +1540,6 @@ class Tracker:
                 logger.warning(f"⚠️ {signal.symbol}: البيانات متأخرة")
                 continue
             
-            # First-hit logic
             exit_reason = None
             outcome = None
             exit_price = None
@@ -1590,7 +1574,7 @@ class Tracker:
                         exit_price = signal.take_profit
                         exit_time = timestamps[i]
                         break
-                else:  # SELL
+                else:
                     if high >= signal.stop_loss and low <= signal.take_profit:
                         exit_reason = "INCONCLUSIVE"
                         outcome = "INCONCLUSIVE"
@@ -1610,7 +1594,6 @@ class Tracker:
                         exit_time = timestamps[i]
                         break
             
-            # TIME_EXIT
             if exit_time is None:
                 duration_hours = (now - entry_time).total_seconds() / 3600
                 if duration_hours >= config.MAX_TRADE_DURATION_HOURS:
@@ -1626,7 +1609,6 @@ class Tracker:
             if exit_reason is None:
                 continue
             
-            # حساب PnL
             if outcome != "INCONCLUSIVE":
                 position_fraction = signal.position_fraction if signal.position_fraction is not None else config.MAX_POSITION_PCT / 100
                 capital_at_entry = signal.capital_at_entry if signal.capital_at_entry is not None else config.INITIAL_CAPITAL
@@ -1648,7 +1630,6 @@ class Tracker:
             logger.info(f"✅ Signal {signal.id} ({signal.symbol}) closed: {exit_reason} ({outcome}) (Trade: {trade_return_percent:.2f}%, Portfolio: {portfolio_pnl_percent:.2f}%)")
 
     async def _update_performance(self):
-        # إحصائيات الصفقات الحاسمة فقط (استبعاد INCONCLUSIVE)
         stats = await self.repo.db.fetchrow(
             """
             SELECT 
@@ -1875,7 +1856,7 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot V23 - Fully Operational"
+        return "✅ Elite Signal Bot V24 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
@@ -1971,7 +1952,6 @@ class ServiceManager:
                 else:
                     break
             
-            # إعادة ضبط backoff للمهام المستقرة
             for task in self._tasks:
                 task_name = task.get_name()
                 if time.time() - self._task_stable_time.get(task_name, 0) > 300:
