@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot v14 - Single File Version
-دمج جميع المكونات في ملف واحد مع فصل الإعدادات.
+Elite Signal Bot v14 - SQLite Version
 """
 
 import os
@@ -14,17 +13,17 @@ import asyncio
 import threading
 import signal
 import math
+import sqlite3
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta
 
 import aiohttp
-import asyncpg
+import aiosqlite
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# استيراد الإعدادات من config.py
 from config import Config
 
 config = Config()
@@ -349,37 +348,29 @@ class BinanceClient:
         return symbols
 
 # ===================================================================
-# 6. قاعدة البيانات (Database)
+# 6. قاعدة البيانات (SQLite باستخدام aiosqlite)
 # ===================================================================
 
 class Database:
     def __init__(self):
-        self.pool = None
+        self.db_path = config.DATABASE_URL.replace("sqlite:///", "")
         self._closed = False
 
     async def connect(self):
-        try:
-            self.pool = await asyncpg.create_pool(
-                config.DATABASE_URL,
-                min_size=1,
-                max_size=5,
-                timeout=10
-            )
-            await self._init_tables()
-            logger.info("✅ PostgreSQL متصلة")
-            return True
-        except Exception as e:
-            logger.error(f"❌ فشل الاتصال بـ PostgreSQL: {e}")
-            return False
-
-    async def _init_tables(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS subscribers (user_id TEXT PRIMARY KEY);
-                CREATE TABLE IF NOT EXISTS pending (user_id TEXT PRIMARY KEY);
-                CREATE TABLE IF NOT EXISTS signal_cooldown (symbol TEXT PRIMARY KEY, last_signal_time TEXT);
+        # إنشاء قاعدة البيانات والجداول
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS subscribers (user_id TEXT PRIMARY KEY)
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS pending (user_id TEXT PRIMARY KEY)
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS signal_cooldown (symbol TEXT PRIMARY KEY, last_signal_time TEXT)
+            """)
+            await db.execute("""
                 CREATE TABLE IF NOT EXISTS signals_history (
-                    id SERIAL PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     symbol TEXT,
                     timestamp TEXT,
                     signal_type TEXT,
@@ -391,11 +382,13 @@ class Database:
                     profit_loss REAL,
                     duration_minutes INTEGER,
                     win BOOLEAN,
-                    entry_time TIMESTAMP
-                );
+                    entry_time TEXT
+                )
+            """)
+            await db.execute("""
                 CREATE TABLE IF NOT EXISTS performance_metrics (
-                    id SERIAL PRIMARY KEY,
-                    date DATE UNIQUE,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT UNIQUE,
                     total_trades INTEGER,
                     wins INTEGER,
                     losses INTEGER,
@@ -405,34 +398,35 @@ class Database:
                     avg_loss REAL,
                     expectancy REAL,
                     max_drawdown REAL
-                );
+                )
             """)
             if config.ADMIN_CHAT_ID:
-                await conn.execute(
-                    "INSERT INTO subscribers (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                    config.ADMIN_CHAT_ID
-                )
+                await db.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (config.ADMIN_CHAT_ID,))
+            await db.commit()
+        logger.info(f"✅ SQLite قاعدة بيانات متصلة: {self.db_path}")
+        return True
 
     async def close(self):
-        if self.pool and not self._closed:
-            await self.pool.close()
-            self._closed = True
-            logger.info("✅ اتصال قاعدة البيانات مغلق")
+        self._closed = True
 
     async def execute(self, query: str, *args):
-        async with self.pool.acquire() as conn:
-            return await conn.execute(query, *args)
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(query, args)
+            await db.commit()
+            return cursor
 
     async def fetch(self, query: str, *args):
-        async with self.pool.acquire() as conn:
-            return await conn.fetch(query, *args)
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(query, args)
+            return await cursor.fetchall()
 
     async def fetchrow(self, query: str, *args):
-        async with self.pool.acquire() as conn:
-            return await conn.fetchrow(query, *args)
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(query, args)
+            return await cursor.fetchone()
 
 # ===================================================================
-# 7. مستودع البيانات (Repository)
+# 7. مستودع البيانات (Repository) - معدل لـ SQLite
 # ===================================================================
 
 class Repository:
@@ -444,45 +438,46 @@ class Repository:
         return [r[0] for r in rows]
 
     async def add_subscriber(self, user_id: str) -> None:
-        await self.db.execute("INSERT INTO subscribers (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+        await self.db.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", user_id)
 
     async def remove_subscriber(self, user_id: str) -> None:
-        await self.db.execute("DELETE FROM subscribers WHERE user_id = $1", user_id)
+        await self.db.execute("DELETE FROM subscribers WHERE user_id = ?", user_id)
 
     async def get_pending(self) -> List[str]:
         rows = await self.db.fetch("SELECT user_id FROM pending")
         return [r[0] for r in rows]
 
     async def add_pending(self, user_id: str) -> None:
-        await self.db.execute("INSERT INTO pending (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+        await self.db.execute("INSERT OR IGNORE INTO pending (user_id) VALUES (?)", user_id)
 
     async def remove_pending(self, user_id: str) -> None:
-        await self.db.execute("DELETE FROM pending WHERE user_id = $1", user_id)
+        await self.db.execute("DELETE FROM pending WHERE user_id = ?", user_id)
 
     async def get_cooldown(self, symbol: str) -> Optional[str]:
-        row = await self.db.fetchrow("SELECT last_signal_time FROM signal_cooldown WHERE symbol = $1", symbol)
+        row = await self.db.fetchrow("SELECT last_signal_time FROM signal_cooldown WHERE symbol = ?", symbol)
         return row[0] if row else None
 
     async def set_cooldown(self, symbol: str, timestamp: str) -> None:
         await self.db.execute(
-            "INSERT INTO signal_cooldown (symbol, last_signal_time) VALUES ($1, $2) ON CONFLICT (symbol) DO UPDATE SET last_signal_time = $2",
+            "INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)",
             symbol, timestamp
         )
 
     async def save_signal(self, symbol: str, signal_type: str, entry_price: float, stop_loss: float, take_profit: float) -> None:
         await self.db.execute(
-            "INSERT INTO signals_history (symbol, timestamp, signal_type, entry_price, stop_loss, take_profit, entry_time) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            symbol, datetime.now().isoformat(), signal_type, entry_price, stop_loss, take_profit, datetime.now()
+            "INSERT INTO signals_history (symbol, timestamp, signal_type, entry_price, stop_loss, take_profit, entry_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            symbol, datetime.now().isoformat(), signal_type, entry_price, stop_loss, take_profit, datetime.now().isoformat()
         )
 
     async def get_open_signals(self) -> List[Tuple]:
-        return await self.db.fetch(
+        rows = await self.db.fetch(
             "SELECT id, symbol, entry_time, entry_price, stop_loss, take_profit, signal_type FROM signals_history WHERE status = 'OPEN'"
         )
+        return rows
 
     async def close_signal(self, signal_id: int, status: str, exit_price: float, profit_loss: float, duration_minutes: int, win: bool) -> None:
         await self.db.execute(
-            "UPDATE signals_history SET status = $1, exit_price = $2, profit_loss = $3, duration_minutes = $4, win = $5 WHERE id = $6",
+            "UPDATE signals_history SET status = ?, exit_price = ?, profit_loss = ?, duration_minutes = ?, win = ? WHERE id = ?",
             status, exit_price, profit_loss, duration_minutes, win, signal_id
         )
 
@@ -492,16 +487,12 @@ class Repository:
         )
 
     async def update_performance(self, metrics: dict) -> None:
-        today = datetime.now().date()
+        today = datetime.now().date().isoformat()
         await self.db.execute(
             """
-            INSERT INTO performance_metrics 
+            INSERT OR REPLACE INTO performance_metrics 
             (date, total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (date) DO UPDATE SET
-            total_trades = $2, wins = $3, losses = $4, win_rate = $5,
-            profit_factor = $6, avg_win = $7, avg_loss = $8,
-            expectancy = $9, max_drawdown = $10
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             today, metrics.get('total_trades', 0), metrics.get('wins', 0),
             metrics.get('losses', 0), metrics.get('win_rate', 0.0),
@@ -511,7 +502,7 @@ class Repository:
         )
 
 # ===================================================================
-# 8. محرك الاستراتيجية (Strategy Engine)
+# 8. محرك الاستراتيجية (Strategy Engine) - نفس الكود
 # ===================================================================
 
 class StrategyEngine:
@@ -618,17 +609,13 @@ class StrategyEngine:
         self.reasons = reasons
 
     def generate_signal(self):
-        # 1. Market Regime
         if self.adx < config.MIN_ADX_STRONG:
             return self._signal_result("NO_TRADE", ["السوق ليس اتجاهياً (ADX ضعيف)"])
-        # 2. Trend
         if self.directional_bias == 'neutral':
             return self._signal_result("NO_TRADE", ["الاتجاه غير واضح"])
-        # 3. Structure
         if self.trend == 'neutral':
             self._compute_score()
             return self._signal_result("WATCH", self.reasons)
-        # 4. Momentum
         if self.rsi > 80 or self.rsi < 20:
             return self._signal_result("WATCH", ["RSI متطرف"])
         if self.directional_bias == 'bullish':
@@ -638,18 +625,16 @@ class StrategyEngine:
             if self.trend != 'bullish':
                 self._compute_score()
                 return self._signal_result("WATCH", self.reasons)
-        else:  # bearish
+        else:
             if not (30 <= self.rsi <= 60 and self.macd['histogram'] < 0):
                 self._compute_score()
                 return self._signal_result("WATCH", self.reasons)
             if self.trend != 'bearish':
                 self._compute_score()
                 return self._signal_result("WATCH", self.reasons)
-        # 5. Volume
         if self.volume_ratio < 1.5:
             self._compute_score()
             return self._signal_result("WATCH", self.reasons + ["حجم ضعيف"])
-        # 6. Generate signal
         action = "BUY" if self.directional_bias == 'bullish' else "SELL"
         stop_loss, take_profit = self._calculate_risk(action)
         if stop_loss == 0.0 or take_profit == 0.0:
@@ -699,7 +684,7 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 9. مقدم البيانات (Data Provider) - التكامل
+# 9. مقدم البيانات (Data Provider)
 # ===================================================================
 
 class DataProvider:
@@ -809,10 +794,8 @@ class Scanner:
             signal = engine.generate_signal()
             if not signal['is_actionable']:
                 return None
-            # Validate risk
             if signal['stop_loss'] == 0.0 or signal['take_profit'] == 0.0:
                 return None
-            # Save and send
             await self.repo.save_signal(
                 signal['symbol'], signal['action'],
                 signal['entry_price'], signal['stop_loss'], signal['take_profit']
@@ -860,7 +843,7 @@ class Tracker:
                 hit_sl = any(high >= stop_loss for high in highs)
                 hit_tp = any(low <= take_profit for low in lows)
             now = datetime.now()
-            duration_hours = (now - entry_time).total_seconds() / 3600
+            duration_hours = (now - datetime.fromisoformat(entry_time)).total_seconds() / 3600
             status, exit_price, profit_loss, win = 'OPEN', data.get_current_price(), 0.0, False
             if hit_sl:
                 status, exit_price, profit_loss = 'LOSS', stop_loss, ((stop_loss - entry_price) / entry_price) * 100 if signal_type == 'BUY' else ((entry_price - stop_loss) / entry_price) * 100
@@ -881,21 +864,21 @@ class PerformanceService:
     async def update_metrics(self) -> Dict:
         async def get_sum(condition: str):
             rows = await self.repo.db.fetch(f"SELECT SUM(profit_loss) FROM signals_history WHERE {condition}")
-            return rows[0][0] or 0.0
+            return rows[0][0] if rows else 0.0
         gross_profit = await get_sum("status = 'WIN'")
         gross_loss = abs(await get_sum("status = 'LOSS'"))
-        stats = await self.repo.db.fetch("SELECT COUNT(*), SUM(win::int), AVG(profit_loss) FROM signals_history WHERE status IN ('WIN', 'LOSS')")
-        total, wins, avg_profit = stats[0]
+        stats = await self.repo.db.fetch("SELECT COUNT(*), SUM(win), AVG(profit_loss) FROM signals_history WHERE status IN ('WIN', 'LOSS')")
+        total, wins, avg_profit = stats[0] if stats else (0, 0, 0.0)
         wins = wins or 0
         losses = total - wins
         win_rate = wins / total if total > 0 else 0.0
         avg_win, avg_loss = 0.0, 0.0
         if wins > 0:
             avg_win_row = await self.repo.db.fetch("SELECT AVG(profit_loss) FROM signals_history WHERE status = 'WIN'")
-            avg_win = avg_win_row[0][0] or 0.0
+            avg_win = avg_win_row[0][0] if avg_win_row else 0.0
         if losses > 0:
             avg_loss_row = await self.repo.db.fetch("SELECT AVG(profit_loss) FROM signals_history WHERE status = 'LOSS'")
-            avg_loss = avg_loss_row[0][0] or 0.0
+            avg_loss = avg_loss_row[0][0] if avg_loss_row else 0.0
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
         expectancy = (win_rate * avg_win) - ((1 - win_rate) * abs(avg_loss)) if total > 0 else 0.0
         max_drawdown = 0.0
@@ -968,7 +951,7 @@ class CommandHandlers:
             f"👥 المشتركين: {len(subscribers)}\n"
             f"⏳ في الانتظار: {len(pending)}\n"
             f"⏱️ فترة التبريد: {config.COOLDOWN_MINUTES} دقيقة\n"
-            f"🔄 قاعدة البيانات: PostgreSQL",
+            f"🔄 قاعدة البيانات: SQLite",
             parse_mode="HTML"
         )
 
@@ -1024,7 +1007,7 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 @flask_app.route('/healthcheck')
 def healthcheck():
-    return "✅ Elite Signal Bot v14 - Running"
+    return "✅ Elite Signal Bot v14 - Running (SQLite)"
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
