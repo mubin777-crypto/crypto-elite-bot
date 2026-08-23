@@ -1,833 +1,1083 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Elite Signal Bot v14 - Single File Version
+دمج جميع المكونات في ملف واحد مع فصل الإعدادات.
+"""
+
 import os
+import sys
 import time
 import logging
-import threading
 import asyncio
-import json
+import threading
+import signal
 import math
-import aiohttp
-import aiosqlite
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta
+
+import aiohttp
+import asyncpg
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# -------------------- الإعدادات الأساسية --------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# استيراد الإعدادات من config.py
+from config import Config
+
+config = Config()
+
+# ===================================================================
+# 1. إعدادات التسجيل (Logging)
+# ===================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-app = Flask('')
+# ===================================================================
+# 2. نماذج البيانات (Data Models)
+# ===================================================================
 
-# -------------------- المتغيرات البيئية --------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_CHAT_ID = os.environ.get("CHAT_ID")
-RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "localhost")
-PORT = int(os.environ.get("PORT", 10000))
+@dataclass
+class CandleData:
+    prices: List[float]
+    highs: List[float]
+    lows: List[float]
+    volumes: List[float]
+    opens: List[float]
 
-# -------------------- إعدادات القوة المتوازنة (v10.0) --------------------
-DB_PATH = "crypto_bot.db"
-RATE_LIMIT_DELAY = 0.1
-SEMAPHORE_LIMIT = 5
-COOLDOWN_MINUTES = 45
-MIN_VOLUME_USD = 300_000
-SIGNAL_SCORE_THRESHOLD = 4.0  # عتبة إرسال الإشارة (أي إشارة)
-RISK_PER_TRADE = 0.01
-MAX_POSITION_SIZE_PCT = 2.0
-MIN_CHANGE_1H = 0.3
-RSI_PERIOD = 6
+    def __post_init__(self):
+        if not (len(self.prices) == len(self.highs) == len(self.lows) == len(self.volumes) == len(self.opens)):
+            raise ValueError("All candle lists must have the same length")
 
-# -------------------- قاعدة البيانات (SQLite) --------------------
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('PRAGMA journal_mode=WAL')
-        await db.execute('''CREATE TABLE IF NOT EXISTS subscribers (user_id TEXT PRIMARY KEY)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS pending (user_id TEXT PRIMARY KEY)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS signal_cooldown (symbol TEXT PRIMARY KEY, last_signal_time TEXT)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS signals_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT,
-            timestamp TEXT,
-            signal_type TEXT,
-            price REAL,
-            stop_loss REAL,
-            take_profit REAL,
-            result TEXT,
-            profit_loss REAL
-        )''')
-        if ADMIN_CHAT_ID:
-            await db.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (ADMIN_CHAT_ID,))
-        await db.commit()
-    logger.info("✅ قاعدة البيانات مهيأة (WAL mode)")
+    @property
+    def length(self) -> int:
+        return len(self.prices)
 
-# -------------------- دوال قاعدة البيانات --------------------
-async def get_subscribers():
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM subscribers") as cursor:
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+    def closed_prices(self) -> List[float]:
+        return self.prices[:-1] if len(self.prices) > 1 else []
 
-async def add_subscriber(user_id):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (user_id,))
-        await db.commit()
+    def closed_highs(self) -> List[float]:
+        return self.highs[:-1] if len(self.highs) > 1 else []
 
-async def remove_subscriber(user_id):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM subscribers WHERE user_id = ?", (user_id,))
-        await db.commit()
+    def closed_lows(self) -> List[float]:
+        return self.lows[:-1] if len(self.lows) > 1 else []
 
-async def get_pending():
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM pending") as cursor:
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+    def closed_volumes(self) -> List[float]:
+        return self.volumes[:-1] if len(self.volumes) > 1 else []
 
-async def add_pending(user_id):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO pending (user_id) VALUES (?)", (user_id,))
-        await db.commit()
+    def get_current_price(self) -> float:
+        return self.prices[-1] if self.prices else 0.0
 
-async def remove_pending(user_id):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM pending WHERE user_id = ?", (user_id,))
-        await db.commit()
+    def get_reference_price(self) -> float:
+        return self.prices[-2] if len(self.prices) >= 2 else self.prices[-1] if self.prices else 0.0
 
-async def get_cooldown(symbol):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT last_signal_time FROM signal_cooldown WHERE symbol = ?", (symbol,)) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
 
-async def set_cooldown(symbol, timestamp):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)", (symbol, timestamp))
-        await db.commit()
+@dataclass
+class MarketStats:
+    volume: float
+    change_24h: float
+    high: float
+    low: float
+    open: float
+    last: float
 
-async def save_signal_history(symbol, signal_type, price, stop_loss, take_profit):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO signals_history (symbol, timestamp, signal_type, price, stop_loss, take_profit) VALUES (?, ?, ?, ?, ?, ?)",
-            (symbol, datetime.now().isoformat(), signal_type, price, stop_loss, take_profit)
+# ===================================================================
+# 3. مؤشرات فنية (Indicators)
+# ===================================================================
+
+class Indicators:
+    @staticmethod
+    def calculate_rsi(prices: List[float], period: int = 14) -> float:
+        if len(prices) < period + 1:
+            return 50.0
+        gains, losses = [], []
+        for i in range(1, len(prices)):
+            diff = prices[i] - prices[i-1]
+            gains.append(diff if diff >= 0 else 0.0)
+            losses.append(abs(diff) if diff < 0 else 0.0)
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0:
+            return 100.0
+        return 100 - (100 / (1 + avg_gain / avg_loss))
+
+    @staticmethod
+    def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+        if len(closes) < period + 1:
+            return 0.0
+        tr_list = []
+        for i in range(1, len(closes)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            tr_list.append(tr)
+        if len(tr_list) < period:
+            return 0.0
+        atr = sum(tr_list[:period]) / period
+        for i in range(period, len(tr_list)):
+            atr = (atr * (period - 1) + tr_list[i]) / period
+        return atr
+
+    @staticmethod
+    def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+        if len(closes) < period * 2 + 1:
+            return 0.0
+        plus_dm, minus_dm, tr_list = [], [], []
+        for i in range(1, len(closes)):
+            up = highs[i] - highs[i-1]
+            down = lows[i-1] - lows[i]
+            if up > down and up > 0:
+                plus_dm.append(up); minus_dm.append(0.0)
+            elif down > up and down > 0:
+                plus_dm.append(0.0); minus_dm.append(down)
+            else:
+                plus_dm.append(0.0); minus_dm.append(0.0)
+            tr_list.append(max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])))
+        atr = sum(tr_list[:period]) / period
+        plus_smooth = sum(plus_dm[:period]) / period
+        minus_smooth = sum(minus_dm[:period]) / period
+        dx_values = []
+        plus_di = (plus_smooth / atr) * 100 if atr > 0 else 0
+        minus_di = (minus_smooth / atr) * 100 if atr > 0 else 0
+        dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
+        dx_values.append(dx)
+        for i in range(period, len(tr_list)):
+            atr = (atr * (period - 1) + tr_list[i]) / period
+            plus_smooth = (plus_smooth * (period - 1) + plus_dm[i]) / period
+            minus_smooth = (minus_smooth * (period - 1) + minus_dm[i]) / period
+            plus_di = (plus_smooth / atr) * 100 if atr > 0 else 0
+            minus_di = (minus_smooth / atr) * 100 if atr > 0 else 0
+            dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
+            dx_values.append(dx)
+        if len(dx_values) < period:
+            return dx_values[-1] if dx_values else 0.0
+        return sum(dx_values[-period:]) / period
+
+    @staticmethod
+    def calculate_sma(prices: List[float], period: int = 20) -> float:
+        if len(prices) < period:
+            return prices[-1] if prices else 0.0
+        return sum(prices[-period:]) / period
+
+    @staticmethod
+    def calculate_ema_series(prices: List[float], period: int) -> List[float]:
+        if len(prices) < period:
+            return [prices[-1]] * len(prices) if prices else []
+        multiplier = 2 / (period + 1)
+        ema_series = [prices[0]]
+        for price in prices[1:]:
+            ema = (price - ema_series[-1]) * multiplier + ema_series[-1]
+            ema_series.append(ema)
+        return ema_series
+
+    @staticmethod
+    def calculate_macd(prices: List[float], short: int = 12, long: int = 26, signal: int = 9) -> dict:
+        if len(prices) < long:
+            return {"histogram": 0.0}
+        ema_short = Indicators.calculate_ema_series(prices, short)
+        ema_long = Indicators.calculate_ema_series(prices, long)
+        macd_line = [s - l for s, l in zip(ema_short, ema_long)]
+        signal_line = Indicators.calculate_ema_series(macd_line, signal)
+        return {"histogram": macd_line[-1] - signal_line[-1]}
+
+    @staticmethod
+    def calculate_bollinger(prices: List[float], period: int = 20, std_dev: int = 2) -> dict:
+        if len(prices) < period:
+            return {"upper": 0.0, "middle": 0.0, "lower": 0.0}
+        sma = sum(prices[-period:]) / period
+        variance = sum((p - sma) ** 2 for p in prices[-period:]) / period
+        std = math.sqrt(variance)
+        return {"upper": sma + std_dev * std, "middle": sma, "lower": sma - std_dev * std}
+
+# ===================================================================
+# 4. هيكل السوق (Market Structure)
+# ===================================================================
+
+class MarketStructure:
+    def __init__(self, data: CandleData):
+        self.data = data
+        self.prices = data.closed_prices()
+        self.highs = data.closed_highs()
+        self.lows = data.closed_lows()
+        self._swing_highs = None
+        self._swing_lows = None
+
+    def get_swing_highs(self, lookback: int = 3) -> List[Tuple[int, float]]:
+        if self._swing_highs is not None:
+            return self._swing_highs
+        if len(self.highs) < lookback * 2:
+            return []
+        swings = []
+        for i in range(lookback, len(self.highs) - lookback):
+            is_peak = True
+            for j in range(1, lookback + 1):
+                if self.highs[i] < self.highs[i - j] or self.highs[i] < self.highs[i + j]:
+                    is_peak = False
+                    break
+            if is_peak:
+                swings.append((i, self.highs[i]))
+        self._swing_highs = swings
+        return swings
+
+    def get_swing_lows(self, lookback: int = 3) -> List[Tuple[int, float]]:
+        if self._swing_lows is not None:
+            return self._swing_lows
+        if len(self.lows) < lookback * 2:
+            return []
+        swings = []
+        for i in range(lookback, len(self.lows) - lookback):
+            is_trough = True
+            for j in range(1, lookback + 1):
+                if self.lows[i] > self.lows[i - j] or self.lows[i] > self.lows[i + j]:
+                    is_trough = False
+                    break
+            if is_trough:
+                swings.append((i, self.lows[i]))
+        self._swing_lows = swings
+        return swings
+
+    def get_last_swing_high(self) -> Optional[float]:
+        swings = self.get_swing_highs()
+        return swings[-1][1] if swings else None
+
+    def get_last_swing_low(self) -> Optional[float]:
+        swings = self.get_swing_lows()
+        return swings[-1][1] if swings else None
+
+    def get_trend(self) -> str:
+        if len(self.prices) < 50:
+            return 'neutral'
+        highs = self.get_swing_highs()
+        lows = self.get_swing_lows()
+        if len(highs) < 3 or len(lows) < 3:
+            return 'neutral'
+        recent_highs = [h for _, h in highs[-3:]]
+        recent_lows = [l for _, l in lows[-3:]]
+        if len(recent_highs) >= 3 and len(recent_lows) >= 3:
+            hh = all(recent_highs[i] < recent_highs[i+1] for i in range(len(recent_highs)-1))
+            hl = all(recent_lows[i] < recent_lows[i+1] for i in range(len(recent_lows)-1))
+            if hh and hl:
+                return 'bullish'
+            lh = all(recent_highs[i] > recent_highs[i+1] for i in range(len(recent_highs)-1))
+            ll = all(recent_lows[i] > recent_lows[i+1] for i in range(len(recent_lows)-1))
+            if lh and ll:
+                return 'bearish'
+        return 'neutral'
+
+# ===================================================================
+# 5. جلب البيانات (Data Provider)
+# ===================================================================
+
+class BinanceClient:
+    def __init__(self, session: Optional[aiohttp.ClientSession] = None):
+        self.session = session
+        self.base_url = config.BINANCE_BASE_URL
+        self.timeout = config.BINANCE_TIMEOUT
+        self.retries = config.BINANCE_RETRIES
+        self._owns_session = session is None
+
+    async def __aenter__(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+            self._owns_session = True
+        return self
+
+    async def __aexit__(self, *args):
+        if self._owns_session and self.session:
+            await self.session.close()
+
+    async def _request(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
+        url = f"{self.base_url}{endpoint}"
+        for attempt in range(self.retries):
+            try:
+                async with self.session.get(url, params=params, timeout=self.timeout) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    elif resp.status == 429:
+                        retry_after = int(resp.headers.get('Retry-After', 5))
+                        await asyncio.sleep(retry_after)
+                    else:
+                        break
+            except Exception:
+                if attempt < self.retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    return None
+        return None
+
+    async def get_klines(self, symbol: str, interval: str = '5m', limit: int = 100) -> Optional[CandleData]:
+        params = {'symbol': symbol, 'interval': interval, 'limit': limit}
+        data = await self._request('/api/v3/klines', params)
+        if not data:
+            return None
+        return CandleData(
+            prices=[float(c[4]) for c in data],
+            highs=[float(c[2]) for c in data],
+            lows=[float(c[3]) for c in data],
+            volumes=[float(c[5]) for c in data],
+            opens=[float(c[1]) for c in data]
         )
-        await db.commit()
 
-# -------------------- دوال جلب البيانات --------------------
-async def fetch_binance_klines(session, symbol, interval='5m', limit=50):
-    try:
-        url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and len(data) > 0:
-                    return {
-                        "prices": [float(c[4]) for c in data],
-                        "highs": [float(c[2]) for c in data],
-                        "lows": [float(c[3]) for c in data],
-                        "volumes": [float(c[5]) for c in data],
-                        "opens": [float(c[1]) for c in data]
-                    }
-    except Exception as e:
-        logger.debug(f"Binance error: {e}")
-    return None
+    async def get_24hr_stats(self, symbol: str) -> Optional[MarketStats]:
+        data = await self._request('/api/v3/ticker/24hr', {'symbol': symbol})
+        if not data:
+            return None
+        return MarketStats(
+            volume=float(data.get('quoteVolume', 0)),
+            change_24h=float(data.get('priceChangePercent', 0)),
+            high=float(data.get('highPrice', 0)),
+            low=float(data.get('lowPrice', 0)),
+            open=float(data.get('openPrice', 0)),
+            last=float(data.get('lastPrice', 0))
+        )
 
-async def fetch_coinbase_klines(session, symbol, interval='5m', limit=50):
-    try:
-        symbol_cb = symbol.replace('USDT', '-USD')
-        url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/candles"
-        granularity = 300 if interval == '5m' else 900
-        params = {'granularity': granularity, 'limit': limit}
-        async with session.get(url, params=params, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and len(data) > 0:
-                    return {
-                        "prices": [c[4] for c in data],
-                        "highs": [c[2] for c in data],
-                        "lows": [c[1] for c in data],
-                        "volumes": [c[5] for c in data],
-                        "opens": [c[3] for c in data]
-                    }
-    except Exception as e:
-        logger.debug(f"Coinbase error: {e}")
-    return None
+    async def get_exchange_info(self) -> Optional[list]:
+        data = await self._request('/api/v3/exchangeInfo')
+        if not data:
+            return []
+        symbols = []
+        for s in data.get('symbols', []):
+            if s.get('status') == 'TRADING' and s.get('quoteAsset') == 'USDT' and s.get('isSpotTradingAllowed'):
+                symbols.append(s['symbol'])
+        return symbols
 
-async def fetch_klines(session, symbol, interval='5m', limit=50, retries=3):
-    await asyncio.sleep(RATE_LIMIT_DELAY)
-    for attempt in range(retries):
-        data = await fetch_binance_klines(session, symbol, interval, limit)
-        if data and len(data['prices']) > 10:
-            return data
-        data = await fetch_coinbase_klines(session, symbol, interval, limit)
-        if data and len(data['prices']) > 10:
-            return data
-        if attempt < retries - 1:
-            wait_time = 2 ** attempt
-            await asyncio.sleep(wait_time)
-    return None
+# ===================================================================
+# 6. قاعدة البيانات (Database)
+# ===================================================================
 
-async def fetch_binance_24hr_stats(session, symbol):
-    try:
-        url = f"https://api.binance.us/api/v3/ticker/24hr?symbol={symbol}"
-        async with session.get(url, timeout=8) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "volume": float(data.get('quoteVolume', 0)),
-                    "change_24h": float(data.get('priceChangePercent', 0)),
-                    "high": float(data.get('highPrice', 0)),
-                    "low": float(data.get('lowPrice', 0)),
-                    "open": float(data.get('openPrice', 0)),
-                    "last": float(data.get('lastPrice', 0))
-                }
-    except Exception as e:
-        logger.debug(f"Binance stats error: {e}")
-    return None
+class Database:
+    def __init__(self):
+        self.pool = None
+        self._closed = False
 
-async def fetch_coinbase_24hr_stats(session, symbol):
-    try:
-        symbol_cb = symbol.replace('USDT', '-USD')
-        url = f"https://api.exchange.coinbase.com/products/{symbol_cb}/stats"
-        async with session.get(url, timeout=8) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                last = float(data.get('last', 0))
-                open_price = float(data.get('open', 0))
-                change_24h = ((last - open_price) / open_price * 100) if open_price != 0 else 0
-                volume = float(data.get('volume', 0)) * last
-                return {
-                    "volume": volume,
-                    "change_24h": change_24h,
-                    "high": float(data.get('high', 0)),
-                    "low": float(data.get('low', 0)),
-                    "open": open_price,
-                    "last": last
-                }
-    except Exception as e:
-        logger.debug(f"Coinbase stats error: {e}")
-    return None
+    async def connect(self):
+        try:
+            self.pool = await asyncpg.create_pool(
+                config.DATABASE_URL,
+                min_size=1,
+                max_size=5,
+                timeout=10
+            )
+            await self._init_tables()
+            logger.info("✅ PostgreSQL متصلة")
+            return True
+        except Exception as e:
+            logger.error(f"❌ فشل الاتصال بـ PostgreSQL: {e}")
+            return False
 
-async def fetch_24hr_stats(session, symbol):
-    stats = await fetch_binance_24hr_stats(session, symbol)
-    if stats and stats.get('volume', 0) > 1000:
-        return stats
-    stats = await fetch_coinbase_24hr_stats(session, symbol)
-    if stats and stats.get('volume', 0) > 1000:
-        return stats
-    return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0, "last": 0}
+    async def _init_tables(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS subscribers (user_id TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS pending (user_id TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS signal_cooldown (symbol TEXT PRIMARY KEY, last_signal_time TEXT);
+                CREATE TABLE IF NOT EXISTS signals_history (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT,
+                    timestamp TEXT,
+                    signal_type TEXT,
+                    entry_price REAL,
+                    stop_loss REAL,
+                    take_profit REAL,
+                    status TEXT DEFAULT 'OPEN',
+                    exit_price REAL,
+                    profit_loss REAL,
+                    duration_minutes INTEGER,
+                    win BOOLEAN,
+                    entry_time TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS performance_metrics (
+                    id SERIAL PRIMARY KEY,
+                    date DATE UNIQUE,
+                    total_trades INTEGER,
+                    wins INTEGER,
+                    losses INTEGER,
+                    win_rate REAL,
+                    profit_factor REAL,
+                    avg_win REAL,
+                    avg_loss REAL,
+                    expectancy REAL,
+                    max_drawdown REAL
+                );
+            """)
+            if config.ADMIN_CHAT_ID:
+                await conn.execute(
+                    "INSERT INTO subscribers (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    config.ADMIN_CHAT_ID
+                )
 
-# -------------------- المؤشرات الفنية المحسنة --------------------
-def calculate_rsi(prices, period=RSI_PERIOD):
-    if len(prices) < period + 1:
-        return 50.0
-    gains = []
-    losses = []
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0.0)
+    async def close(self):
+        if self.pool and not self._closed:
+            await self.pool.close()
+            self._closed = True
+            logger.info("✅ اتصال قاعدة البيانات مغلق")
+
+    async def execute(self, query: str, *args):
+        async with self.pool.acquire() as conn:
+            return await conn.execute(query, *args)
+
+    async def fetch(self, query: str, *args):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(query, *args)
+
+    async def fetchrow(self, query: str, *args):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(query, *args)
+
+# ===================================================================
+# 7. مستودع البيانات (Repository)
+# ===================================================================
+
+class Repository:
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def get_subscribers(self) -> List[str]:
+        rows = await self.db.fetch("SELECT user_id FROM subscribers")
+        return [r[0] for r in rows]
+
+    async def add_subscriber(self, user_id: str) -> None:
+        await self.db.execute("INSERT INTO subscribers (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+
+    async def remove_subscriber(self, user_id: str) -> None:
+        await self.db.execute("DELETE FROM subscribers WHERE user_id = $1", user_id)
+
+    async def get_pending(self) -> List[str]:
+        rows = await self.db.fetch("SELECT user_id FROM pending")
+        return [r[0] for r in rows]
+
+    async def add_pending(self, user_id: str) -> None:
+        await self.db.execute("INSERT INTO pending (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+
+    async def remove_pending(self, user_id: str) -> None:
+        await self.db.execute("DELETE FROM pending WHERE user_id = $1", user_id)
+
+    async def get_cooldown(self, symbol: str) -> Optional[str]:
+        row = await self.db.fetchrow("SELECT last_signal_time FROM signal_cooldown WHERE symbol = $1", symbol)
+        return row[0] if row else None
+
+    async def set_cooldown(self, symbol: str, timestamp: str) -> None:
+        await self.db.execute(
+            "INSERT INTO signal_cooldown (symbol, last_signal_time) VALUES ($1, $2) ON CONFLICT (symbol) DO UPDATE SET last_signal_time = $2",
+            symbol, timestamp
+        )
+
+    async def save_signal(self, symbol: str, signal_type: str, entry_price: float, stop_loss: float, take_profit: float) -> None:
+        await self.db.execute(
+            "INSERT INTO signals_history (symbol, timestamp, signal_type, entry_price, stop_loss, take_profit, entry_time) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            symbol, datetime.now().isoformat(), signal_type, entry_price, stop_loss, take_profit, datetime.now()
+        )
+
+    async def get_open_signals(self) -> List[Tuple]:
+        return await self.db.fetch(
+            "SELECT id, symbol, entry_time, entry_price, stop_loss, take_profit, signal_type FROM signals_history WHERE status = 'OPEN'"
+        )
+
+    async def close_signal(self, signal_id: int, status: str, exit_price: float, profit_loss: float, duration_minutes: int, win: bool) -> None:
+        await self.db.execute(
+            "UPDATE signals_history SET status = $1, exit_price = $2, profit_loss = $3, duration_minutes = $4, win = $5 WHERE id = $6",
+            status, exit_price, profit_loss, duration_minutes, win, signal_id
+        )
+
+    async def get_latest_performance(self):
+        return await self.db.fetchrow(
+            "SELECT total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown FROM performance_metrics ORDER BY id DESC LIMIT 1"
+        )
+
+    async def update_performance(self, metrics: dict) -> None:
+        today = datetime.now().date()
+        await self.db.execute(
+            """
+            INSERT INTO performance_metrics 
+            (date, total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (date) DO UPDATE SET
+            total_trades = $2, wins = $3, losses = $4, win_rate = $5,
+            profit_factor = $6, avg_win = $7, avg_loss = $8,
+            expectancy = $9, max_drawdown = $10
+            """,
+            today, metrics.get('total_trades', 0), metrics.get('wins', 0),
+            metrics.get('losses', 0), metrics.get('win_rate', 0.0),
+            metrics.get('profit_factor', 0.0), metrics.get('avg_win', 0.0),
+            metrics.get('avg_loss', 0.0), metrics.get('expectancy', 0.0),
+            metrics.get('max_drawdown', 0.0)
+        )
+
+# ===================================================================
+# 8. محرك الاستراتيجية (Strategy Engine)
+# ===================================================================
+
+class StrategyEngine:
+    def __init__(self, symbol: str, data_5m: CandleData, data_1h: CandleData, data_4h: CandleData, stats: MarketStats):
+        self.symbol = symbol
+        self.data_5m = data_5m
+        self.data_1h = data_1h
+        self.data_4h = data_4h
+        self.stats = stats
+        self._setup()
+
+    def _setup(self):
+        self.prices_5m = self.data_5m.closed_prices()
+        self.highs_5m = self.data_5m.closed_highs()
+        self.lows_5m = self.data_5m.closed_lows()
+        self.volumes_5m = self.data_5m.closed_volumes()
+        self.current_price = self.data_5m.get_current_price()
+        self.ref_price = self.data_5m.get_reference_price()
+        self.rsi = Indicators.calculate_rsi(self.prices_5m, config.RSI_PERIOD)
+        self.adx = Indicators.calculate_adx(self.highs_5m, self.lows_5m, self.prices_5m, config.ADX_PERIOD)
+        self.atr = Indicators.calculate_atr(self.highs_5m, self.lows_5m, self.prices_5m, 14)
+        self.macd = Indicators.calculate_macd(self.prices_5m)
+        self.bb = Indicators.calculate_bollinger(self.prices_5m)
+        self.structure = MarketStructure(self.data_5m)
+        self.trend = self.structure.get_trend()
+        self.last_swing_high = self.structure.get_last_swing_high()
+        self.last_swing_low = self.structure.get_last_swing_low()
+        self.directional_bias = self._calculate_directional_bias()
+        self.market_regime = "trending" if self.adx >= config.MIN_ADX_STRONG else "ranging"
+        self.change_1h = self._calculate_change_1h()
+        self.volume_ratio = self._calculate_volume_ratio()
+        self.score = 0.0
+        self.reasons = []
+
+    def _calculate_directional_bias(self) -> str:
+        prices_1h = self.data_1h.closed_prices()
+        prices_4h = self.data_4h.closed_prices()
+        if len(prices_1h) < 50 or len(prices_4h) < 50:
+            return 'neutral'
+        sma20_1h = sum(prices_1h[-20:]) / 20
+        sma50_1h = sum(prices_1h[-50:]) / 50
+        sma20_4h = sum(prices_4h[-20:]) / 20
+        sma50_4h = sum(prices_4h[-50:]) / 50
+        current_1h = prices_1h[-1]
+        current_4h = prices_4h[-1]
+        bullish_1h = current_1h > sma20_1h and sma20_1h > sma50_1h
+        bullish_4h = current_4h > sma20_4h and sma20_4h > sma50_4h
+        bearish_1h = current_1h < sma20_1h and sma20_1h < sma50_1h
+        bearish_4h = current_4h < sma20_4h and sma20_4h < sma50_4h
+        if bullish_1h and bullish_4h: return 'bullish'
+        if bearish_1h and bearish_4h: return 'bearish'
+        return 'neutral'
+
+    def _calculate_change_1h(self) -> float:
+        if len(self.prices_5m) < 13:
+            return 0.0
+        old_price = self.prices_5m[-13]
+        if old_price == 0:
+            return 0.0
+        return ((self.ref_price - old_price) / old_price) * 100
+
+    def _calculate_volume_ratio(self) -> float:
+        if len(self.volumes_5m) < 13:
+            return 0.0
+        prev_vol = self.volumes_5m[-13:-1]
+        avg_vol = sum(prev_vol) / len(prev_vol) if prev_vol else 1.0
+        curr_vol = self.volumes_5m[-1] if self.volumes_5m else 0.0
+        return curr_vol / avg_vol if avg_vol > 0 else 0.0
+
+    def _compute_score(self) -> None:
+        score = 0.0
+        reasons = []
+        if self.directional_bias == 'bullish':
+            score += 3.0; reasons.append("اتجاه صاعد")
+        elif self.directional_bias == 'bearish':
+            score += 3.0; reasons.append("اتجاه هابط")
         else:
-            gains.append(0.0)
-            losses.append(abs(diff))
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return max(0, min(100, rsi))
-
-def calculate_sma(prices, period=20):
-    if len(prices) < period:
-        return prices[-1] if prices else 0
-    return sum(prices[-period:]) / period
-
-def calculate_ema_series(prices, period):
-    if len(prices) < period:
-        return [prices[-1]] * len(prices) if prices else []
-    multiplier = 2 / (period + 1)
-    ema_series = [prices[0]]
-    for price in prices[1:]:
-        ema = (price - ema_series[-1]) * multiplier + ema_series[-1]
-        ema_series.append(ema)
-    return ema_series
-
-def calculate_macd(prices, short=12, long=26, signal=9):
-    if len(prices) < long:
-        return {"histogram": 0}
-    ema_short = calculate_ema_series(prices, short)
-    ema_long = calculate_ema_series(prices, long)
-    macd_line = [s - l for s, l in zip(ema_short, ema_long)]
-    signal_line = calculate_ema_series(macd_line, signal)
-    histogram = macd_line[-1] - signal_line[-1]
-    return {"histogram": histogram}
-
-def calculate_bollinger(prices, period=20, std=2):
-    if len(prices) < period:
-        return {"upper": 0, "middle": 0, "lower": 0}
-    sma = sum(prices[-period:]) / period
-    variance = sum((p - sma) ** 2 for p in prices[-period:]) / period
-    std_dev = math.sqrt(variance)
-    return {
-        "upper": sma + (std_dev * std),
-        "middle": sma,
-        "lower": sma - (std_dev * std)
-    }
-
-def calculate_atr(highs, lows, closes, period=14):
-    if len(closes) < period:
-        return 0
-    tr_list = []
-    for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        tr_list.append(tr)
-    return sum(tr_list[-period:]) / period
-
-# -------------------- نظام التصنيف المحسّن (v10.0) --------------------
-def determine_signal_type(rsi, change_1h, score, trend_1h, trend_4h):
-    """
-    تحديد نوع الإشارة بناءً على النقاط أولاً، ثم RSI والاتجاه.
-    النقاط تحدد الإطار العام، والعوامل الأخرى تحدد التفاصيل.
-    """
-    # 1. النقاط العالية جداً (8.0+) → إشارات قوية
-    if score >= 8.0:
-        if rsi > 70 and trend_1h and trend_4h:
-            return "🔴 **بيع قوي** (تشبع شرائي مفرط)"
-        elif rsi < 30 and trend_1h and trend_4h:
-            return "🟢 **شراء قوي** (تشبع بيعي مع اتجاه صاعد)"
-        elif change_1h > 0.5 and trend_1h and trend_4h:
-            return "🟢 **شراء قوي** (زخم قوي مع اتجاه)"
-        elif change_1h < -0.5 and not trend_1h and not trend_4h:
-            return "🔴 **بيع قوي** (زخم سلبي مع اتجاه هابط)"
+            score += 1.0; reasons.append("اتجاه محايد")
+        if self.trend == 'bullish':
+            score += 2.0; reasons.append("هيكل صاعد")
+        elif self.trend == 'bearish':
+            score += 2.0; reasons.append("هيكل هابط")
         else:
-            return "🟢 **شراء قوي**" if change_1h > 0 else "🔴 **بيع قوي**"
-    
-    # 2. النقاط المتوسطة العالية (6.5 - 7.9) → إشارات واضحة
-    elif score >= 6.5:
-        if rsi > 70:
-            return "🔴 **بيع** (RSI مرتفع - ذروة شراء)"
-        elif rsi < 30:
-            return "🟢 **شراء** (RSI منخفض - ذروة بيع)"
-        elif change_1h > 0.3 and trend_1h and trend_4h:
-            return "🟢 **شراء** (زخم إيجابي مع اتجاه صاعد)"
-        elif change_1h < -0.3 and not trend_1h and not trend_4h:
-            return "🔴 **بيع** (زخم سلبي مع اتجاه هابط)"
+            score += 0.5; reasons.append("هيكل محايد")
+        if 40 <= self.rsi <= 60:
+            score += 2.0; reasons.append(f"RSI {self.rsi:.1f} - محايد")
+        elif 60 < self.rsi <= 70:
+            score += 1.0; reasons.append(f"RSI {self.rsi:.1f} - مرتفع")
+        elif 30 <= self.rsi < 40:
+            score += 1.0; reasons.append(f"RSI {self.rsi:.1f} - منخفض")
         else:
-            return "🟡 **مراقبة** (نقاط جيدة، انتظر تأكيداً إضافياً)"
-    
-    # 3. النقاط المتوسطة (4.5 - 6.4) → مراقبة
-    elif score >= 4.5:
-        if rsi > 75:
-            return "🔴 **بيع** (RSI مرتفع جداً)"
-        elif rsi < 25:
-            return "🟢 **شراء** (RSI منخفض جداً)"
-        elif change_1h > 0.8 and trend_1h and trend_4h:
-            return "🟢 **شراء** (زخم قوي)"
+            score += 0.5; reasons.append(f"RSI {self.rsi:.1f} - متطرف")
+        if self.change_1h > 1.0:
+            score += 1.0; reasons.append(f"زخم صاعد {self.change_1h:.1f}%")
+        elif self.change_1h < -1.0:
+            score += 1.0; reasons.append(f"زخم هابط {abs(self.change_1h):.1f}%")
         else:
-            return "🟡 **مراقبة** (إشارة ضعيفة، انتظر تأكيداً)"
-    
-    # 4. النقاط المنخفضة (< 4.5) → حيادي
-    else:
-        return "⚪ **حيادي** (لا توجد إشارة واضحة)"
+            score += 0.3; reasons.append("زخم ضعيف")
+        if self.volume_ratio > 2.0:
+            score += 1.0; reasons.append(f"حجم قوي {self.volume_ratio:.1f}x")
+        else:
+            score += 0.3; reasons.append("حجم عادي")
+        self.score = round(min(score, 10.0), 1)
+        self.reasons = reasons
 
-def evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper_bollinger, change_1h, price_above_ema, trend_1h, trend_4h):
-    """
-    تقييم الإشارة وإرجاع النقاط والأسباب.
-    الأولوية: RSI > الاتجاه > الزخم > الحجم
-    """
-    # فلترة RSI المتطرفة
-    if rsi > 80 or rsi < 20:
+    def generate_signal(self):
+        # 1. Market Regime
+        if self.adx < config.MIN_ADX_STRONG:
+            return self._signal_result("NO_TRADE", ["السوق ليس اتجاهياً (ADX ضعيف)"])
+        # 2. Trend
+        if self.directional_bias == 'neutral':
+            return self._signal_result("NO_TRADE", ["الاتجاه غير واضح"])
+        # 3. Structure
+        if self.trend == 'neutral':
+            self._compute_score()
+            return self._signal_result("WATCH", self.reasons)
+        # 4. Momentum
+        if self.rsi > 80 or self.rsi < 20:
+            return self._signal_result("WATCH", ["RSI متطرف"])
+        if self.directional_bias == 'bullish':
+            if not (40 <= self.rsi <= 70 and self.macd['histogram'] > 0):
+                self._compute_score()
+                return self._signal_result("WATCH", self.reasons)
+            if self.trend != 'bullish':
+                self._compute_score()
+                return self._signal_result("WATCH", self.reasons)
+        else:  # bearish
+            if not (30 <= self.rsi <= 60 and self.macd['histogram'] < 0):
+                self._compute_score()
+                return self._signal_result("WATCH", self.reasons)
+            if self.trend != 'bearish':
+                self._compute_score()
+                return self._signal_result("WATCH", self.reasons)
+        # 5. Volume
+        if self.volume_ratio < 1.5:
+            self._compute_score()
+            return self._signal_result("WATCH", self.reasons + ["حجم ضعيف"])
+        # 6. Generate signal
+        action = "BUY" if self.directional_bias == 'bullish' else "SELL"
+        stop_loss, take_profit = self._calculate_risk(action)
+        if stop_loss == 0.0 or take_profit == 0.0:
+            return self._signal_result("NO_TRADE", ["إدارة المخاطر غير صالحة"])
+        self._compute_score()
+        return self._signal_result(action, self.reasons, stop_loss, take_profit)
+
+    def _signal_result(self, action: str, reasons: List[str], stop_loss: float = 0.0, take_profit: float = 0.0):
         return {
-            "status": "مرفوض",
-            "score": 0.0,
-            "signal": "🔴 تجنب الدخول (RSI متطرف)",
-            "reasons": ["RSI خارج النطاق الآمن (>80 أو <20)"]
+            "symbol": self.symbol,
+            "action": action,
+            "entry_price": self.ref_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "score": self.score,
+            "reasons": reasons,
+            "adx": self.adx,
+            "rsi": self.rsi,
+            "market_regime": self.market_regime,
+            "directional_bias": self.directional_bias,
+            "structure": self.trend,
+            "is_actionable": action in ("BUY", "SELL")
         }
 
-    score = 0.0
-    reasons = []
+    def _calculate_risk(self, action: str) -> Tuple[float, float]:
+        if action not in ('BUY', 'SELL'):
+            return 0.0, 0.0
+        min_stop_pct = 0.01
+        atr_stop = self.atr * 2 if self.atr > 0 else self.ref_price * 0.015
+        max_stop_distance = max(atr_stop, self.ref_price * min_stop_pct)
+        if action == 'BUY' and self.last_swing_low is not None:
+            stop_loss = self.last_swing_low - self.atr * 0.25
+            if self.ref_price - stop_loss < max_stop_distance:
+                stop_loss = self.ref_price - max_stop_distance
+            if stop_loss > self.ref_price * 0.98:
+                return 0.0, 0.0
+            take_profit = self.ref_price + (self.ref_price - stop_loss) * config.MIN_RISK_REWARD_RATIO
+            return stop_loss, take_profit
+        elif action == 'SELL' and self.last_swing_high is not None:
+            stop_loss = self.last_swing_high + self.atr * 0.25
+            if stop_loss - self.ref_price < max_stop_distance:
+                stop_loss = self.ref_price + max_stop_distance
+            if stop_loss < self.ref_price * 1.02:
+                return 0.0, 0.0
+            take_profit = self.ref_price - (stop_loss - self.ref_price) * config.MIN_RISK_REWARD_RATIO
+            return stop_loss, take_profit
+        return 0.0, 0.0
 
-    # ---- 1. RSI - 4 نقاط كحد أقصى ----
-    if 45 <= rsi <= 55:
-        score += 4.0
-        reasons.append("زخم RSI في النطاق الآمن المثالي")
-    elif 40 <= rsi < 45 or 55 < rsi <= 60:
-        score += 3.0
-        reasons.append("RSI قريب من النطاق المثالي")
-    elif 30 <= rsi < 40:
-        score += 2.0
-        reasons.append("منطقة تشبع بيعي (فرصة شراء محتملة)")
-    elif 60 < rsi <= 70:
-        score += 1.5
-        reasons.append("RSI مرتفع - حذر من القمة")
-    elif rsi < 30:
-        score += 1.0
-        reasons.append("تشبع بيعي شديد (انتظار تأكيد)")
-    else:
-        score += 0.5
-        reasons.append("زخم ضعيف")
+# ===================================================================
+# 9. مقدم البيانات (Data Provider) - التكامل
+# ===================================================================
 
-    # ---- 2. الاتجاه - 3 نقاط كحد أقصى ----
-    if trend_1h and trend_4h:
-        score += 3.0
-        reasons.append("اتجاه صاعد قوي (1h+4h)")
-    elif trend_1h or trend_4h:
-        score += 1.5
-        reasons.append("اتجاه صاعد جزئي")
-    else:
-        reasons.append("اتجاه هابط أو جانبي")
+class DataProvider:
+    def __init__(self):
+        self._session = None
 
-    # ---- 3. الزخم السعري - نقطة واحدة ----
-    if change_1h > 1.5:
-        score += 1.0
-        reasons.append(f"زخم سعري قوي ({change_1h:.1f}%)")
-    elif change_1h > 0.5:
-        score += 0.5
-        reasons.append(f"زخم سعري معتدل ({change_1h:.1f}%)")
-    elif change_1h < -1.5:
-        reasons.append(f"انهيار سعري ({change_1h:.1f}%)")
-    else:
-        reasons.append("زخم سعري ضعيف")
+    async def _get_session(self):
+        if self._session is None:
+            self._session = aiohttp.ClientSession()
+        return self._session
 
-    # ---- 4. الحجم (عامل مساعد) - نقطة واحدة كحد أقصى ----
-    if volume_ratio >= 3.0:
-        score += 1.0
-        reasons.append(f"🚀 انفجار حجم كبير ({volume_ratio:.1f}x)")
-    elif volume_ratio >= 2.0:
-        score += 0.7
-        reasons.append(f"نشاط حجم جيد ({volume_ratio:.1f}x)")
-    elif volume_ratio >= 1.3:
-        score += 0.4
-        reasons.append(f"نشاط حجم معتدل ({volume_ratio:.1f}x)")
-    else:
-        reasons.append("حجم ضعيف")
+    async def close(self):
+        if self._session:
+            await self._session.close()
+            self._session = None
 
-    # ---- 5. السيولة (عامل مساعد) - نقطة واحدة كحد أقصى ----
-    if liquidity_usd > 2_000_000:
-        score += 1.0
-        reasons.append("سيولة عالية جداً (> $2M)")
-    elif liquidity_usd > 1_000_000:
-        score += 0.5
-        reasons.append("سيولة عالية (> $1M)")
-    else:
-        reasons.append("سيولة منخفضة")
+    async def fetch_klines(self, symbol: str, interval: str = '5m', limit: int = 100) -> Optional[CandleData]:
+        session = await self._get_session()
+        async with BinanceClient(session) as client:
+            return await client.get_klines(symbol, interval, limit)
 
-    # ---- 6. موقع السعر من البولينجر (عامل مساعد) ----
-    if not price_near_upper_bollinger:
-        score += 0.5
-        reasons.append("مساحة للصعود (بعيد عن الحد العلوي)")
-    else:
-        reasons.append("السعر قريب من الحد العلوي")
+    async def fetch_stats(self, symbol: str) -> Optional[MarketStats]:
+        session = await self._get_session()
+        async with BinanceClient(session) as client:
+            return await client.get_24hr_stats(symbol)
 
-    # ---- 7. السعر فوق EMA12 ----
-    if price_above_ema:
-        score += 0.5
-        reasons.append("السعر فوق EMA12 (اتجاه صاعد)")
-    else:
-        reasons.append("السعر تحت EMA12 (اتجاه هابط محتمل)")
+    async def get_active_symbols(self) -> List[str]:
+        session = await self._get_session()
+        async with BinanceClient(session) as client:
+            return await client.get_exchange_info() or []
 
-    final_score = round(min(score, 10.0), 1)
-    
-    # تحديد نوع الإشارة باستخدام النظام المحسّن
-    signal_label = determine_signal_type(rsi, change_1h, final_score, trend_1h, trend_4h)
+    async def filter_symbols(self) -> List[str]:
+        all_symbols = await self.get_active_symbols()
+        if not all_symbols:
+            return []
+        all_symbols = all_symbols[:150]
+        sem = asyncio.Semaphore(10)
+        async def fetch_with_limit(sym: str):
+            async with sem:
+                return sym, await self.fetch_stats(sym)
+        tasks = [fetch_with_limit(sym) for sym in all_symbols]
+        results = await asyncio.gather(*tasks)
+        candidates = []
+        for sym, stats in results:
+            if stats and stats.volume > config.MIN_VOLUME_USD:
+                if abs(stats.change_24h) >= config.MIN_VOLATILITY:
+                    candidates.append((sym, stats.volume))
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return [c[0] for c in candidates[:config.TOP_SYMBOLS_COUNT]]
 
-    return {
-        "status": "مقبول",
-        "score": final_score,
-        "signal": signal_label,
-        "reasons": reasons
-    }
+# ===================================================================
+# 10. خدمات المسح والتتبع والأداء
+# ===================================================================
 
-# -------------------- قائمة العملات --------------------
-BASE_WATCH_LIST = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
-    "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
-    "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ICPUSDT", "ETCUSDT", "XTZUSDT",
-    "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
-    "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
-    "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-    "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
-    "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
-    "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
-    "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT",
-    "SUSHIUSDT", "UMAUSDT", "ZECUSDT"
-]
-dynamic_watch_list = []
+class Scanner:
+    def __init__(self, provider: DataProvider, repo: Repository):
+        self.provider = provider
+        self.repo = repo
+        self.last_filter_time = 0
+        self.dynamic_watch_list = []
+        self.is_running = False
 
-# -------------------- التحليل المتقدم --------------------
-async def advanced_analysis(session, symbol):
-    data_5m = await fetch_klines(session, symbol, '5m', 100)
-    data_1h = await fetch_klines(session, symbol, '1h', 30)
-    data_4h = await fetch_klines(session, symbol, '4h', 20)
-    
-    if not data_5m or not data_1h or not data_4h:
-        return None
-    
-    prices_5m = data_5m['prices']
-    highs_5m = data_5m['highs']
-    lows_5m = data_5m['lows']
-    volumes_5m = data_5m['volumes']
-    
-    # اتجاهات 1h و 4h
-    trend_1h = data_1h['prices'][-1] > calculate_sma(data_1h['prices'], 20) if len(data_1h['prices']) >= 20 else False
-    trend_4h = data_4h['prices'][-1] > calculate_sma(data_4h['prices'], 20) if len(data_4h['prices']) >= 20 else False
-    
-    stats = await fetch_24hr_stats(session, symbol)
-    if stats.get('volume', 0) < MIN_VOLUME_USD:
-        return None
-    
-    current_price = prices_5m[-1]
-    rsi = calculate_rsi(prices_5m, RSI_PERIOD)
-    if rsi >= 99 or rsi <= 1:
-        return None
-    
-    ema12 = calculate_ema_series(prices_5m, 12)[-1]
-    macd = calculate_macd(prices_5m)
-    bb = calculate_bollinger(prices_5m, 20, 2)
-    atr = calculate_atr(highs_5m, lows_5m, prices_5m, 14)
-    
-    # حساب التغير خلال ساعة مع التحقق من الصفر
-    if len(prices_5m) >= 6 and prices_5m[-6] > 0:
-        change_1h = ((prices_5m[-1] - prices_5m[-6]) / prices_5m[-6]) * 100
-    else:
-        change_1h = 0.0
-    
-    # تجاهل العملات الراكدة تماماً (لا حركة)
-    if abs(change_1h) < MIN_CHANGE_1H and not (rsi < 30 or rsi > 70):
-        return None
-    
-    # الحجم النسبي (آخر 12 شمعة = ساعة)
-    avg_volume_12 = sum(volumes_5m[-12:]) / 12 if len(volumes_5m) >= 12 else 1
-    current_volume = volumes_5m[-1] if volumes_5m else 0
-    volume_ratio = current_volume / avg_volume_12 if avg_volume_12 > 0 else 0
-    
-    price_near_upper = current_price > bb['upper'] * 0.98 if bb['upper'] > 0 else False
-    price_above_ema = current_price > ema12
-    liquidity_usd = stats.get('volume', 0)
-    
-    eval_result = evaluate_signal(rsi, volume_ratio, liquidity_usd, price_near_upper, change_1h, price_above_ema, trend_1h, trend_4h)
-    
-    # رفض الإشارات الضعيفة
-    if eval_result['status'] == 'مرفوض' or eval_result['score'] < SIGNAL_SCORE_THRESHOLD:
-        return None
-    
-    # إدارة المخاطر الديناميكية
-    min_stop_pct = 0.01  # 1%
-    atr_stop = atr * 2 if atr > 0 else current_price * 0.015
-    stop_loss = current_price - max(atr_stop, current_price * min_stop_pct)
-    take_profit = current_price + max(atr_stop * 2, current_price * 0.025)  # هدف 2.5% كحد أدنى
-    
-    price_precision = 8 if symbol in ["PEPEUSDT", "SHIBUSDT", "BONKUSDT"] else 6
-    stop_loss = round(stop_loss, price_precision)
-    take_profit = round(take_profit, price_precision)
-    
-    position_size = calculate_position_size(current_price, stop_loss)
-    
-    await save_signal_history(symbol, eval_result['signal'], current_price, stop_loss, take_profit)
-    
-    return {
-        "symbol": symbol,
-        "price": round(current_price, price_precision),
-        "rsi": round(rsi, 1),
-        "macd": {"histogram": round(macd['histogram'], 6)},
-        "bb": {
-            "upper": round(bb['upper'], price_precision),
-            "lower": round(bb['lower'], price_precision)
-        },
-        "change_1h": round(change_1h, 2),
-        "volume_ratio": round(volume_ratio, 1),
-        "score": eval_result['score'],
-        "reasons": eval_result['reasons'],
-        "signal": eval_result['signal'],
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "position_size": position_size,
-        "volume_24h": stats.get('volume', 0)
-    }
+    async def start(self):
+        if self.is_running:
+            return
+        self.is_running = True
+        while self.is_running:
+            try:
+                await self._scan()
+            except Exception as e:
+                logger.error(f"Scanner error: {e}")
+            await asyncio.sleep(config.SCAN_INTERVAL_SECONDS)
 
-def calculate_position_size(current_price, stop_loss):
-    if current_price <= 0 or stop_loss <= 0 or current_price == stop_loss:
-        return 0.5
-    stop_loss_pct = abs(current_price - stop_loss) / current_price
-    if stop_loss_pct == 0:
-        return 0.5
-    position_size = (RISK_PER_TRADE / stop_loss_pct) * 100
-    return round(min(MAX_POSITION_SIZE_PCT, max(0.1, position_size)), 2)
+    async def stop(self):
+        self.is_running = False
 
-# -------------------- دوال الإرسال غير المتزامنة --------------------
-async def send_message_async(session, chat_id, message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for attempt in range(3):
-        try:
-            async with session.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=5) as resp:
-                if resp.status == 200:
-                    return
-                elif resp.status == 429:
-                    data = await resp.json()
-                    retry_after = data.get('retry_after', 5)
-                    await asyncio.sleep(retry_after)
-                else:
-                    logger.warning(f"Telegram error {resp.status} for {chat_id}")
-        except Exception as e:
-            logger.error(f"Error sending to {chat_id}: {e}")
-            await asyncio.sleep(2 ** attempt)
+    async def _scan(self):
+        if time.time() - self.last_filter_time > 1800:
+            self.dynamic_watch_list = await self.provider.filter_symbols()
+            self.last_filter_time = time.time()
+            logger.info(f"🔍 Updated watchlist: {len(self.dynamic_watch_list)} symbols")
+        all_symbols = list(set(self.dynamic_watch_list))
+        if not all_symbols:
+            return
+        logger.info(f"🔄 Scanning {len(all_symbols)} symbols...")
+        sem = asyncio.Semaphore(5)
+        tasks = [self._process_symbol(sym, sem) for sym in all_symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                logger.error(f"Symbol processing error: {res}")
 
-async def send_to_all_subscribers_async(session, message):
-    subscribers = await get_subscribers()
-    if not subscribers:
-        return
-    tasks = [send_message_async(session, chat_id, message) for chat_id in subscribers]
-    await asyncio.gather(*tasks, return_exceptions=True)
-    logger.info(f"✅ تم إرسال الرسالة لـ {len(subscribers)} مشترك")
-
-# -------------------- أوامر التليجرام --------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    subscribers = await get_subscribers()
-    pending = await get_pending()
-    if user_id in subscribers:
-        await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
-        return
-    if user_id in pending:
-        await update.message.reply_text("⏳ طلبك قيد الانتظار.")
-        return
-    await add_pending(user_id)
-    await update.message.reply_text("✅ تم استلام طلب الاشتراك.")
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📩 طلب اشتراك جديد: `{user_id}`\n/approve {user_id}", parse_mode="Markdown")
-
-async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ فقط للمالك.")
-        return
-    if not context.args:
-        await update.message.reply_text("⚠️ استخدم: /approve USER_ID")
-        return
-    user_id = context.args[0].strip()
-    pending = await get_pending()
-    if user_id in pending:
-        await remove_pending(user_id)
-        await add_subscriber(user_id)
-        await update.message.reply_text(f"✅ تمت الموافقة على `{user_id}`.")
-        try:
-            await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك!")
-        except:
-            pass
-    else:
-        await update.message.reply_text("❌ غير موجود في قائمة الانتظار.")
-
-async def add_user_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
-        return
-    if not context.args:
-        await update.message.reply_text("⚠️ استخدم: /adduser USER_ID")
-        return
-    user_id = context.args[0].strip()
-    if not user_id.isdigit():
-        await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً فقط.")
-        return
-    subscribers = await get_subscribers()
-    if user_id in subscribers:
-        await update.message.reply_text(f"ℹ️ المستخدم `{user_id}` مشترك بالفعل.", parse_mode="Markdown")
-        return
-    await add_subscriber(user_id)
-    try:
-        await context.bot.send_message(chat_id=user_id, text="🎉 *تمت إضافتك إلى البوت الاحترافي v10.0!*", parse_mode="Markdown")
-        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` بنجاح.")
-    except Exception as e:
-        await update.message.reply_text(f"✅ تمت إضافة المستخدم `{user_id}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
-    logger.info(f"➕ المالك أضاف مستخدم: {user_id}")
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    subscribers = await get_subscribers()
-    pending = await get_pending()
-    all_syms = list(set(BASE_WATCH_LIST + dynamic_watch_list))
-    await update.message.reply_text(
-        f"📊 *حالة البوت v10.0 - نظام تصنيف محسّن*\n"
-        f"📌 العملات: {len(all_syms)}\n"
-        f"👥 المشتركين: {len(subscribers)}\n"
-        f"⏳ في الانتظار: {len(pending)}\n"
-        f"💧 الحد الأدنى للسيولة: ${MIN_VOLUME_USD:,}\n"
-        f"📊 نظام التقييم: RSI(6) أولاً + اتجاه (1h/4h) + زخم\n"
-        f"🛡️ إدارة المخاطر: ديناميكية (وقف خسارة ≥1%، حجم صفقة محسوب)\n"
-        f"🔹 عتبة الإرسال: {SIGNAL_SCORE_THRESHOLD}/10 (إشارات متوازنة)\n"
-        f"⏱️ فترة التبريد: {COOLDOWN_MINUTES} دقيقة\n"
-        f"🔄 Self-Pinger: نشط (كل 10 دقائق)",
-        parse_mode="Markdown"
-    )
-
-async def signal_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ /signal SYMBOL")
-        return
-    sym = context.args[0].upper()
-    async with aiohttp.ClientSession() as session:
-        analysis = await advanced_analysis(session, sym)
-    if not analysis:
-        await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}")
-        return
-    volume_str = f"${analysis['volume_24h']:,.0f}"
-    msg = (
-        f"📡 *تحليل فوري لـ {sym}*\n"
-        f"🔹 النقاط: {analysis['score']}/10\n"
-        f"🔹 الإشارة: {analysis['signal']}\n"
-        f"💰 السعر: `{analysis['price']}`\n"
-        f"📊 RSI(6): `{analysis['rsi']}`\n"
-        f"📈 MACD: `{analysis['macd']['histogram']}`\n"
-        f"📊 بولينجر: الأعلى `{analysis['bb']['upper']}` | الأدنى `{analysis['bb']['lower']}`\n"
-        f"📈 تغير ساعة: `{analysis['change_1h']}%`\n"
-        f"📊 الحجم النسبي: `{analysis['volume_ratio']}x`\n"
-        f"💧 السيولة 24h: `{volume_str}`\n"
-        f"📝 الأسباب: {', '.join(analysis['reasons'])}\n\n"
-        f"🛡️ وقف الخسارة: `{analysis['stop_loss']}`\n"
-        f"🎯 جني الأرباح: `{analysis['take_profit']}`\n"
-        f"📊 حجم الصفقة: `{analysis['position_size']}%` من المحفظة"
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-# -------------------- حلقة المسح غير المتزامنة --------------------
-async def process_single_symbol(session, symbol, semaphore, send_session):
-    async with semaphore:
-        # التحقق من التبريد من قاعدة البيانات
-        cooldown_time = await get_cooldown(symbol)
-        if cooldown_time:
-            last_time = datetime.fromisoformat(cooldown_time)
-            if (datetime.now() - last_time) < timedelta(minutes=COOLDOWN_MINUTES):
+    async def _process_symbol(self, symbol: str, sem: asyncio.Semaphore):
+        async with sem:
+            cooldown = await self.repo.get_cooldown(symbol)
+            if cooldown:
+                last_time = datetime.fromisoformat(cooldown)
+                if (datetime.now() - last_time) < timedelta(minutes=config.COOLDOWN_MINUTES):
+                    return None
+            data_5m = await self.provider.fetch_klines(symbol, '5m', 100)
+            data_1h = await self.provider.fetch_klines(symbol, '1h', 100)
+            data_4h = await self.provider.fetch_klines(symbol, '4h', 60)
+            stats = await self.provider.fetch_stats(symbol)
+            if not all([data_5m, data_1h, data_4h, stats]) or stats.volume < config.MIN_VOLUME_USD:
                 return None
-        
-        analysis = await advanced_analysis(session, symbol)
-        if not analysis:
-            return None
-        
-        volume_str = f"${analysis['volume_24h']:,.0f}"
-        if analysis['volume_24h'] >= 1_000_000_000:
-            volume_str = f"${analysis['volume_24h']/1_000_000_000:.1f}B"
-        elif analysis['volume_24h'] >= 1_000_000:
-            volume_str = f"${analysis['volume_24h']/1_000_000:.1f}M"
-        
-        msg = (
-            f"📊 *{analysis['symbol']}* | النقاط: {analysis['score']}/10\n"
-            f"🔔 {analysis['signal']}\n\n"
-            f"💰 السعر: `{analysis['price']}`\n"
-            f"📉 RSI(6): `{analysis['rsi']}` | MACD: `{analysis['macd']['histogram']}`\n"
-            f"📊 بولينجر: الأعلى `{analysis['bb']['upper']}` | الأدنى `{analysis['bb']['lower']}`\n"
-            f"📈 التغير (ساعة): `{analysis['change_1h']}%`\n"
-            f"📊 الحجم النسبي: `{analysis['volume_ratio']}x`\n"
-            f"💧 السيولة 24h: `{volume_str}`\n"
-            f"📝 الأسباب: {', '.join(analysis['reasons'])}\n\n"
-            f"🛡️ **إدارة المخاطر:**\n"
-            f"• وقف الخسارة: `{analysis['stop_loss']}`\n"
-            f"• جني الأرباح: `{analysis['take_profit']}`\n"
-            f"• حجم الصفقة: `{analysis['position_size']}%` من المحفظة"
+            engine = StrategyEngine(symbol, data_5m, data_1h, data_4h, stats)
+            signal = engine.generate_signal()
+            if not signal['is_actionable']:
+                return None
+            # Validate risk
+            if signal['stop_loss'] == 0.0 or signal['take_profit'] == 0.0:
+                return None
+            # Save and send
+            await self.repo.save_signal(
+                signal['symbol'], signal['action'],
+                signal['entry_price'], signal['stop_loss'], signal['take_profit']
+            )
+            await self.repo.set_cooldown(symbol, datetime.now().isoformat())
+            logger.info(f"✅ Signal generated for {symbol}: {signal['action']}")
+            return signal
+
+class Tracker:
+    def __init__(self, provider: DataProvider, repo: Repository):
+        self.provider = provider
+        self.repo = repo
+        self.is_running = False
+
+    async def start(self):
+        if self.is_running:
+            return
+        self.is_running = True
+        while self.is_running:
+            try:
+                await self._track()
+            except Exception as e:
+                logger.error(f"Tracker error: {e}")
+            await asyncio.sleep(60)
+
+    async def stop(self):
+        self.is_running = False
+
+    async def _track(self):
+        open_signals = await self.repo.get_open_signals()
+        if not open_signals:
+            return
+        for signal in open_signals:
+            signal_id, symbol, entry_time, entry_price, stop_loss, take_profit, signal_type = signal
+            data = await self.provider.fetch_klines(symbol, '5m', 20)
+            if not data:
+                continue
+            highs = data.closed_highs()[-5:]
+            lows = data.closed_lows()[-5:]
+            hit_sl, hit_tp = False, False
+            if signal_type == 'BUY':
+                hit_sl = any(low <= stop_loss for low in lows)
+                hit_tp = any(high >= take_profit for high in highs)
+            else:
+                hit_sl = any(high >= stop_loss for high in highs)
+                hit_tp = any(low <= take_profit for low in lows)
+            now = datetime.now()
+            duration_hours = (now - entry_time).total_seconds() / 3600
+            status, exit_price, profit_loss, win = 'OPEN', data.get_current_price(), 0.0, False
+            if hit_sl:
+                status, exit_price, profit_loss = 'LOSS', stop_loss, ((stop_loss - entry_price) / entry_price) * 100 if signal_type == 'BUY' else ((entry_price - stop_loss) / entry_price) * 100
+            elif hit_tp:
+                status, exit_price, profit_loss, win = 'WIN', take_profit, ((take_profit - entry_price) / entry_price) * 100 if signal_type == 'BUY' else ((entry_price - take_profit) / entry_price) * 100, True
+            elif duration_hours >= config.MAX_TRADE_DURATION_HOURS:
+                status, exit_price, profit_loss, win = 'TIME_EXIT', data.get_current_price(), ((exit_price - entry_price) / entry_price) * 100 if signal_type == 'BUY' else ((entry_price - exit_price) / entry_price) * 100, profit_loss > 0
+            else:
+                continue
+            duration_minutes = int(duration_hours * 60)
+            await self.repo.close_signal(signal_id, status, exit_price, profit_loss, duration_minutes, win)
+            logger.info(f"✅ Signal {signal_id} ({symbol}) closed: {status} ({profit_loss:.2f}%)")
+
+class PerformanceService:
+    def __init__(self, repo: Repository):
+        self.repo = repo
+
+    async def update_metrics(self) -> Dict:
+        async def get_sum(condition: str):
+            rows = await self.repo.db.fetch(f"SELECT SUM(profit_loss) FROM signals_history WHERE {condition}")
+            return rows[0][0] or 0.0
+        gross_profit = await get_sum("status = 'WIN'")
+        gross_loss = abs(await get_sum("status = 'LOSS'"))
+        stats = await self.repo.db.fetch("SELECT COUNT(*), SUM(win::int), AVG(profit_loss) FROM signals_history WHERE status IN ('WIN', 'LOSS')")
+        total, wins, avg_profit = stats[0]
+        wins = wins or 0
+        losses = total - wins
+        win_rate = wins / total if total > 0 else 0.0
+        avg_win, avg_loss = 0.0, 0.0
+        if wins > 0:
+            avg_win_row = await self.repo.db.fetch("SELECT AVG(profit_loss) FROM signals_history WHERE status = 'WIN'")
+            avg_win = avg_win_row[0][0] or 0.0
+        if losses > 0:
+            avg_loss_row = await self.repo.db.fetch("SELECT AVG(profit_loss) FROM signals_history WHERE status = 'LOSS'")
+            avg_loss = avg_loss_row[0][0] or 0.0
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+        expectancy = (win_rate * avg_win) - ((1 - win_rate) * abs(avg_loss)) if total > 0 else 0.0
+        max_drawdown = 0.0
+        metrics = {
+            'total_trades': total,
+            'wins': wins,
+            'losses': losses,
+            'win_rate': win_rate,
+            'profit_factor': profit_factor,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
+            'expectancy': expectancy,
+            'max_drawdown': max_drawdown
+        }
+        await self.repo.update_performance(metrics)
+        return metrics
+
+# ===================================================================
+# 11. بوت تليجرام (Telegram Bot)
+# ===================================================================
+
+class CommandHandlers:
+    def __init__(self, repo: Repository):
+        self.repo = repo
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = str(update.effective_user.id)
+        subscribers = await self.repo.get_subscribers()
+        pending = await self.repo.get_pending()
+        if user_id in subscribers:
+            await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
+            return
+        if user_id in pending:
+            await update.message.reply_text("⏳ طلبك قيد الانتظار.")
+            return
+        await self.repo.add_pending(user_id)
+        await update.message.reply_text("✅ تم استلام طلب الاشتراك.")
+        if config.ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=config.ADMIN_CHAT_ID,
+                text=f"📩 طلب اشتراك جديد: <code>{user_id}</code>\n/approve {user_id}",
+                parse_mode="HTML"
+            )
+
+    async def approve(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if str(update.effective_user.id) != config.ADMIN_CHAT_ID:
+            await update.message.reply_text("⛔ فقط للمالك.")
+            return
+        if not context.args:
+            await update.message.reply_text("⚠️ استخدم: /approve USER_ID")
+            return
+        user_id = context.args[0].strip()
+        pending = await self.repo.get_pending()
+        if user_id in pending:
+            await self.repo.remove_pending(user_id)
+            await self.repo.add_subscriber(user_id)
+            await update.message.reply_text(f"✅ تمت الموافقة على <code>{user_id}</code>.", parse_mode="HTML")
+            try:
+                await context.bot.send_message(chat_id=user_id, text="🎉 تمت الموافقة على اشتراكك!")
+            except:
+                pass
+        else:
+            await update.message.reply_text("❌ غير موجود في قائمة الانتظار.")
+
+    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        subscribers = await self.repo.get_subscribers()
+        pending = await self.repo.get_pending()
+        await update.message.reply_text(
+            f"📊 <b>حالة البوت</b>\n"
+            f"👥 المشتركين: {len(subscribers)}\n"
+            f"⏳ في الانتظار: {len(pending)}\n"
+            f"⏱️ فترة التبريد: {config.COOLDOWN_MINUTES} دقيقة\n"
+            f"🔄 قاعدة البيانات: PostgreSQL",
+            parse_mode="HTML"
         )
-        
-        await send_to_all_subscribers_async(send_session, msg)
-        await set_cooldown(symbol, datetime.now().isoformat())
-        logger.info(f"✅ إشارة {symbol} أُرسلت")
-        return analysis
 
-async def market_scanner_loop():
-    logger.info("🚀 بدء الماسح الاحترافي v10.0 (نظام تصنيف محسّن)...")
-    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
-    
-    async with aiohttp.ClientSession() as session:
-        async with aiohttp.ClientSession() as send_session:
-            while True:
-                global dynamic_watch_list
-                try:
-                    trending = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-                    valid_trending = []
-                    for sym in trending[:5]:
-                        test_data = await fetch_klines(session, sym, '5m', 5)
-                        if test_data:
-                            valid_trending.append(sym)
-                    if valid_trending:
-                        dynamic_watch_list = valid_trending
-                        logger.info(f"🔥 {len(dynamic_watch_list)} عملة ساخنة مدعومة")
-                except Exception as e:
-                    logger.error(f"خطأ في جلب العملات الساخنة: {e}")
-                
-                all_symbols = list(set(BASE_WATCH_LIST + dynamic_watch_list))
-                logger.info(f"🔄 فحص {len(all_symbols)} عملة ...")
-                
-                tasks = [
-                    process_single_symbol(session, symbol, semaphore, send_session)
-                    for symbol in all_symbols
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"خطأ في المعالجة: {result}")
-                
-                logger.info("✅ انتهت الدورة. انتظار 5 دقائق...")
-                await asyncio.sleep(300)
+    async def performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        perf = PerformanceService(self.repo)
+        metrics = await perf.update_metrics()
+        await update.message.reply_text(
+            f"📈 <b>أداء البوت</b>\n\n"
+            f"📊 إجمالي الصفقات: {metrics['total_trades']}\n"
+            f"✅ الصفقات الرابحة: {metrics['wins']}\n"
+            f"❌ الصفقات الخاسرة: {metrics['losses']}\n"
+            f"📈 نسبة الربح: {metrics['win_rate']*100:.1f}%\n"
+            f"💰 متوسط الربح: {metrics['avg_win']:.2f}%\n"
+            f"📉 متوسط الخسارة: {metrics['avg_loss']:.2f}%\n"
+            f"📊 معامل الربح: {metrics['profit_factor']:.2f}\n"
+            f"📈 العائد المتوقع: {metrics['expectancy']:.2f}%\n"
+            f"📉 الحد الأقصى للتراجع: {metrics['max_drawdown']:.2f}%",
+            parse_mode="HTML"
+        )
 
-# -------------------- Self-Pinger (لمنع سكون Render) --------------------
-async def self_pinger():
-    if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME != "localhost":
-        url = f"https://{RENDER_EXTERNAL_HOSTNAME}"
-    else:
-        url = f"http://localhost:{PORT}"
-    
-    logger.info(f"🔄 Self-Pinger started, pinging {url} every 10 minutes")
-    
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5) as resp:
-                    if resp.status == 200:
-                        logger.info("✅ Self-ping successful")
-                    else:
-                        logger.warning(f"⚠️ Self-ping returned status {resp.status}")
-        except Exception as e:
-            logger.error(f"❌ Self-ping error: {e}")
-        await asyncio.sleep(600)
+class SignalBot:
+    def __init__(self, repo: Repository):
+        self.repo = repo
+        self.handlers = CommandHandlers(repo)
+        self.application = None
 
-# -------------------- تشغيل البوت --------------------
+    def build(self):
+        self.application = Application.builder().token(config.TELEGRAM_TOKEN).build()
+        self.application.add_handler(CommandHandler("start", self.handlers.start))
+        self.application.add_handler(CommandHandler("approve", self.handlers.approve))
+        self.application.add_handler(CommandHandler("status", self.handlers.status))
+        self.application.add_handler(CommandHandler("performance", self.handlers.performance))
+        logger.info("✅ Telegram bot built")
+        return self.application
+
+    async def start(self):
+        if not self.application:
+            self.build()
+        await self.application.delete_webhook()
+        logger.info("✅ Webhook deleted, starting polling...")
+        await self.application.run_polling(allowed_updates=["message", "callback_query"])
+
+    async def stop(self):
+        if self.application:
+            await self.application.stop()
+
+# ===================================================================
+# 12. التشغيل الرئيسي (Main)
+# ===================================================================
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+@flask_app.route('/healthcheck')
+def healthcheck():
+    return "✅ Elite Signal Bot v14 - Running"
+
 def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    flask_app.run(host='0.0.0.0', port=config.PORT, debug=False)
 
-@app.route('/')
-@app.route('/healthcheck')
-def home():
-    return "✅ Elite Pro Bot v10.0 - Running (Improved Classification)"
+db = None
+provider = None
+repo = None
+scanner = None
+tracker = None
+bot = None
 
-async def post_init(application):
-    await init_db()
-    await application.bot.delete_webhook()
-    logger.info("✅ Webhook deleted")
-    
-    asyncio.create_task(market_scanner_loop())
-    logger.info("✅ Scanner started as background task")
-    
-    asyncio.create_task(self_pinger())
-    logger.info("✅ Self-Pinger started")
-
-def main():
+async def main():
+    global db, provider, repo, scanner, tracker, bot
+    db = Database()
+    if not await db.connect():
+        logger.error("❌ Failed to connect to database")
+        return
+    repo = Repository(db)
+    provider = DataProvider()
+    scanner = Scanner(provider, repo)
+    tracker = Tracker(provider, repo)
+    bot = SignalBot(repo)
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    logger.info("✅ Flask Server Started")
-    
-    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("approve", approve))
-    application.add_handler(CommandHandler("adduser", add_user_manually))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("signal", signal_now))
-    
-    logger.info("✅ Starting Telegram Bot with Polling...")
-    application.run_polling(allowed_updates=["message", "callback_query"])
+    logger.info("✅ Flask server started")
+    await asyncio.gather(
+        scanner.start(),
+        tracker.start(),
+        bot.start(),
+        return_exceptions=True
+    )
+
+async def shutdown():
+    logger.info("🔄 Shutting down...")
+    if scanner: await scanner.stop()
+    if tracker: await tracker.stop()
+    if bot: await bot.stop()
+    if provider: await provider.close()
+    if db: await db.close()
+    logger.info("✅ Shutdown complete")
+
+def signal_handler(sig, frame):
+    logger.info(f"Received signal {sig}")
+    asyncio.create_task(shutdown())
+    sys.exit(0)
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("🛑 تم إيقاف البوت يدوياً")
+        logger.info("🛑 Interrupted by user")
     except Exception as e:
-        logger.error(f"⚠️ توقف غير متوقع: {e}")
+        logger.error(f"❌ Fatal error: {e}")
+        sys.exit(1)
