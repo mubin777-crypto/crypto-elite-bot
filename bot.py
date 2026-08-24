@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot V30 - دعم Binance.US و Coinbase كبدائل أساسية
+Elite Signal Bot V31 - تحسينات للتسامح مع بيانات CoinCap
 """
 
 import os
@@ -23,7 +23,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===================================================================
-# 1. الإعدادات (Config)
+# 1. الإعدادات (Config) - معدلة
 # ===================================================================
 
 class Config:
@@ -31,7 +31,6 @@ class Config:
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///elite_signal_bot.db")
     
-    # نقاط نهاية متعددة (Binance.com, Binance.us, Coinbase)
     BINANCE_ENDPOINTS = [
         "https://api.binance.com",
         "https://api1.binance.com",
@@ -50,7 +49,7 @@ class Config:
     BINANCE_RETRIES = 3
     PORT = int(os.environ.get("PORT", 10000))
     
-    # Universe
+    # Universe - خفض الحد الأدنى للحجم
     CORE_UNIVERSE = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
         "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -62,9 +61,9 @@ class Config:
     CORE_SIZE = 25
     DYNAMIC_SIZE = 45
     
-    MIN_VOLUME_USD = 300_000  # نفس القيمة التي كانت تعمل في الكود القديم
-    MIN_TRADES_24H = 100
-    MIN_VOLATILITY_DAILY = 0.3
+    MIN_VOLUME_USD = 100_000  # خفضت من 300k
+    MIN_TRADES_24H = 50
+    MIN_VOLATILITY_DAILY = 0.2
     MAX_STABLE_COINS = ["USDC", "FDUSD", "TUSD", "BUSD", "DAI"]
     EXCLUDED_SYMBOLS = ["UP", "DOWN", "BULL", "BEAR", "HALF"]
     
@@ -84,16 +83,16 @@ class Config:
     
     RSI_PERIOD = 6
     ADX_PERIOD = 14
-    MIN_ADX_STRONG = 25
-    MIN_CHANGE_1H = 0.3
+    MIN_ADX_STRONG = 20  # خفضت من 25
+    MIN_CHANGE_1H = 0.2
     
     MAX_REQUESTS_PER_MINUTE = 1200
     REQUEST_BURST = 5
     
-    SCORE_ELITE = 90
-    SCORE_STRONG = 80
-    SCORE_GOOD = 70
-    MIN_SIGNAL_SCORE = 70
+    SCORE_ELITE = 80
+    SCORE_STRONG = 70
+    SCORE_GOOD = 60
+    MIN_SIGNAL_SCORE = 50  # خفضت من 70
     
     SECTORS = {
         "BTC_ECO": ["BTCUSDT", "STXUSDT", "ORDIUSDT"],
@@ -172,7 +171,7 @@ class MarketStats:
     last: float
 
 # ===================================================================
-# 4. المؤشرات الفنية (Indicators) - مختصر
+# 4. المؤشرات الفنية (Indicators)
 # ===================================================================
 
 class Indicators:
@@ -356,7 +355,7 @@ class MarketStructure:
         return 'neutral'
 
 # ===================================================================
-# 6. العملاء لجلب البيانات (Binance, Binance.us, Coinbase, CoinCap)
+# 6. العملاء (Binance, Binance.us, Coinbase, CoinCap) - مع تحسين CoinCap
 # ===================================================================
 
 class BinanceRateLimiter:
@@ -528,7 +527,6 @@ class CoinbaseClient(BaseMarketClient):
         params = {'granularity': granularity, 'limit': limit}
         data = await self._request(url, params)
         if data and isinstance(data, list):
-            # Coinbase returns [[time, low, high, open, close, volume], ...]
             timestamps = [datetime.fromtimestamp(c[0], tz=timezone.utc) for c in data if len(c) >= 6]
             prices = [float(c[4]) for c in data if len(c) >= 6]
             highs = [float(c[2]) for c in data if len(c) >= 6]
@@ -595,11 +593,15 @@ class CoinCapClient(BaseMarketClient):
             items = data['data']
             prices = [float(item['priceUsd']) for item in items]
             timestamps = [datetime.fromtimestamp(item['time'] / 1000, tz=timezone.utc) for item in items]
+            # تحسين تقدير high/low
+            high_prices = [p * 1.02 for p in prices]
+            low_prices = [p * 0.98 for p in prices]
+            volumes = [float(item.get('volumeUsd', 0)) / float(item['priceUsd']) if float(item['priceUsd']) > 0 else 0 for item in items]
             return CandleData(
                 prices=prices,
-                highs=prices,  # تقدير
-                lows=prices,
-                volumes=[float(item.get('volumeUsd', 0)) / float(item['priceUsd']) if float(item['priceUsd']) > 0 else 0 for item in items],
+                highs=high_prices,
+                lows=low_prices,
+                volumes=volumes,
                 opens=prices,
                 timestamps=timestamps
             )
@@ -655,7 +657,7 @@ class CoinCapClient(BaseMarketClient):
         return None
 
 # ===================================================================
-# 7. قاعدة البيانات (Database)
+# 7. قاعدة البيانات (Database) - نفس الكود السابق (مختصر)
 # ===================================================================
 
 class Database:
@@ -668,7 +670,6 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA synchronous=NORMAL")
-            
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS subscribers (user_id TEXT PRIMARY KEY)
             """)
@@ -773,7 +774,7 @@ class Database:
             return await cursor.fetchone()
 
 # ===================================================================
-# 8. مستودع البيانات (Repository)
+# 8. مستودع البيانات (Repository) - نفس الكود السابق (مختصر)
 # ===================================================================
 
 class SignalRecord(NamedTuple):
@@ -825,7 +826,6 @@ class Repository:
             conn = await self.db.get_connection()
             async with conn.cursor() as cursor:
                 await cursor.execute("BEGIN IMMEDIATE")
-                
                 cursor2 = await conn.execute("SELECT last_signal_time FROM signal_cooldown WHERE symbol = ?", (symbol,))
                 cooldown_row = await cursor2.fetchone()
                 if cooldown_row:
@@ -834,14 +834,12 @@ class Repository:
                         await cursor.execute("ROLLBACK")
                         logger.info(f"⏳ {symbol}: cooldown نشط أثناء المعاملة")
                         return None
-                
                 cursor2 = await conn.execute("SELECT COUNT(*) FROM signals_history WHERE status = 'OPEN'")
                 open_count = (await cursor2.fetchone())[0]
                 if open_count >= config.MAX_OPEN_TRADES:
                     await cursor.execute("ROLLBACK")
                     logger.warning(f"⛔ {symbol}: تجاوز الحد الأقصى للصفقات المفتوحة أثناء المعاملة")
                     return None
-                
                 now_utc = datetime.now(timezone.utc).isoformat()
                 await cursor.execute(
                     """INSERT INTO signals_history 
@@ -852,13 +850,11 @@ class Repository:
                     now_utc, sector, quality_score, position_fraction, capital
                 )
                 signal_id = cursor.lastrowid
-                
                 if cooldown_time:
                     await cursor.execute(
                         "INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)",
                         symbol, cooldown_time
                     )
-                
                 await cursor.execute("COMMIT")
                 logger.info(f"✅ {symbol}: تم حفظ الإشارة (ID: {signal_id})")
                 return signal_id
@@ -1011,7 +1007,7 @@ class Repository:
         return returns
 
 # ===================================================================
-# 9. المحركات المتقدمة (Advanced Engines)
+# 9. المحركات المتقدمة (Advanced Engines) - مختصر (نفس السابق)
 # ===================================================================
 
 class UniverseEngine:
@@ -1229,7 +1225,7 @@ class PortfolioRiskEngine:
         return True, ""
 
 # ===================================================================
-# 10. محرك الاستراتيجية (StrategyEngine)
+# 10. محرك الاستراتيجية (StrategyEngine) - مع سجلات debug
 # ===================================================================
 
 class StrategyEngine:
@@ -1341,10 +1337,13 @@ class StrategyEngine:
         atr_pct = (self.atr / self.current_price) * 100 if self.current_price > 0 else 0
         dynamic_min_change = max(config.MIN_CHANGE_1H, atr_pct * 0.5)
         
+        # Debug logging
+        logger.debug(f"🔍 {self.symbol}: change_1h={self.change_1h:.2f}, dynamic_min={dynamic_min_change:.2f}")
+        
         if abs(self.change_1h) < dynamic_min_change:
             return self._signal_result("WATCH", [f"التغير خلال ساعة {self.change_1h:.2f}% أقل من الحد الأدنى {dynamic_min_change:.2f}%"])
         if self.adx < config.MIN_ADX_STRONG:
-            return self._signal_result("NO_TRADE", ["السوق ليس اتجاهياً (ADX ضعيف)"])
+            return self._signal_result("NO_TRADE", [f"ADX {self.adx:.1f} < {config.MIN_ADX_STRONG}"])
         if self.directional_bias == 'neutral':
             return self._signal_result("NO_TRADE", ["الاتجاه غير واضح"])
         if self.market_regime == "RANGE" and self.trend != 'neutral':
@@ -1353,7 +1352,7 @@ class StrategyEngine:
         if self.trend == 'neutral':
             return self._signal_result("WATCH", ["هيكل السوق محايد"])
         if self.rsi > 80 or self.rsi < 20:
-            return self._signal_result("WATCH", ["RSI متطرف"])
+            return self._signal_result("WATCH", [f"RSI {self.rsi:.1f} متطرف"])
         if self.directional_bias == 'bullish':
             if not (40 <= self.rsi <= 70 and self.macd['histogram'] > 0):
                 return self._signal_result("WATCH", ["ظروف الشراء غير مكتملة"])
@@ -1367,7 +1366,7 @@ class StrategyEngine:
                 return self._signal_result("WATCH", ["الهيكل لا يدعم البيع"])
             self.action = "SELL"
         if self.volume_ratio < 1.5:
-            return self._signal_result("WATCH", ["حجم ضعيف"])
+            return self._signal_result("WATCH", [f"حجم {self.volume_ratio:.1f} ضعيف"])
         stop_loss, take_profit = self._calculate_risk(self.action, volatility_multiplier)
         if stop_loss == 0.0 or take_profit == 0.0:
             return self._signal_result("NO_TRADE", ["إدارة المخاطر غير صالحة"])
@@ -1380,7 +1379,7 @@ class StrategyEngine:
         self.take_profit = take_profit
         self.quality_score = self._calculate_quality_score(stop_loss, take_profit)
         if self.quality_score < config.MIN_SIGNAL_SCORE:
-            return self._signal_result("WATCH", [f"درجة الجودة {self.quality_score} أقل من الحد الأدنى {config.MIN_SIGNAL_SCORE}"])
+            return self._signal_result("WATCH", [f"درجة الجودة {self.quality_score} < {config.MIN_SIGNAL_SCORE}"])
         reasons = [
             f"اتجاه 4H: {self.directional_bias}",
             f"اتجاه 1H: {self.trend_1h}",
@@ -1440,7 +1439,7 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 11. مقدم البيانات (DataProvider) - مع دعم جميع المصادر
+# 11. مقدم البيانات (DataProvider)
 # ===================================================================
 
 class DataProvider:
@@ -1483,7 +1482,6 @@ class DataProvider:
 
     async def fetch_klines(self, symbol: str, interval: str = '5m', limit: int = 100) -> Optional[CandleData]:
         await self._ensure_clients()
-        # محاولة المصادر بالترتيب
         sources = [
             ('Binance.com', self._binance_client),
             ('Binance.us', self._binance_us_client),
@@ -1494,10 +1492,9 @@ class DataProvider:
             try:
                 data = await client.get_klines(symbol, interval, limit)
                 if data and len(data.prices) > 10:
-                    logger.debug(f"✅ {name} provided klines for {symbol}")
                     return data
             except Exception as e:
-                logger.debug(f"{name} failed: {e}")
+                logger.debug(f"{name} failed for {symbol}: {e}")
         logger.warning(f"⚠️ All data sources failed for {symbol}")
         return None
 
@@ -1515,7 +1512,7 @@ class DataProvider:
                 if stats and stats.volume > 1000:
                     return stats
             except Exception as e:
-                logger.debug(f"{name} stats failed: {e}")
+                logger.debug(f"{name} stats failed for {symbol}: {e}")
         return None
 
     async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
@@ -1527,7 +1524,7 @@ class DataProvider:
         sources = [
             ('Binance.com', self._binance_client),
             ('Binance.us', self._binance_us_client),
-            ('CoinCap', self._coincap_client)  # CoinCap is good for bulk
+            ('CoinCap', self._coincap_client)
         ]
         for name, client in sources:
             try:
@@ -1549,7 +1546,6 @@ class DataProvider:
             return []
         
         logger.info(f"🔍 بدء تصفية العملات من {len(all_stats)} عملة")
-        
         universe_engine = UniverseEngine(all_stats)
         universe = universe_engine.build()
         logger.info(f"🌌 الكون الأساسي: {len(universe)} عملة")
@@ -1588,7 +1584,7 @@ class DataProvider:
         return result
 
 # ===================================================================
-# 12. الماسح الضوئي (Scanner)
+# 12. الماسح الضوئي (Scanner) - مع سجلات debug
 # ===================================================================
 
 class Scanner:
@@ -1657,9 +1653,14 @@ class Scanner:
 
             engine = StrategyEngine(symbol, data_5m, data_1h, data_4h, stats)
             signal = engine.generate_signal(self.risk_engine)
+            
+            # تسجيل سبب الرفض إذا لم تكن الإشارة قابلة للتنفيذ
             if not signal['is_actionable']:
+                if signal['reasons']:
+                    logger.info(f"⏭️ {symbol}: رفض - {', '.join(signal['reasons'][:3])}")
                 return None
             if signal['stop_loss'] == 0.0 or signal['take_profit'] == 0.0:
+                logger.info(f"⏭️ {symbol}: رفض - Stop loss أو Take profit غير صالح")
                 return None
 
             sector = CorrelationFilter.get_sector(symbol)
@@ -2157,7 +2158,7 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot V30 - Fully Operational"
+        return "✅ Elite Signal Bot V31 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
