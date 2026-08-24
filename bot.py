@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elite Signal Bot V28 - إصلاح Binance 451 و Telegram Conflict
+Elite Signal Bot V30 - دعم Binance.US و Coinbase كبدائل أساسية
 """
 
 import os
@@ -30,13 +30,22 @@ class Config:
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8947724831:AAEyG4SynRJflgZe10XUpbzkhssn84ar1Qg")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///elite_signal_bot.db")
-    # نقاط نهاية Binance متعددة لتجنب الحظر الجغرافي
+    
+    # نقاط نهاية متعددة (Binance.com, Binance.us, Coinbase)
     BINANCE_ENDPOINTS = [
         "https://api.binance.com",
         "https://api1.binance.com",
         "https://api2.binance.com",
         "https://api3.binance.com"
     ]
+    BINANCE_US_ENDPOINTS = [
+        "https://api.binance.us",
+        "https://api1.binance.us",
+        "https://api2.binance.us"
+    ]
+    COINBASE_API_URL = "https://api.exchange.coinbase.com"
+    COINCAP_API_URL = "https://api.coincap.io/v2"
+    
     BINANCE_TIMEOUT = 30
     BINANCE_RETRIES = 3
     PORT = int(os.environ.get("PORT", 10000))
@@ -53,7 +62,7 @@ class Config:
     CORE_SIZE = 25
     DYNAMIC_SIZE = 45
     
-    MIN_VOLUME_USD = 50_000
+    MIN_VOLUME_USD = 300_000  # نفس القيمة التي كانت تعمل في الكود القديم
     MIN_TRADES_24H = 100
     MIN_VOLATILITY_DAILY = 0.3
     MAX_STABLE_COINS = ["USDC", "FDUSD", "TUSD", "BUSD", "DAI"]
@@ -163,7 +172,7 @@ class MarketStats:
     last: float
 
 # ===================================================================
-# 4. المؤشرات الفنية (Indicators)
+# 4. المؤشرات الفنية (Indicators) - مختصر
 # ===================================================================
 
 class Indicators:
@@ -347,7 +356,7 @@ class MarketStructure:
         return 'neutral'
 
 # ===================================================================
-# 6. جلب البيانات (BinanceClient) - مع نقاط نهاية متعددة
+# 6. العملاء لجلب البيانات (Binance, Binance.us, Coinbase, CoinCap)
 # ===================================================================
 
 class BinanceRateLimiter:
@@ -365,109 +374,285 @@ class BinanceRateLimiter:
                     await asyncio.sleep(wait_time)
             self.timestamps.append(now)
 
-class BinanceClient:
+class BaseMarketClient:
     def __init__(self, session: aiohttp.ClientSession, rate_limiter: BinanceRateLimiter):
         self.session = session
         self.rate_limiter = rate_limiter
-        self.endpoints = config.BINANCE_ENDPOINTS
-        self.current_endpoint_index = 0
         self.timeout = config.BINANCE_TIMEOUT
         self.retries = config.BINANCE_RETRIES
 
-    async def _request(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
+    async def _request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict]:
         await self.rate_limiter.acquire()
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
-        for endpoint_idx in range(len(self.endpoints)):
-            base_url = self.endpoints[(self.current_endpoint_index + endpoint_idx) % len(self.endpoints)]
-            url = f"{base_url}{endpoint}"
-            
-            for attempt in range(self.retries):
-                try:
-                    async with self.session.get(url, params=params, timeout=self.timeout, headers=headers) as resp:
-                        if resp.status == 200:
-                            # نجاح، نثبت هذا النقطة كأساسية
-                            self.current_endpoint_index = (self.current_endpoint_index + endpoint_idx) % len(self.endpoints)
-                            return await resp.json()
-                        elif resp.status == 451:
-                            logger.warning(f"⚠️ Binance API status 451 for {url} (may be geo-blocked), trying next endpoint...")
-                            break  # ننتقل للنقطة التالية
-                        elif resp.status == 429:
-                            retry_after = int(resp.headers.get('Retry-After', 10))
-                            logger.warning(f"⏳ Rate limit, waiting {retry_after}s (attempt {attempt+1}/{self.retries})")
-                            await asyncio.sleep(retry_after)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        for attempt in range(self.retries):
+            try:
+                async with self.session.get(url, params=params, timeout=self.timeout, headers=headers) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    elif resp.status == 429:
+                        retry_after = int(resp.headers.get('Retry-After', 10))
+                        logger.warning(f"⏳ Rate limit, waiting {retry_after}s (attempt {attempt+1})")
+                        await asyncio.sleep(retry_after)
+                    else:
+                        if attempt < self.retries - 1:
+                            await asyncio.sleep(2 ** attempt)
                         else:
-                            logger.warning(f"⚠️ Binance API status {resp.status} for {url}, attempt {attempt+1}")
-                            if attempt < self.retries - 1:
-                                await asyncio.sleep(2 ** attempt)
-                            else:
-                                break
-                except asyncio.TimeoutError:
-                    logger.error(f"⏱️ Timeout on attempt {attempt+1} for {url}")
-                    if attempt < self.retries - 1:
-                        await asyncio.sleep(2 ** attempt)
-                    else:
-                        break
-                except aiohttp.ClientError as e:
-                    logger.error(f"🌐 Client error on attempt {attempt+1}: {e}")
-                    if attempt < self.retries - 1:
-                        await asyncio.sleep(2 ** attempt)
-                    else:
-                        break
-                except Exception as e:
-                    logger.error(f"❌ Unexpected error on attempt {attempt+1}: {e}")
-                    if attempt < self.retries - 1:
-                        await asyncio.sleep(2 ** attempt)
-                    else:
-                        break
-            else:
-                # إذا نجحت المحاولات، نخرج من الحلقة الخارجية
-                continue
-            # إذا وصلنا هنا، فشلت جميع المحاولات لهذه النقطة، ننتقل للتالية
-            logger.warning(f"⚠️ All attempts failed for {base_url}, trying next endpoint...")
-        
-        logger.error(f"❌ All endpoints failed for {endpoint}")
+                            break
+            except Exception as e:
+                logger.error(f"Request error: {e}")
+                if attempt < self.retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    return None
         return None
 
+class BinanceClient(BaseMarketClient):
+    def __init__(self, session: aiohttp.ClientSession, rate_limiter: BinanceRateLimiter):
+        super().__init__(session, rate_limiter)
+        self.endpoints = config.BINANCE_ENDPOINTS
+        self.current_index = 0
+
     async def get_klines(self, symbol: str, interval: str = '5m', limit: int = 100) -> Optional[CandleData]:
-        params = {'symbol': symbol, 'interval': interval, 'limit': limit}
-        data = await self._request('/api/v3/klines', params)
-        if not data:
-            return None
-        timestamps = [datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc) for c in data]
-        return CandleData(
-            prices=[float(c[4]) for c in data],
-            highs=[float(c[2]) for c in data],
-            lows=[float(c[3]) for c in data],
-            volumes=[float(c[5]) for c in data],
-            opens=[float(c[1]) for c in data],
-            timestamps=timestamps
-        )
+        for idx in range(len(self.endpoints)):
+            base = self.endpoints[(self.current_index + idx) % len(self.endpoints)]
+            url = f"{base}/api/v3/klines"
+            params = {'symbol': symbol, 'interval': interval, 'limit': limit}
+            data = await self._request(url, params)
+            if data:
+                self.current_index = (self.current_index + idx) % len(self.endpoints)
+                timestamps = [datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc) for c in data]
+                return CandleData(
+                    prices=[float(c[4]) for c in data],
+                    highs=[float(c[2]) for c in data],
+                    lows=[float(c[3]) for c in data],
+                    volumes=[float(c[5]) for c in data],
+                    opens=[float(c[1]) for c in data],
+                    timestamps=timestamps
+                )
+        return None
 
     async def get_24hr_stats(self, symbol: str) -> Optional[MarketStats]:
-        data = await self._request('/api/v3/ticker/24hr', {'symbol': symbol})
-        if not data:
-            return None
-        return MarketStats(
-            volume=float(data.get('quoteVolume', 0)),
-            change_24h=float(data.get('priceChangePercent', 0)),
-            high=float(data.get('highPrice', 0)),
-            low=float(data.get('lowPrice', 0)),
-            open=float(data.get('openPrice', 0)),
-            last=float(data.get('lastPrice', 0))
-        )
+        for idx in range(len(self.endpoints)):
+            base = self.endpoints[(self.current_index + idx) % len(self.endpoints)]
+            url = f"{base}/api/v3/ticker/24hr"
+            params = {'symbol': symbol}
+            data = await self._request(url, params)
+            if data:
+                self.current_index = (self.current_index + idx) % len(self.endpoints)
+                return MarketStats(
+                    volume=float(data.get('quoteVolume', 0)),
+                    change_24h=float(data.get('priceChangePercent', 0)),
+                    high=float(data.get('highPrice', 0)),
+                    low=float(data.get('lowPrice', 0)),
+                    open=float(data.get('openPrice', 0)),
+                    last=float(data.get('lastPrice', 0))
+                )
+        return None
 
     async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
-        data = await self._request('/api/v3/ticker/24hr')
-        if data is None:
-            logger.error("❌ Binance /ticker/24hr returned None after retries")
-            return None
-        if not isinstance(data, list):
-            logger.error(f"❌ Binance /ticker/24hr returned unexpected type: {type(data)}")
-            return None
-        return data
+        for idx in range(len(self.endpoints)):
+            base = self.endpoints[(self.current_index + idx) % len(self.endpoints)]
+            url = f"{base}/api/v3/ticker/24hr"
+            data = await self._request(url)
+            if data and isinstance(data, list):
+                self.current_index = (self.current_index + idx) % len(self.endpoints)
+                return data
+        return None
+
+class BinanceUsClient(BaseMarketClient):
+    def __init__(self, session: aiohttp.ClientSession, rate_limiter: BinanceRateLimiter):
+        super().__init__(session, rate_limiter)
+        self.endpoints = config.BINANCE_US_ENDPOINTS
+        self.current_index = 0
+
+    async def get_klines(self, symbol: str, interval: str = '5m', limit: int = 100) -> Optional[CandleData]:
+        for idx in range(len(self.endpoints)):
+            base = self.endpoints[(self.current_index + idx) % len(self.endpoints)]
+            url = f"{base}/api/v3/klines"
+            params = {'symbol': symbol, 'interval': interval, 'limit': limit}
+            data = await self._request(url, params)
+            if data:
+                self.current_index = (self.current_index + idx) % len(self.endpoints)
+                timestamps = [datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc) for c in data]
+                return CandleData(
+                    prices=[float(c[4]) for c in data],
+                    highs=[float(c[2]) for c in data],
+                    lows=[float(c[3]) for c in data],
+                    volumes=[float(c[5]) for c in data],
+                    opens=[float(c[1]) for c in data],
+                    timestamps=timestamps
+                )
+        return None
+
+    async def get_24hr_stats(self, symbol: str) -> Optional[MarketStats]:
+        for idx in range(len(self.endpoints)):
+            base = self.endpoints[(self.current_index + idx) % len(self.endpoints)]
+            url = f"{base}/api/v3/ticker/24hr"
+            params = {'symbol': symbol}
+            data = await self._request(url, params)
+            if data:
+                self.current_index = (self.current_index + idx) % len(self.endpoints)
+                return MarketStats(
+                    volume=float(data.get('quoteVolume', 0)),
+                    change_24h=float(data.get('priceChangePercent', 0)),
+                    high=float(data.get('highPrice', 0)),
+                    low=float(data.get('lowPrice', 0)),
+                    open=float(data.get('openPrice', 0)),
+                    last=float(data.get('lastPrice', 0))
+                )
+        return None
+
+    async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
+        for idx in range(len(self.endpoints)):
+            base = self.endpoints[(self.current_index + idx) % len(self.endpoints)]
+            url = f"{base}/api/v3/ticker/24hr"
+            data = await self._request(url)
+            if data and isinstance(data, list):
+                self.current_index = (self.current_index + idx) % len(self.endpoints)
+                return data
+        return None
+
+class CoinbaseClient(BaseMarketClient):
+    def __init__(self, session: aiohttp.ClientSession, rate_limiter: BinanceRateLimiter):
+        super().__init__(session, rate_limiter)
+        self.base_url = config.COINBASE_API_URL
+
+    def _symbol_to_product(self, symbol: str) -> str:
+        return symbol.replace('USDT', '-USD')
+
+    async def get_klines(self, symbol: str, interval: str = '5m', limit: int = 100) -> Optional[CandleData]:
+        product = self._symbol_to_product(symbol)
+        granularity_map = {'1m': 60, '5m': 300, '1h': 3600, '4h': 14400}
+        granularity = granularity_map.get(interval, 300)
+        url = f"{self.base_url}/products/{product}/candles"
+        params = {'granularity': granularity, 'limit': limit}
+        data = await self._request(url, params)
+        if data and isinstance(data, list):
+            # Coinbase returns [[time, low, high, open, close, volume], ...]
+            timestamps = [datetime.fromtimestamp(c[0], tz=timezone.utc) for c in data if len(c) >= 6]
+            prices = [float(c[4]) for c in data if len(c) >= 6]
+            highs = [float(c[2]) for c in data if len(c) >= 6]
+            lows = [float(c[1]) for c in data if len(c) >= 6]
+            opens = [float(c[3]) for c in data if len(c) >= 6]
+            volumes = [float(c[5]) for c in data if len(c) >= 6]
+            return CandleData(
+                prices=prices,
+                highs=highs,
+                lows=lows,
+                volumes=volumes,
+                opens=opens,
+                timestamps=timestamps
+            )
+        return None
+
+    async def get_24hr_stats(self, symbol: str) -> Optional[MarketStats]:
+        product = self._symbol_to_product(symbol)
+        url = f"{self.base_url}/products/{product}/stats"
+        data = await self._request(url)
+        if data:
+            last = float(data.get('last', 0))
+            open_price = float(data.get('open', 0))
+            change_24h = ((last - open_price) / open_price * 100) if open_price != 0 else 0
+            volume = float(data.get('volume', 0)) * last
+            return MarketStats(
+                volume=volume,
+                change_24h=change_24h,
+                high=float(data.get('high', 0)),
+                low=float(data.get('low', 0)),
+                open=open_price,
+                last=last
+            )
+        return None
+
+class CoinCapClient(BaseMarketClient):
+    def __init__(self, session: aiohttp.ClientSession, rate_limiter: BinanceRateLimiter):
+        super().__init__(session, rate_limiter)
+        self.base_url = config.COINCAP_API_URL
+
+    @staticmethod
+    def binance_to_coincap(symbol: str) -> str:
+        mapping = {
+            "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
+            "BNBUSDT": "binancecoin", "XRPUSDT": "ripple", "DOGEUSDT": "dogecoin",
+            "ADAUSDT": "cardano", "AVAXUSDT": "avalanche-2", "LINKUSDT": "chainlink",
+            "DOTUSDT": "polkadot", "SUIUSDT": "sui", "TONUSDT": "the-open-network",
+            "LTCUSDT": "litecoin", "BCHUSDT": "bitcoin-cash", "NEARUSDT": "near",
+            "APTUSDT": "aptos", "ARBUSDT": "arbitrum", "OPUSDT": "optimism",
+            "ATOMUSDT": "cosmos", "FILUSDT": "filecoin", "INJUSDT": "injective-protocol",
+            "TIAUSDT": "celestia", "SEIUSDT": "sei-network", "WLDUSDT": "worldcoin-wld",
+            "HBARUSDT": "hedera-hashgraph"
+        }
+        return mapping.get(symbol, symbol.lower().replace("usdt", ""))
+
+    async def get_klines(self, symbol: str, interval: str = '5m', limit: int = 100) -> Optional[CandleData]:
+        asset_id = self.binance_to_coincap(symbol)
+        interval_map = {'1m': 'm1', '5m': 'm5', '1h': 'h1', '4h': 'h4'}
+        cc_interval = interval_map.get(interval, 'm5')
+        url = f"{self.base_url}/assets/{asset_id}/history"
+        params = {'interval': cc_interval, 'limit': limit}
+        data = await self._request(url, params)
+        if data and 'data' in data:
+            items = data['data']
+            prices = [float(item['priceUsd']) for item in items]
+            timestamps = [datetime.fromtimestamp(item['time'] / 1000, tz=timezone.utc) for item in items]
+            return CandleData(
+                prices=prices,
+                highs=prices,  # تقدير
+                lows=prices,
+                volumes=[float(item.get('volumeUsd', 0)) / float(item['priceUsd']) if float(item['priceUsd']) > 0 else 0 for item in items],
+                opens=prices,
+                timestamps=timestamps
+            )
+        return None
+
+    async def get_24hr_stats(self, symbol: str) -> Optional[MarketStats]:
+        asset_id = self.binance_to_coincap(symbol)
+        url = f"{self.base_url}/assets/{asset_id}"
+        data = await self._request(url)
+        if data and 'data' in data:
+            item = data['data']
+            price = float(item.get('priceUsd', 0))
+            change = float(item.get('changePercent24Hr', 0))
+            volume = float(item.get('volumeUsd', 0))
+            return MarketStats(
+                volume=volume,
+                change_24h=change,
+                high=price * 1.02,
+                low=price * 0.98,
+                open=price / (1 + change/100) if change != 0 else price,
+                last=price
+            )
+        return None
+
+    async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
+        url = f"{self.base_url}/assets"
+        params = {'limit': 2000}
+        data = await self._request(url, params)
+        if data and 'data' in data:
+            converted = []
+            for item in data['data']:
+                symbol = item.get('symbol', '').upper() + 'USDT'
+                if any(stable in symbol for stable in config.MAX_STABLE_COINS):
+                    continue
+                if any(ex in symbol for ex in config.EXCLUDED_SYMBOLS):
+                    continue
+                price = float(item.get('priceUsd', 0))
+                volume = float(item.get('volumeUsd', 0))
+                change = float(item.get('changePercent24Hr', 0))
+                if volume < config.MIN_VOLUME_USD:
+                    continue
+                if abs(change) < config.MIN_VOLATILITY_DAILY:
+                    continue
+                converted.append({
+                    'symbol': symbol,
+                    'quoteVolume': str(volume),
+                    'priceChangePercent': str(change),
+                    'highPrice': str(price * 1.02),
+                    'lowPrice': str(price * 0.98),
+                    'count': '1000',
+                })
+            return converted
+        return None
 
 # ===================================================================
 # 7. قاعدة البيانات (Database)
@@ -826,7 +1011,7 @@ class Repository:
         return returns
 
 # ===================================================================
-# 9. المحركات المتقدمة (Advanced Engines) - كما هي
+# 9. المحركات المتقدمة (Advanced Engines)
 # ===================================================================
 
 class UniverseEngine:
@@ -1255,54 +1440,107 @@ class StrategyEngine:
         return 0.0, 0.0
 
 # ===================================================================
-# 11. مقدم البيانات (DataProvider)
+# 11. مقدم البيانات (DataProvider) - مع دعم جميع المصادر
 # ===================================================================
 
 class DataProvider:
     def __init__(self):
         self._session = None
-        self._client = None
         self._rate_limiter = BinanceRateLimiter()
+        self._binance_client = None
+        self._binance_us_client = None
+        self._coinbase_client = None
+        self._coincap_client = None
         self._stats_cache = None
         self._stats_cache_time = 0
         self._cache_ttl = 300
 
-    async def _ensure_client(self):
+    async def _ensure_session(self):
         if self._session is None:
             self._session = aiohttp.ClientSession()
-        if self._client is None:
-            self._client = BinanceClient(self._session, self._rate_limiter)
-        return self._client
+        return self._session
+
+    async def _ensure_clients(self):
+        session = await self._ensure_session()
+        if self._binance_client is None:
+            self._binance_client = BinanceClient(session, self._rate_limiter)
+        if self._binance_us_client is None:
+            self._binance_us_client = BinanceUsClient(session, self._rate_limiter)
+        if self._coinbase_client is None:
+            self._coinbase_client = CoinbaseClient(session, self._rate_limiter)
+        if self._coincap_client is None:
+            self._coincap_client = CoinCapClient(session, self._rate_limiter)
+        return session
 
     async def close(self):
         if self._session:
             await self._session.close()
             self._session = None
-            self._client = None
+            self._binance_client = None
+            self._binance_us_client = None
+            self._coinbase_client = None
+            self._coincap_client = None
 
     async def fetch_klines(self, symbol: str, interval: str = '5m', limit: int = 100) -> Optional[CandleData]:
-        client = await self._ensure_client()
-        return await client.get_klines(symbol, interval, limit)
+        await self._ensure_clients()
+        # محاولة المصادر بالترتيب
+        sources = [
+            ('Binance.com', self._binance_client),
+            ('Binance.us', self._binance_us_client),
+            ('Coinbase', self._coinbase_client),
+            ('CoinCap', self._coincap_client)
+        ]
+        for name, client in sources:
+            try:
+                data = await client.get_klines(symbol, interval, limit)
+                if data and len(data.prices) > 10:
+                    logger.debug(f"✅ {name} provided klines for {symbol}")
+                    return data
+            except Exception as e:
+                logger.debug(f"{name} failed: {e}")
+        logger.warning(f"⚠️ All data sources failed for {symbol}")
+        return None
 
     async def fetch_stats(self, symbol: str) -> Optional[MarketStats]:
-        client = await self._ensure_client()
-        return await client.get_24hr_stats(symbol)
+        await self._ensure_clients()
+        sources = [
+            ('Binance.com', self._binance_client),
+            ('Binance.us', self._binance_us_client),
+            ('Coinbase', self._coinbase_client),
+            ('CoinCap', self._coincap_client)
+        ]
+        for name, client in sources:
+            try:
+                stats = await client.get_24hr_stats(symbol)
+                if stats and stats.volume > 1000:
+                    return stats
+            except Exception as e:
+                logger.debug(f"{name} stats failed: {e}")
+        return None
 
     async def get_all_24hr_stats(self) -> Optional[List[Dict]]:
         now = time.time()
         if self._stats_cache is not None and (now - self._stats_cache_time) < self._cache_ttl:
             return self._stats_cache
 
-        client = await self._ensure_client()
-        data = await client.get_all_24hr_stats()
-        if data and isinstance(data, list) and len(data) > 0:
-            self._stats_cache = data
-            self._stats_cache_time = now
-            logger.info(f"📊 تم جلب إحصائيات {len(data)} عملة من Binance")
-            return data
-        else:
-            logger.warning("⚠️ فشل جلب إحصائيات Binance (بيانات غير صالحة أو فارغة)")
-            return None
+        await self._ensure_clients()
+        sources = [
+            ('Binance.com', self._binance_client),
+            ('Binance.us', self._binance_us_client),
+            ('CoinCap', self._coincap_client)  # CoinCap is good for bulk
+        ]
+        for name, client in sources:
+            try:
+                data = await client.get_all_24hr_stats()
+                if data and isinstance(data, list) and len(data) > 10:
+                    self._stats_cache = data
+                    self._stats_cache_time = now
+                    logger.info(f"📊 تم جلب إحصائيات {len(data)} عملة من {name}")
+                    return data
+            except Exception as e:
+                logger.debug(f"{name} bulk stats failed: {e}")
+        logger.warning("⚠️ جميع المصادر فشلت في جلب الإحصائيات الجماعية")
+        return None
 
     async def filter_symbols(self) -> List[str]:
         all_stats = await self.get_all_24hr_stats()
@@ -1820,7 +2058,8 @@ class CommandHandlers:
             f"⏳ في الانتظار: {len(pending)}\n"
             f"📊 الصفقات المفتوحة: {open_count}/{config.MAX_OPEN_TRADES}\n"
             f"⏱️ فترة التبريد: {config.COOLDOWN_MINUTES} دقيقة\n"
-            f"🔄 قاعدة البيانات: SQLite",
+            f"🔄 قاعدة البيانات: SQLite\n"
+            f"📡 مصادر البيانات: Binance.com → Binance.us → Coinbase → CoinCap",
             parse_mode="HTML"
         )
 
@@ -1852,7 +2091,7 @@ class CommandHandlers:
         )
 
 # ===================================================================
-# 16. بوت التليجرام (SignalBot) - مع تحسين التعارض
+# 16. بوت التليجرام (SignalBot)
 # ===================================================================
 
 class SignalBot:
@@ -1877,10 +2116,9 @@ class SignalBot:
         try:
             await self.application.initialize()
             logger.info("✅ Application initialized")
-            # حذف webhook مع انتظار لإغلاق العمليات السابقة
             await self.application.bot.delete_webhook(drop_pending_updates=True)
             logger.info("✅ Webhook deleted, waiting 5s for old processes to close...")
-            await asyncio.sleep(5)  # انتظار 5 ثواني لتجنب Conflict
+            await asyncio.sleep(5)
             await self.application.start()
             logger.info("✅ Application started")
             await self.application.updater.start_polling()
@@ -1911,7 +2149,7 @@ class SignalBot:
             logger.error(f"❌ Error stopping bot: {e}")
 
 # ===================================================================
-# 17. تشغيل Flask (Health Server) - يمنع السكون في Render
+# 17. تشغيل Flask (Health Server)
 # ===================================================================
 
 def run_flask():
@@ -1919,7 +2157,7 @@ def run_flask():
     @flask_app.route('/')
     @flask_app.route('/healthcheck')
     def healthcheck():
-        return "✅ Elite Signal Bot V28 - Fully Operational"
+        return "✅ Elite Signal Bot V30 - Fully Operational"
     flask_app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # ===================================================================
