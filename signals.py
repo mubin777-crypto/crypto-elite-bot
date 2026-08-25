@@ -1,4 +1,4 @@
-# signals.py
+# signals.py - النسخة المعدلة بالكامل
 import logging
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -34,7 +34,7 @@ class SignalEngine:
 
         self.trend_1h = self._get_trend(self.data_1h['prices'])
         self.trend_4h = self._get_trend(self.data_4h['prices'])
-        self.trend_1d = self._get_trend(self.data_4h['prices'])  # تبسيط
+        self.trend_1d = self._get_trend(self.data_4h['prices'])
 
         if len(self.prices) >= 6 and self.prices[-6] > 0:
             self.change_1h = ((self.prices[-1] - self.prices[-6]) / self.prices[-6]) * 100
@@ -63,11 +63,12 @@ class SignalEngine:
             return 'bearish'
         return 'neutral'
 
-    def evaluate(self) -> Dict:
+    async def evaluate(self) -> Dict:  # 🔥 تم تعديلها إلى async
         score = 0.0
         reasons = []
-        weights = asyncio.run(db.get_factor_weights()) if config.ADAPTIVE_THRESHOLD else {}
+        weights = await db.get_factor_weights() if config.ADAPTIVE_THRESHOLD else {}
 
+        # RSI
         rsi_score = 0.0
         if 45 <= self.rsi <= 55:
             rsi_score = 4.0
@@ -83,6 +84,7 @@ class SignalEngine:
             reasons.append("RSI متطرف")
         score += rsi_score * weights.get('rsi', 1.0)
 
+        # الاتجاه
         trend_score = 0.0
         if self.trend_1d == 'bullish' and self.trend_4h == 'bullish':
             trend_score = 3.5
@@ -100,6 +102,7 @@ class SignalEngine:
             reasons.append("اتجاه جانبي")
         score += trend_score * weights.get('trend', 1.0)
 
+        # الزخم
         mom_score = 0.0
         if self.change_1h > 1.5:
             mom_score = 1.5
@@ -111,6 +114,7 @@ class SignalEngine:
             reasons.append("زخم ضعيف")
         score += mom_score * weights.get('momentum', 1.0)
 
+        # الحجم
         vol_score = 0.0
         if self.volume_ratio >= 3.0:
             vol_score = 1.0
@@ -123,6 +127,7 @@ class SignalEngine:
             reasons.append(f"حجم معتدل {self.volume_ratio:.1f}x")
         score += vol_score * weights.get('volume', 1.0)
 
+        # ADX
         adx_score = 0.0
         if self.adx > 30:
             adx_score = 1.0
@@ -132,6 +137,7 @@ class SignalEngine:
             reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
         score += adx_score * weights.get('adx', 1.0)
 
+        # بولينجر
         bb_width = (self.bb['upper'] - self.bb['lower']) / self.bb['middle'] * 100 if self.bb['middle'] > 0 else 0
         if bb_width < 2.0:
             score += 0.5
@@ -203,7 +209,7 @@ class ConfirmationEngine:
             return None
 
         new_engine = SignalEngine(self.initial.symbol, data_5m, data_1h, data_4h, stats)
-        new_eval = new_engine.evaluate()
+        new_eval = await new_engine.evaluate()
         if new_eval['score'] >= self.initial.score + config.CONFIRMATION_SCORE_BONUS:
             self.confirmed = new_eval
             self.confirmed['signal'] = self.confirmed['signal'].replace("مراقبة", "تأكيد")
