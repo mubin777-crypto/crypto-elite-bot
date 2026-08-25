@@ -1,4 +1,4 @@
-# telegram_bot.py - مع إضافة سجلات Debug ومعالجة الأخطاء
+# telegram_bot.py
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -123,7 +123,6 @@ class TelegramHandlers:
             if not perf:
                 await update.message.reply_text("📊 لا توجد بيانات أداء كافية حتى الآن.")
                 return
-            # perf: (id, date, total_trades, wins, losses, win_rate, profit_factor, avg_win, avg_loss, expectancy, max_drawdown, sharpe_ratio, consecutive_losses, total_return)
             msg = (
                 f"📈 *أداء البوت*\n\n"
                 f"📊 إجمالي الصفقات: {perf[2]}\n"
@@ -165,7 +164,7 @@ class TelegramHandlers:
                     await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}")
                     return
                 engine = SignalEngine(sym, data_5m, data_1h, data_4h, stats)
-                result = engine.evaluate()
+                result = await engine.evaluate()
                 stop_loss, take_profit, pos_size = engine.calculate_risk(result['price'])
                 msg = (
                     f"📡 *تحليل فوري لـ {sym}*\n"
