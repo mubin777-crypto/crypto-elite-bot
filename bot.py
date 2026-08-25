@@ -110,7 +110,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
 
             # التحليل الأساسي
             engine = SignalEngine(symbol, data_5m, data_1h, data_4h, stats)
-            result = engine.evaluate()
+            result = await engine.evaluate()  # 🔥 تعديل: إضافة await
 
             if not result['is_actionable']:
                 logger.debug(f"⏭️ {symbol}: نقاط {result['score']} < عتبة {config.SIGNAL_SCORE_THRESHOLD}")
