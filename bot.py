@@ -3,7 +3,7 @@
 
 """
 bot.py - الملف الرئيسي لتشغيل البوت
-الإصدار النهائي مع إصلاحات Conflict و Event loop is closed
+الإصدار النهائي مع إصلاحات استجابة الأوامر
 """
 
 import os
@@ -272,7 +272,11 @@ def main():
 
     logger.info("✅ Starting Telegram Bot with Polling...")
     try:
-        application.run_polling(allowed_updates=["message", "callback_query"])
+        # 🔥 إضافة drop_pending_updates=True لضمان عدم وجود تعارض
+        application.run_polling(
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True
+        )
     finally:
         # إيقاف نظيف عند الخروج مع معالجة الأخطاء
         try:
