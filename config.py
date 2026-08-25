@@ -1,9 +1,11 @@
-# config.py
+# config.py - الإعدادات العامة (بعد إزالة التوكن الثابت)
+
 import os
 from datetime import timezone
 
 class Config:
     # -------------------- متغيرات البيئة --------------------
+    # 🔒 التوكن يُقرأ فقط من متغيرات البيئة (غير موجود في الكود)
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///crypto_bot.db")
@@ -25,9 +27,9 @@ class Config:
     MIN_VOLATILITY_DAILY = 0.3
     SIGNAL_SCORE_THRESHOLD = 4.0
     CONFIRMATION_SCORE_BONUS = 0.5
-    CONFIRMATION_WAIT_CANDLES = 2  # 2 شمعة (10 دقائق)
-    RISK_PER_TRADE = 0.01          # 1% مخاطرة
-    MAX_POSITION_SIZE_PCT = 2.0    # 2% كحد أقصى
+    CONFIRMATION_WAIT_CANDLES = 2          # 2 شمعة (10 دقائق)
+    RISK_PER_TRADE = 0.01                  # 1% مخاطرة لكل صفقة
+    MAX_POSITION_SIZE_PCT = 2.0            # 2% كحد أقصى لحجم الصفقة
     MIN_CHANGE_1H = 0.3
     RSI_PERIOD = 6
     ADX_PERIOD = 14
@@ -37,8 +39,8 @@ class Config:
     INITIAL_CAPITAL = 10000.0
     MAX_OPEN_TRADES = 3
     DYNAMIC_SYMBOLS_LIMIT = 70
-    DYNAMIC_UPDATE_INTERVAL = 1800  # 30 دقيقة
-    ADAPTIVE_THRESHOLD = True       # تفعيل التعلم التكيفي
+    DYNAMIC_UPDATE_INTERVAL = 1800         # 30 دقيقة
+    ADAPTIVE_THRESHOLD = True              # تفعيل التعلم التكيفي
 
     # -------------------- قائمة العملات الأساسية (Core Universe) --------------------
     CORE_UNIVERSE = [
@@ -52,7 +54,7 @@ class Config:
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT", "APTUSDT"
+        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
     ]
 
     # -------------------- الأطر الزمنية للتحليل المتعدد --------------------
