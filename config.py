@@ -1,9 +1,8 @@
-# config.py - الإعدادات العامة (بعد إزالة التوكن الثابت)
+# config.py - الإعدادات العامة (بدون توكن ثابت)
 import os
 
 class Config:
     # -------------------- متغيرات البيئة --------------------
-    # 🔒 التوكن يُقرأ فقط من متغيرات البيئة (غير موجود في الكود)
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///crypto_bot.db")
