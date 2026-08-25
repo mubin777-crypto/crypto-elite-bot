@@ -3,7 +3,7 @@
 
 """
 bot.py - الملف الرئيسي لتشغيل البوت
-الإصدار النهائي مع إصلاحات Conflict و Task destruction
+الإصدار النهائي مع إصلاحات Conflict و Event loop is closed
 """
 
 import os
@@ -230,7 +230,7 @@ async def post_init(application):
     logger.info("✅ Self-Pinger started")
 
 async def shutdown():
-    """إيقاف نظيف للمهام الخلفية"""
+    """إيقاف نظيف للمهام الخلفية مع معالجة Event loop is closed"""
     logger.info("🛑 جارٍ إيقاف المهام الخلفية...")
     for task in background_tasks:
         if not task.done():
@@ -239,6 +239,11 @@ async def shutdown():
                 await task
             except asyncio.CancelledError:
                 pass
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e):
+                    logger.warning("⚠️ تم إيقاف الحلقة بالفعل، تخطي إلغاء المهمة")
+                else:
+                    logger.error(f"خطأ في إلغاء المهمة: {e}")
     await db.close()
     logger.info("✅ تم إيقاف جميع المهام")
 
@@ -269,8 +274,16 @@ def main():
     try:
         application.run_polling(allowed_updates=["message", "callback_query"])
     finally:
-        # إيقاف نظيف عند الخروج
-        asyncio.run(shutdown())
+        # إيقاف نظيف عند الخروج مع معالجة الأخطاء
+        try:
+            asyncio.run(shutdown())
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                logger.info("ℹ️ تم إيقاف الحلقة بالفعل، تخطي الإيقاف النهائي")
+            else:
+                logger.error(f"خطأ أثناء الإيقاف: {e}")
+        except Exception as e:
+            logger.error(f"خطأ غير متوقع أثناء الإيقاف: {e}")
 
 if __name__ == "__main__":
     try:
