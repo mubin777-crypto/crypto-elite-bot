@@ -81,7 +81,6 @@ class Database:
             last_updated TEXT
         )''')
         
-        # تهيئة العوامل
         for factor in ['rsi', 'trend', 'momentum', 'volume', 'adx']:
             await conn.execute("INSERT OR IGNORE INTO factor_performance (factor, weight) VALUES (?, ?)", (factor, 1.0))
         
