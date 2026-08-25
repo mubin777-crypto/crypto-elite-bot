@@ -12,7 +12,7 @@ import asyncio
 import threading
 import logging
 import time
-import aiohttp  # 🔥 إضافة الاستيراد المفقود
+import aiohttp  # 🔥 تأكد من وجود هذا الاستيراد
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 from telegram.ext import Application, CommandHandler, ContextTypes
