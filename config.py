@@ -1,7 +1,5 @@
 # config.py - الإعدادات العامة (بعد إزالة التوكن الثابت)
-
 import os
-from datetime import timezone
 
 class Config:
     # -------------------- متغيرات البيئة --------------------
@@ -27,9 +25,9 @@ class Config:
     MIN_VOLATILITY_DAILY = 0.3
     SIGNAL_SCORE_THRESHOLD = 4.0
     CONFIRMATION_SCORE_BONUS = 0.5
-    CONFIRMATION_WAIT_CANDLES = 2          # 2 شمعة (10 دقائق)
-    RISK_PER_TRADE = 0.01                  # 1% مخاطرة لكل صفقة
-    MAX_POSITION_SIZE_PCT = 2.0            # 2% كحد أقصى لحجم الصفقة
+    CONFIRMATION_WAIT_CANDLES = 2
+    RISK_PER_TRADE = 0.01
+    MAX_POSITION_SIZE_PCT = 2.0
     MIN_CHANGE_1H = 0.3
     RSI_PERIOD = 6
     ADX_PERIOD = 14
@@ -39,10 +37,10 @@ class Config:
     INITIAL_CAPITAL = 10000.0
     MAX_OPEN_TRADES = 3
     DYNAMIC_SYMBOLS_LIMIT = 70
-    DYNAMIC_UPDATE_INTERVAL = 1800         # 30 دقيقة
-    ADAPTIVE_THRESHOLD = True              # تفعيل التعلم التكيفي
+    DYNAMIC_UPDATE_INTERVAL = 1800
+    ADAPTIVE_THRESHOLD = True
 
-    # -------------------- قائمة العملات الأساسية (Core Universe) --------------------
+    # -------------------- قائمة العملات الأساسية --------------------
     CORE_UNIVERSE = [
         "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
         "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -57,7 +55,7 @@ class Config:
         "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
     ]
 
-    # -------------------- الأطر الزمنية للتحليل المتعدد --------------------
+    # -------------------- الأطر الزمنية --------------------
     TIMEFRAMES = {
         "5m": {"limit": 100, "weight": 1.0},
         "1h": {"limit": 30, "weight": 1.5},
