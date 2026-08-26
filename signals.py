@@ -1,7 +1,6 @@
-# signals.py - النسخة المعدلة بالكامل
+# signals.py - معدل بالكامل مع محرك الانفجارات
 import logging
 import asyncio
-from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from config import config
@@ -44,12 +43,19 @@ class SignalEngine:
         avg_volume = sum(self.volumes[-12:]) / 12 if len(self.volumes) >= 12 else 1
         self.volume_ratio = self.volumes[-1] / avg_volume if avg_volume > 0 else 0
 
+        # محرك انفجار الحجم
+        self.volume_spike = self.volume_ratio > 3.0
+
+        # انضغاط التقلب (نطاق السعر خلال آخر 10 شموع)
+        price_range = (max(self.prices[-10:]) - min(self.prices[-10:])) / self.current_price if self.current_price > 0 else 0
+        self.low_volatility_compression = price_range < 0.01  # أقل من 1%
+
         self.pivot = Indicators.get_pivot_points(
             self.stats.get('high', self.current_price),
             self.stats.get('low', self.current_price),
             self.stats.get('last', self.current_price)
         )
-        self.breakout = Indicators.detect_breakout(self.prices, self.highs, self.lows, 20)
+        self.breakout = Indicators.detect_breakout(self.prices, self.highs, self.lows, self.atr, 20)
 
     def _get_trend(self, prices: List[float]) -> str:
         if len(prices) < 20:
@@ -63,7 +69,7 @@ class SignalEngine:
             return 'bearish'
         return 'neutral'
 
-    async def evaluate(self) -> Dict:  # 🔥 تم تعديلها إلى async
+    async def evaluate(self) -> Dict:
         score = 0.0
         reasons = []
         weights = await db.get_factor_weights() if config.ADAPTIVE_THRESHOLD else {}
@@ -114,11 +120,11 @@ class SignalEngine:
             reasons.append("زخم ضعيف")
         score += mom_score * weights.get('momentum', 1.0)
 
-        # الحجم
+        # الحجم (مع مكافأة انفجار الحجم)
         vol_score = 0.0
-        if self.volume_ratio >= 3.0:
-            vol_score = 1.0
-            reasons.append(f"حجم ضخم {self.volume_ratio:.1f}x")
+        if self.volume_spike:
+            vol_score = 2.0
+            reasons.append(f"🚀 انفجار حجم مفاجئ ({self.volume_ratio:.1f}x)")
         elif self.volume_ratio >= 2.0:
             vol_score = 0.7
             reasons.append(f"حجم جيد {self.volume_ratio:.1f}x")
@@ -137,11 +143,16 @@ class SignalEngine:
             reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
         score += adx_score * weights.get('adx', 1.0)
 
-        # بولينجر
+        # بولينجر (انضغاط)
         bb_width = (self.bb['upper'] - self.bb['lower']) / self.bb['middle'] * 100 if self.bb['middle'] > 0 else 0
         if bb_width < 2.0:
             score += 0.5
             reasons.append(f"انضغاط بولينجر ({bb_width:.1f}%)")
+
+        # انضغاط التقلب المنخفض (قبل الانفجار)
+        if self.low_volatility_compression:
+            score += 1.0
+            reasons.append("📉 انضغاط سعري شديد - استعداد للانفجار")
 
         final_score = round(min(score, 10.0), 1)
 
@@ -172,7 +183,9 @@ class SignalEngine:
             "trend_1d": self.trend_1d,
             "pivot": self.pivot,
             "breakout": self.breakout,
-            "bb_width": round(bb_width, 2)
+            "bb_width": round(bb_width, 2),
+            "volume_spike": self.volume_spike,
+            "low_volatility_compression": self.low_volatility_compression
         }
 
     def calculate_risk(self, entry_price: float, stop_loss: float = None) -> Tuple[float, float, float]:
@@ -196,6 +209,28 @@ class ConfirmationEngine:
         self.wait_candles = config.CONFIRMATION_WAIT_CANDLES
 
     async def wait_and_confirm(self, session):
+        # إذا كان هناك انفجار حجم، تخطي التأكيد
+        if self.initial.volume_spike:
+            logger.info(f"⚡ انفجار حجم مفاجئ لـ {self.initial.symbol}، تخطي التأكيد")
+            # نعيد التحليل فوراً للحصول على أحدث البيانات
+            from utils import fetch_klines, fetch_24hr_stats
+            data_5m = await fetch_klines(session, self.initial.symbol, '5m', 100)
+            data_1h = await fetch_klines(session, self.initial.symbol, '1h', 30)
+            data_4h = await fetch_klines(session, self.initial.symbol, '4h', 20)
+            stats = await fetch_24hr_stats(session, self.initial.symbol)
+            if not data_5m or not data_1h or not data_4h:
+                return None
+            new_engine = SignalEngine(self.initial.symbol, data_5m, data_1h, data_4h, stats)
+            new_eval = await new_engine.evaluate()
+            if new_eval['is_actionable']:
+                self.confirmed = new_eval
+                self.confirmed['signal'] = self.confirmed['signal'].replace("مراقبة", "تأكيد سريع")
+                return self.confirmed
+            else:
+                logger.info(f"⚠️ انفجار حجم لـ {self.initial.symbol} لكن الإشارة غير قابلة للتنفيذ")
+                return None
+
+        # الانتظار العادي
         wait_seconds = 5 * 60 * self.wait_candles
         logger.info(f"⏳ انتظار {wait_seconds} ثانية لتأكيد إشارة {self.initial.symbol}")
         await asyncio.sleep(wait_seconds)
