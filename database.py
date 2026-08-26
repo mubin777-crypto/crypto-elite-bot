@@ -1,4 +1,4 @@
-# database.py
+# database.py - قاعدة البيانات (باستخدام DATABASE_URL من config)
 import aiosqlite
 import logging
 from datetime import datetime, timezone
@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self):
-        self.db_path = config.DB_PATH
+        self.db_path = config.DB_PATH  # المستخرج من DATABASE_URL
         self._conn = None
 
     async def _get_conn(self):
@@ -21,6 +21,7 @@ class Database:
 
     async def init(self):
         conn = await self._get_conn()
+        # جدول المشتركين
         await conn.execute('''CREATE TABLE IF NOT EXISTS subscribers (user_id TEXT PRIMARY KEY)''')
         await conn.execute('''CREATE TABLE IF NOT EXISTS pending (user_id TEXT PRIMARY KEY)''')
         await conn.execute('''CREATE TABLE IF NOT EXISTS signal_cooldown (symbol TEXT PRIMARY KEY, last_signal_time TEXT)''')
@@ -80,14 +81,14 @@ class Database:
             weight REAL DEFAULT 1.0,
             last_updated TEXT
         )''')
-        
         for factor in ['rsi', 'trend', 'momentum', 'volume', 'adx']:
             await conn.execute("INSERT OR IGNORE INTO factor_performance (factor, weight) VALUES (?, ?)", (factor, 1.0))
         
+        # إضافة المشرف كمشترك تلقائياً
         if config.ADMIN_CHAT_ID:
             await conn.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (config.ADMIN_CHAT_ID,))
         await conn.commit()
-        logger.info("✅ قاعدة البيانات مهيأة")
+        logger.info(f"✅ قاعدة البيانات مهيأة: {self.db_path}")
 
     async def execute(self, query, *args):
         conn = await self._get_conn()
@@ -105,6 +106,7 @@ class Database:
         cursor = await conn.execute(query, args)
         return await cursor.fetchone()
 
+    # -------------------- دوال المشتركين --------------------
     async def get_subscribers(self):
         rows = await self.fetch("SELECT user_id FROM subscribers")
         return [row[0] for row in rows]
@@ -132,6 +134,7 @@ class Database:
     async def set_cooldown(self, symbol, timestamp):
         await self.execute("INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)", symbol, timestamp)
 
+    # -------------------- دوال الصفقات --------------------
     async def save_signal(self, symbol, signal_type, price, stop_loss, take_profit, position_size=0):
         now = datetime.now(timezone.utc).isoformat()
         cursor = await self.execute(
@@ -161,6 +164,7 @@ class Database:
     async def get_open_paper_trades(self):
         return await self.fetch("SELECT id, symbol, action, entry_price, stop_loss, take_profit, position_size, entry_time FROM paper_trades WHERE status = 'OPEN'")
 
+    # -------------------- دوال الأداء --------------------
     async def update_performance(self, metrics):
         today = datetime.now(timezone.utc).date().isoformat()
         await self.execute(
@@ -178,6 +182,7 @@ class Database:
     async def get_performance(self):
         return await self.fetchone("SELECT * FROM performance_metrics ORDER BY id DESC LIMIT 1")
 
+    # -------------------- دوال التعلم التكيفي --------------------
     async def get_factor_weights(self):
         rows = await self.fetch("SELECT factor, weight FROM factor_performance")
         return {row[0]: row[1] for row in rows}
