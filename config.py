@@ -1,4 +1,4 @@
-# config.py - الإعدادات العامة
+# config.py - الإعدادات العامة (مع تعديل العتبات)
 import os
 
 class Config:
@@ -15,22 +15,24 @@ class Config:
     COINCAP_BASE = "https://api.coincap.io/v2"
     CRYPTOPANIC_BASE = "https://cryptopanic.com/api/v1"
 
-    # -------------------- إعدادات البوت الأساسية --------------------
+    # -------------------- إعدادات البوت الأساسية (معدلة) --------------------
     DB_PATH = "crypto_bot.db"
     RATE_LIMIT_DELAY = 0.1
     SEMAPHORE_LIMIT = 5
     COOLDOWN_MINUTES = 45
     MIN_VOLUME_USD = 200_000
     MIN_VOLATILITY_DAILY = 0.3
-    SIGNAL_SCORE_THRESHOLD = 3.5           # خفضت لاكتشاف المزيد
+    
+    # 🔥 العتبات المعدلة (رفعها لتقليل الإشارات الضعيفة)
+    SIGNAL_SCORE_THRESHOLD = 6.5           # كانت 3.5 (رفعت)
     CONFIRMATION_SCORE_BONUS = 0.5
     CONFIRMATION_WAIT_CANDLES = 2
     RISK_PER_TRADE = 0.01
     MAX_POSITION_SIZE_PCT = 2.0
-    MIN_CHANGE_1H = 0.15                   # خفضت
+    MIN_CHANGE_1H = 0.25                   # كانت 0.15
     RSI_PERIOD = 6
     ADX_PERIOD = 14
-    MIN_ADX_STRONG = 15                    # خفضت
+    MIN_ADX_STRONG = 25                    # كانت 15 (رفعت)
     DAILY_LOSS_LIMIT_PCT = 3.0
     PAPER_TRADING = True
     INITIAL_CAPITAL = 10000.0
