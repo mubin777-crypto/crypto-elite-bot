@@ -1,4 +1,4 @@
-# indicators.py
+# indicators.py - معدل مع ATR الديناميكي
 import math
 import logging
 from typing import List, Dict, Optional
@@ -115,13 +115,15 @@ class Indicators:
         return {"pivot": pivot, "resistance": [r1, r2], "support": [s1, s2]}
 
     @staticmethod
-    def detect_breakout(prices: List[float], highs: List[float], lows: List[float], lookback: int = 20) -> Optional[str]:
-        if len(prices) < lookback + 1:
+    def detect_breakout(prices: List[float], highs: List[float], lows: List[float], atr: float, lookback: int = 20) -> Optional[str]:
+        """تحسين عتبة الاختراق باستخدام ATR بدلاً من النسبة الثابتة"""
+        if len(prices) < lookback + 1 or atr <= 0:
             return None
         recent_high = max(highs[-lookback:-1])
         recent_low = min(lows[-lookback:-1])
         current = prices[-1]
-        threshold = 0.002
+        # عتبة ديناميكية تعتمد على ATR
+        threshold = max(atr / current, 0.005)  # على الأقل 0.5%
         if current > recent_high * (1 + threshold):
             return "BREAKOUT"
         elif current < recent_low * (1 - threshold):
