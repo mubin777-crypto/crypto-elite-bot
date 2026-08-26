@@ -1,4 +1,4 @@
-# telegram_bot.py
+# telegram_bot.py - أوامر التليجرام (مع إضافة /add)
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -12,6 +12,7 @@ class TelegramHandlers:
     def __init__(self):
         self.db = db
 
+    # -------------------- الأوامر الأساسية --------------------
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         logger.info(f"📩 أمر /start من {user_id}")
@@ -64,35 +65,72 @@ class TelegramHandlers:
             logger.error(f"❌ خطأ في /approve: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
 
-    async def adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # -------------------- الأمر الجديد /add (إضافة مباشرة) --------------------
+    async def add_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """إضافة مستخدم مباشرة بدون انتظار (للمالك فقط)"""
         user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /adduser من {user_id}")
+        logger.info(f"📩 أمر /add من {user_id}")
         try:
             if user_id != config.ADMIN_CHAT_ID:
                 await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
                 return
             if not context.args:
-                await update.message.reply_text("⚠️ استخدم: /adduser USER_ID")
+                await update.message.reply_text("⚠️ استخدم: /add USER_ID [USER_ID2 ...]")
                 return
-            target_user = context.args[0].strip()
-            if not target_user.isdigit():
-                await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً فقط.")
-                return
-            subscribers = await self.db.get_subscribers()
-            if target_user in subscribers:
-                await update.message.reply_text(f"ℹ️ المستخدم `{target_user}` مشترك بالفعل.", parse_mode="Markdown")
-                return
-            await self.db.add_subscriber(target_user)
-            try:
-                await context.bot.send_message(chat_id=target_user, text="🎉 *تمت إضافتك إلى البوت المحسن!*", parse_mode="Markdown")
-                await update.message.reply_text(f"✅ تمت إضافة المستخدم `{target_user}` بنجاح.")
-            except Exception as e:
-                await update.message.reply_text(f"✅ تمت إضافة المستخدم `{target_user}` ولكن لم نتمكن من إرسال رسالة ترحيب.")
-            logger.info(f"✅ تمت إضافة المستخدم {target_user}")
+            added = []
+            for arg in context.args:
+                target = arg.strip()
+                if not target.isdigit():
+                    continue
+                # إضافة مباشرة دون انتظار
+                await self.db.add_subscriber(target)
+                added.append(target)
+                # إرسال رسالة ترحيب للمستخدم المضاف
+                try:
+                    await context.bot.send_message(
+                        chat_id=target,
+                        text="🎉 *تمت إضافتك إلى البوت المحسن!* ستستلم إشارات التداول تلقائياً.",
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
+            if added:
+                await update.message.reply_text(f"✅ تمت إضافة المستخدمين: `{', '.join(added)}`", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("❌ لم يتم إضافة أي مستخدم (تأكد من الأرقام).")
+            logger.info(f"✅ أضاف المالك المستخدمين: {added}")
         except Exception as e:
-            logger.error(f"❌ خطأ في /adduser: {e}")
+            logger.error(f"❌ خطأ في /add: {e}")
+            await update.message.reply_text("⚠️ حدث خطأ أثناء إضافة المستخدمين.")
+
+    # -------------------- أوامر إدارة المستخدمين --------------------
+    async def adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """إضافة مستخدم (قديم، نحتفظ به للتوافق)"""
+        await self.add_user(update, context)
+
+    async def removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """إزالة مستخدم (للمالك)"""
+        user_id = str(update.effective_user.id)
+        logger.info(f"📩 أمر /removeuser من {user_id}")
+        try:
+            if user_id != config.ADMIN_CHAT_ID:
+                await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
+                return
+            if not context.args:
+                await update.message.reply_text("⚠️ استخدم: /removeuser USER_ID")
+                return
+            target = context.args[0].strip()
+            if not target.isdigit():
+                await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً.")
+                return
+            await self.db.remove_subscriber(target)
+            await update.message.reply_text(f"✅ تمت إزالة المستخدم `{target}`.")
+            logger.info(f"✅ تمت إزالة المستخدم {target}")
+        except Exception as e:
+            logger.error(f"❌ خطأ في /removeuser: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
 
+    # -------------------- أوامر الحالة والأداء --------------------
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         logger.info(f"📩 أمر /status من {user_id}")
@@ -165,7 +203,12 @@ class TelegramHandlers:
                     return
                 engine = SignalEngine(sym, data_5m, data_1h, data_4h, stats)
                 result = await engine.evaluate()
-                stop_loss, take_profit, pos_size = engine.calculate_risk(result['price'])
+                # حساب المخاطر حسب نوع الإشارة
+                action = result.get('action', 'NEUTRAL')
+                if action == 'NEUTRAL':
+                    stop_loss = take_profit = pos_size = 0
+                else:
+                    stop_loss, take_profit, pos_size = engine.calculate_risk(result['price'], action)
                 msg = (
                     f"📡 *تحليل فوري لـ {sym}*\n"
                     f"🔹 النقاط: {result['score']}/10\n"
