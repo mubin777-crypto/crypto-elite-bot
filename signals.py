@@ -1,4 +1,4 @@
-# signals.py - معدل بالكامل مع محرك الانفجارات
+# signals.py - معدل بالكامل مع إصلاح إدارة المخاطر
 import logging
 import asyncio
 from typing import Dict, List, Optional, Tuple
@@ -16,6 +16,7 @@ class SignalEngine:
         self.data_1h = data_1h
         self.data_4h = data_4h
         self.stats = stats
+        self.action = "NEUTRAL"
         self._analyze()
 
     def _analyze(self):
@@ -43,12 +44,10 @@ class SignalEngine:
         avg_volume = sum(self.volumes[-12:]) / 12 if len(self.volumes) >= 12 else 1
         self.volume_ratio = self.volumes[-1] / avg_volume if avg_volume > 0 else 0
 
-        # محرك انفجار الحجم
         self.volume_spike = self.volume_ratio > 3.0
 
-        # انضغاط التقلب (نطاق السعر خلال آخر 10 شموع)
         price_range = (max(self.prices[-10:]) - min(self.prices[-10:])) / self.current_price if self.current_price > 0 else 0
-        self.low_volatility_compression = price_range < 0.01  # أقل من 1%
+        self.low_volatility_compression = price_range < 0.01
 
         self.pivot = Indicators.get_pivot_points(
             self.stats.get('high', self.current_price),
@@ -75,97 +74,114 @@ class SignalEngine:
         weights = await db.get_factor_weights() if config.ADAPTIVE_THRESHOLD else {}
 
         # RSI
-        rsi_score = 0.0
         if 45 <= self.rsi <= 55:
-            rsi_score = 4.0
+            score += 4.0
             reasons.append("RSI مثالي")
         elif 30 <= self.rsi < 45 or 55 < self.rsi <= 60:
-            rsi_score = 3.0
+            score += 3.0
             reasons.append("RSI جيد")
         elif 20 <= self.rsi < 30 or 60 < self.rsi <= 70:
-            rsi_score = 1.5
+            score += 1.5
             reasons.append("RSI حذر")
         else:
-            rsi_score = 0.5
+            score += 0.5
             reasons.append("RSI متطرف")
-        score += rsi_score * weights.get('rsi', 1.0)
+        score *= weights.get('rsi', 1.0)
 
-        # الاتجاه
-        trend_score = 0.0
-        if self.trend_1d == 'bullish' and self.trend_4h == 'bullish':
-            trend_score = 3.5
+        # الاتجاه (مع شرط ADX)
+        if self.adx < 20:
+            reasons.append(f"اتجاه ضعيف (ADX {self.adx:.1f})")
+        elif self.trend_1d == 'bullish' and self.trend_4h == 'bullish':
+            score += 3.5
             reasons.append("اتجاه صاعد قوي (4H+1D)")
         elif self.trend_4h == 'bullish':
-            trend_score = 2.5
+            score += 2.5
             reasons.append("اتجاه صاعد (4H)")
         elif self.trend_1h == 'bullish':
-            trend_score = 1.5
+            score += 1.5
             reasons.append("اتجاه صاعد (1H)")
         elif self.trend_1d == 'bearish' and self.trend_4h == 'bearish':
-            trend_score = -1.0
-            reasons.append("اتجاه هابط قوي")
+            score += 3.5
+            reasons.append("اتجاه هابط قوي (4H+1D)")
+        elif self.trend_4h == 'bearish':
+            score += 2.5
+            reasons.append("اتجاه هابط (4H)")
+        elif self.trend_1h == 'bearish':
+            score += 1.5
+            reasons.append("اتجاه هابط (1H)")
         else:
             reasons.append("اتجاه جانبي")
-        score += trend_score * weights.get('trend', 1.0)
+        score *= weights.get('trend', 1.0)
 
         # الزخم
-        mom_score = 0.0
         if self.change_1h > 1.5:
-            mom_score = 1.5
+            score += 1.5
             reasons.append(f"زخم قوي {self.change_1h:.1f}%")
         elif self.change_1h > 0.5:
-            mom_score = 0.8
+            score += 0.8
             reasons.append(f"زخم معتدل {self.change_1h:.1f}%")
         else:
+            score += 0.0
             reasons.append("زخم ضعيف")
-        score += mom_score * weights.get('momentum', 1.0)
+        score *= weights.get('momentum', 1.0)
 
-        # الحجم (مع مكافأة انفجار الحجم)
-        vol_score = 0.0
+        # الحجم
         if self.volume_spike:
-            vol_score = 2.0
+            score += 2.0
             reasons.append(f"🚀 انفجار حجم مفاجئ ({self.volume_ratio:.1f}x)")
         elif self.volume_ratio >= 2.0:
-            vol_score = 0.7
+            score += 0.7
             reasons.append(f"حجم جيد {self.volume_ratio:.1f}x")
         elif self.volume_ratio >= 1.3:
-            vol_score = 0.4
+            score += 0.4
             reasons.append(f"حجم معتدل {self.volume_ratio:.1f}x")
-        score += vol_score * weights.get('volume', 1.0)
+        score *= weights.get('volume', 1.0)
 
-        # ADX
-        adx_score = 0.0
+        # ADX (وزن إضافي)
         if self.adx > 30:
-            adx_score = 1.0
+            score += 1.0
             reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
-        elif self.adx > 20:
-            adx_score = 0.5
+        elif self.adx > 25:
+            score += 0.5
             reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
-        score += adx_score * weights.get('adx', 1.0)
 
-        # بولينجر (انضغاط)
+        # بولينجر
         bb_width = (self.bb['upper'] - self.bb['lower']) / self.bb['middle'] * 100 if self.bb['middle'] > 0 else 0
         if bb_width < 2.0:
             score += 0.5
             reasons.append(f"انضغاط بولينجر ({bb_width:.1f}%)")
 
-        # انضغاط التقلب المنخفض (قبل الانفجار)
         if self.low_volatility_compression:
             score += 1.0
             reasons.append("📉 انضغاط سعري شديد - استعداد للانفجار")
 
         final_score = round(min(score, 10.0), 1)
 
-        if final_score >= 7.0:
-            signal_type = "🟢 **شراء قوي**" if self.change_1h > 0 else "🔴 **بيع قوي**"
-        elif final_score >= 5.5:
-            signal_type = "🟢 **شراء**" if self.change_1h > 0 else "🔴 **بيع**"
+        # تحديد الاتجاه والـ action
+        if self.trend_1d == 'bullish' and self.trend_4h != 'bearish':
+            self.action = "BUY"
+        elif self.trend_1d == 'bearish' and self.trend_4h != 'bullish':
+            self.action = "SELL"
+        else:
+            self.action = "NEUTRAL"
+
+        # تحديد نوع الإشارة بناءً على النقاط والاتجاه
+        if final_score >= 8.0 and self.action != "NEUTRAL":
+            signal_type = "🟢 **شراء قوي**" if self.action == "BUY" else "🔴 **بيع قوي**"
+        elif final_score >= 6.5 and self.action != "NEUTRAL":
+            signal_type = "🟢 **شراء**" if self.action == "BUY" else "🔴 **بيع**"
         elif final_score >= 4.5:
             signal_type = "🟡 **مراقبة**"
         else:
             signal_type = "⚪ **حيادي**"
 
-        is_actionable = final_score >= config.SIGNAL_SCORE_THRESHOLD
+        # شروط صارمة للإشارات القابلة للتنفيذ
+        is_actionable = (
+            final_score >= config.SIGNAL_SCORE_THRESHOLD and 
+            self.action != "NEUTRAL" and
+            self.adx >= config.MIN_ADX_STRONG and
+            abs(self.change_1h) >= config.MIN_CHANGE_1H
+        )
 
         return {
             "symbol": self.symbol,
@@ -185,22 +201,42 @@ class SignalEngine:
             "breakout": self.breakout,
             "bb_width": round(bb_width, 2),
             "volume_spike": self.volume_spike,
-            "low_volatility_compression": self.low_volatility_compression
+            "low_volatility_compression": self.low_volatility_compression,
+            "action": self.action
         }
 
-    def calculate_risk(self, entry_price: float, stop_loss: float = None) -> Tuple[float, float, float]:
+    def calculate_risk(self, entry_price: float, action: str, stop_loss: float = None) -> Tuple[float, float, float]:
+        """
+        حساب وقف الخسارة، جني الأرباح، وحجم الصفقة
+        🔥 تم إصلاح منطق SL/TP للبيع (Short)
+        action: 'BUY' أو 'SELL'
+        """
         atr_stop = self.atr * 2 if self.atr > 0 else entry_price * 0.015
-        if stop_loss is None:
-            stop_loss = entry_price - max(atr_stop, entry_price * 0.01)
-        take_profit = entry_price + max(atr_stop * 2, entry_price * 0.025)
-        stop_loss_pct = abs(entry_price - stop_loss) / entry_price
-        if stop_loss_pct == 0:
+        min_stop = entry_price * 0.01
+        min_tp = entry_price * 0.025
+        
+        if action == 'BUY':
+            # الشراء: SL أسفل، TP أعلى
+            if stop_loss is None:
+                stop_loss = entry_price - max(atr_stop, min_stop)
+            take_profit = entry_price + max(atr_stop * 2, min_tp)
+        else:  # SELL
+            # 🔥 البيع: SL أعلى، TP أسفل (تم الإصلاح)
+            if stop_loss is None:
+                stop_loss = entry_price + max(atr_stop, min_stop)
+            take_profit = entry_price - max(atr_stop * 2, min_tp)
+        
+        # حساب حجم الصفقة
+        stop_distance = abs(entry_price - stop_loss) / entry_price
+        if stop_distance == 0:
             position_size = 0.02
         else:
             risk_amount = config.RISK_PER_TRADE
-            position_fraction = risk_amount / stop_loss_pct
+            position_fraction = risk_amount / stop_distance
             position_size = round(min(position_fraction, config.MAX_POSITION_SIZE_PCT / 100), 4)
+        
         return stop_loss, take_profit, position_size
+
 
 class ConfirmationEngine:
     def __init__(self, signal_engine: SignalEngine):
@@ -212,7 +248,6 @@ class ConfirmationEngine:
         # إذا كان هناك انفجار حجم، تخطي التأكيد
         if self.initial.volume_spike:
             logger.info(f"⚡ انفجار حجم مفاجئ لـ {self.initial.symbol}، تخطي التأكيد")
-            # نعيد التحليل فوراً للحصول على أحدث البيانات
             from utils import fetch_klines, fetch_24hr_stats
             data_5m = await fetch_klines(session, self.initial.symbol, '5m', 100)
             data_1h = await fetch_klines(session, self.initial.symbol, '1h', 30)
