@@ -1,4 +1,4 @@
-# config.py - الإعدادات العامة (بدون توكن ثابت)
+# config.py - الإعدادات العامة
 import os
 
 class Config:
@@ -22,15 +22,15 @@ class Config:
     COOLDOWN_MINUTES = 45
     MIN_VOLUME_USD = 200_000
     MIN_VOLATILITY_DAILY = 0.3
-    SIGNAL_SCORE_THRESHOLD = 4.0
+    SIGNAL_SCORE_THRESHOLD = 3.5           # خفضت لاكتشاف المزيد
     CONFIRMATION_SCORE_BONUS = 0.5
     CONFIRMATION_WAIT_CANDLES = 2
     RISK_PER_TRADE = 0.01
     MAX_POSITION_SIZE_PCT = 2.0
-    MIN_CHANGE_1H = 0.3
+    MIN_CHANGE_1H = 0.15                   # خفضت
     RSI_PERIOD = 6
     ADX_PERIOD = 14
-    MIN_ADX_STRONG = 20
+    MIN_ADX_STRONG = 15                    # خفضت
     DAILY_LOSS_LIMIT_PCT = 3.0
     PAPER_TRADING = True
     INITIAL_CAPITAL = 10000.0
