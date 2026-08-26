@@ -3,7 +3,7 @@
 
 """
 bot.py - الملف الرئيسي لتشغيل البوت
-الإصدار النهائي المستقر مع مراقبة المهام وإعادة التشغيل
+الإصدار النهائي المستقر مع محرك الانفجارات
 """
 
 import os
@@ -12,7 +12,7 @@ import asyncio
 import threading
 import logging
 import time
-import aiohttp  # 🔥 تأكد من وجود هذا الاستيراد
+import aiohttp  # تأكد من وجود هذا الاستيراد
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -36,7 +36,7 @@ app = Flask('')
 @app.route('/')
 @app.route('/healthcheck')
 def home():
-    return "✅ Elite Bot V5 - Stable"
+    return "✅ Elite Bot V6 - Explosion Hunter"
 
 def run_flask():
     app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
@@ -49,9 +49,8 @@ shutdown_event = asyncio.Event()
 
 # -------------------- دوال المسح --------------------
 async def market_scanner_loop():
-    """حلقة المسح الرئيسية - مع إعادة تشغيل تلقائي عند الفشل"""
     global dynamic_watch_list, last_dynamic_update
-    logger.info("🚀 بدء الماسح المحسن...")
+    logger.info("🚀 بدء الماسح المحسن (محرك الانفجارات)...")
     semaphore = asyncio.Semaphore(config.SEMAPHORE_LIMIT)
     
     while not shutdown_event.is_set():
@@ -94,7 +93,6 @@ async def market_scanner_loop():
             await asyncio.sleep(10)
 
 async def process_single_symbol(session, symbol, semaphore, send_session):
-    """معالجة عملة واحدة: تحليل، تأكيد، إرسال"""
     async with semaphore:
         try:
             cooldown = await db.get_cooldown(symbol)
@@ -117,7 +115,12 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             if not result['is_actionable']:
                 return None
 
-            if "شراء" in result['signal'] or "بيع" in result['signal']:
+            if result.get('volume_spike', False):
+                # إشارة فورية بدون تأكيد إذا كان هناك انفجار حجم
+                await send_confirmed_signal(send_session, result, engine)
+                await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
+                logger.info(f"⚡ إشارة انفجار حجم فورية لـ {symbol}: {result['signal']}")
+            elif "شراء" in result['signal'] or "بيع" in result['signal']:
                 conf_engine = ConfirmationEngine(engine)
                 confirmed = await conf_engine.wait_and_confirm(session)
                 if confirmed:
@@ -193,7 +196,6 @@ async def send_watch_signal(session, signal):
 
 # -------------------- دوال إدارة البوت --------------------
 async def post_init(application):
-    """تهيئة البوت بعد بدء التطبيق"""
     global background_tasks
     await db.init()
 
@@ -203,19 +205,16 @@ async def post_init(application):
     await asyncio.sleep(5)
     logger.info("⏳ انتظار 5 ثوانٍ لتجنب التعارض")
 
-    # تشغيل المهام الخلفية مع مراقبتها
     scanner_task = asyncio.create_task(market_scanner_loop(), name="scanner")
     pinger_task = asyncio.create_task(self_pinger(), name="pinger")
     background_tasks = [scanner_task, pinger_task]
 
-    # مراقبة المهام الخلفية وإعادة تشغيلها إذا لزم الأمر
     asyncio.create_task(monitor_tasks())
 
     logger.info("✅ Scanner started")
     logger.info("✅ Self-Pinger started")
 
 async def monitor_tasks():
-    """مراقبة المهام الخلفية وإعادة تشغيلها إذا توقفت"""
     while not shutdown_event.is_set():
         for i, task in enumerate(background_tasks):
             if task.done():
@@ -226,7 +225,6 @@ async def monitor_tasks():
                     else:
                         logger.warning(f"⚠️ المهمة {task.get_name()} انتهت بشكل غير متوقع")
                     
-                    # إعادة تشغيل المهمة
                     if task.get_name() == "scanner":
                         new_task = asyncio.create_task(market_scanner_loop(), name="scanner")
                     else:
@@ -238,7 +236,6 @@ async def monitor_tasks():
         await asyncio.sleep(30)
 
 async def shutdown():
-    """إيقاف نظيف للمهام الخلفية"""
     logger.info("🛑 جارٍ إيقاف المهام الخلفية...")
     shutdown_event.set()
     for task in background_tasks:
@@ -274,7 +271,6 @@ def main():
 
     logger.info("✅ Starting Telegram Bot with Polling...")
     try:
-        # 🔥 منع الإنهاء المبكر مع stop_signals=None
         application.run_polling(
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
