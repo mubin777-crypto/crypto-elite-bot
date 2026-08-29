@@ -3,7 +3,7 @@
 
 """
 bot.py - الملف الرئيسي لتشغيل البوت
-الإصدار النهائي المستقر مع إصلاح إدارة المخاطر للبيع (Short)
+الإصدار النهائي مع نظام المراقبة الاستباقية
 """
 
 import os
@@ -19,27 +19,28 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 from config import config
 from database import db
-from utils import self_pinger, fetch_top_symbols, fetch_klines, fetch_24hr_stats, fetch_news, symbol_to_currency_name
+from utils import (
+    self_pinger, fetch_top_symbols, fetch_klines, fetch_24hr_stats,
+    fetch_news, symbol_to_currency_name, scan_market_for_opportunities,
+    analyze_pre_watch_candidate
+)
 from telegram_bot import handlers
 from signals import SignalEngine, ConfirmationEngine
 
-# -------------------- إعدادات التسجيل --------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# -------------------- Flask للتشغيل الصحي --------------------
 app = Flask('')
 
 @app.route('/')
 @app.route('/healthcheck')
 def home():
-    return "✅ Elite Bot V6 - Explosion Hunter (Fixed)"
+    return "✅ Elite Bot V7 - Pre-Watch Engine Active"
 
 def run_flask():
-    """تشغيل Flask في خيط منفصل لـ health check"""
     app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
 
 # -------------------- متغيرات عامة --------------------
@@ -47,12 +48,13 @@ dynamic_watch_list = []
 last_dynamic_update = 0
 background_tasks = []
 shutdown_event = asyncio.Event()
+pre_watch_cache = {}  # تخزين مؤقت للعملات المراقبة
 
-# -------------------- دوال المسح --------------------
+# -------------------- حلقة المسح الرئيسية --------------------
 async def market_scanner_loop():
-    """حلقة المسح الرئيسية - تفحص العملات وترسل الإشارات"""
+    """حلقة المسح الرئيسية مع المراقبة الاستباقية"""
     global dynamic_watch_list, last_dynamic_update
-    logger.info("🚀 بدء الماسح المحسن (محرك الانفجارات)...")
+    logger.info("🚀 بدء الماسح المحسن (مع المراقبة الاستباقية)...")
     semaphore = asyncio.Semaphore(config.SEMAPHORE_LIMIT)
     
     while not shutdown_event.is_set():
@@ -61,7 +63,7 @@ async def market_scanner_loop():
                 async with aiohttp.ClientSession() as send_session:
                     while not shutdown_event.is_set():
                         try:
-                            # تحديث القائمة الديناميكية كل 30 دقيقة
+                            # 1. تحديث القائمة الديناميكية
                             if time.time() - last_dynamic_update > config.DYNAMIC_UPDATE_INTERVAL:
                                 new_symbols = await fetch_top_symbols(session, config.DYNAMIC_SYMBOLS_LIMIT)
                                 if new_symbols:
@@ -69,6 +71,11 @@ async def market_scanner_loop():
                                     last_dynamic_update = time.time()
                                     logger.info(f"🔥 تحديث القائمة الديناميكية: {len(dynamic_watch_list)} عملة")
 
+                            # 2. المراقبة الاستباقية (جديدة)
+                            if config.PRE_WATCH_ENABLED:
+                                await pre_watch_scanner(session, send_session)
+
+                            # 3. المسح الأساسي
                             all_symbols = list(set(config.CORE_UNIVERSE + dynamic_watch_list))
                             logger.info(f"🔄 فحص {len(all_symbols)} عملة ...")
 
@@ -95,8 +102,76 @@ async def market_scanner_loop():
             logger.error(f"💥 فشل الماسح بشكل جسيم: {e}, إعادة التشغيل بعد 10 ثوانٍ...")
             await asyncio.sleep(10)
 
+# -------------------- المراقبة الاستباقية --------------------
+async def pre_watch_scanner(session, send_session):
+    """مسح السوق لاكتشاف الفرص الجديدة"""
+    global pre_watch_cache
+    try:
+        logger.info("🔭 بدء المسح الاستباقي...")
+        opportunities = await scan_market_for_opportunities(session)
+        
+        # التحقق من كل فرصة
+        for opp in opportunities[:config.PRE_WATCH_MAX_SYMBOLS]:
+            symbol = opp["symbol"]
+            
+            # التحقق من عدم وجودها بالفعل في المراقبة
+            pre_watch = await db.get_pre_watch(limit=100)
+            existing = [p["symbol"] for p in pre_watch]
+            if symbol in existing:
+                continue
+            
+            # تحليل عميق
+            analysis = await analyze_pre_watch_candidate(session, opp)
+            if not analysis:
+                continue
+            
+            # حفظ في قاعدة البيانات
+            await db.add_to_pre_watch(
+                symbol,
+                analysis["score"],
+                analysis["volume_24h"],
+                analysis["change_24h"],
+                analysis["market_cap"],
+                ", ".join(analysis["reasons"][:3])
+            )
+            
+            # إرسال تنبيه إذا كانت النقاط عالية
+            if analysis["score"] >= config.PRE_WATCH_ALERT_THRESHOLD:
+                await send_pre_watch_alert(send_session, analysis)
+                await db.mark_pre_watch_alert_sent(symbol)
+            
+            logger.info(f"🔭 تمت إضافة {symbol} إلى المراقبة (نقاط: {analysis['score']})")
+        
+        # تنظيف العملات القديمة
+        await db.clean_expired_pre_watch(48)
+        
+    except Exception as e:
+        logger.error(f"خطأ في المراقبة الاستباقية: {e}")
+
+async def send_pre_watch_alert(session, analysis):
+    """إرسال تنبيه مراقبة استباقية"""
+    symbol = analysis["symbol"]
+    score = analysis["score"]
+    change = analysis["change_24h"]
+    volume = analysis["volume_24h"] / 1_000_000
+    reasons = analysis["reasons"]
+    
+    msg = (
+        f"🔭 *تنبيه مراقبة استباقي!*\n\n"
+        f"📊 العملة: `{symbol}`\n"
+        f"🎯 نقاط الثقة: `{score}/100`\n"
+        f"📈 التغير 24h: `{change:+.1f}%`\n"
+        f"📊 الحجم 24h: `${volume:.1f}M`\n"
+        f"📝 الأسباب: {', '.join(reasons[:3])}\n\n"
+        f"⚠️ هذه العملة تظهر علامات انفجار مبكر.\n"
+        f"🔄 سيتم مراقبتها تلقائياً حتى تأكيد الإشارة."
+    )
+    
+    from utils import send_to_all_subscribers
+    await send_to_all_subscribers(session, msg)
+
+# -------------------- معالجة العملات الفردية --------------------
 async def process_single_symbol(session, symbol, semaphore, send_session):
-    """معالجة عملة واحدة: تحليل، تأكيد، إرسال"""
     async with semaphore:
         try:
             # التحقق من التبريد
@@ -119,58 +194,48 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             engine = SignalEngine(symbol, data_5m, data_1h, data_4h, stats)
             result = await engine.evaluate()
 
-            if not result['is_actionable']:
+            if not result['is_actionable'] and not result['is_explosion']:
                 return None
 
-            # 🔥 حساب المخاطر بناءً على نوع الإشارة (BUY/SELL)
             action = result.get('action', 'NEUTRAL')
-            if action == "NEUTRAL":
+            if action == "NEUTRAL" and not result['is_explosion']:
                 return None
 
             stop_loss, take_profit, pos_size = engine.calculate_risk(
-                result['price'], 
-                action, 
-                stop_loss=None
+                result['price'], action, stop_loss=None
             )
 
-            # التحقق من صحة SL و TP
             if stop_loss == 0 or take_profit == 0:
                 logger.warning(f"⚠️ SL أو TP صفر لـ {symbol}")
                 return None
 
-            # إضافة المعلومات إلى result
             result['stop_loss'] = stop_loss
             result['take_profit'] = take_profit
             result['position_size'] = pos_size
 
-            # إذا كان هناك انفجار حجم، أرسل فوراً
-            if result.get('volume_spike', False):
+            # إشارة انفجار فورية
+            if result.get('is_explosion', False):
                 await send_confirmed_signal(send_session, result)
                 await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
-                logger.info(f"⚡ إشارة انفجار حجم فورية لـ {symbol}: {result['signal']}")
-            
-            # إذا كانت الإشارة شراء/بيع → ننتظر التأكيد
-            elif "شراء" in result['signal'] or "بيع" in result['signal']:
+                logger.info(f"⚡ إشارة انفجار فورية لـ {symbol}: {result['signal']}")
+                return result
+
+            # إشارة عادية مع تأكيد
+            if "شراء" in result['signal'] or "بيع" in result['signal']:
                 conf_engine = ConfirmationEngine(engine)
                 confirmed = await conf_engine.wait_and_confirm(session)
                 if confirmed:
-                    # إعادة حساب المخاطر للتأكيد
                     conf_action = confirmed.get('action', 'NEUTRAL')
                     if conf_action != "NEUTRAL":
                         sl, tp, ps = engine.calculate_risk(confirmed['price'], conf_action)
                         confirmed['stop_loss'] = sl
                         confirmed['take_profit'] = tp
                         confirmed['position_size'] = ps
-                        
-                        # التحقق من صحة SL و TP
                         if sl != 0 and tp != 0:
                             await send_confirmed_signal(send_session, confirmed)
                             await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
                             logger.info(f"✅ إشارة مؤكدة لـ {symbol}: {confirmed['signal']}")
-                        else:
-                            logger.warning(f"⚠️ SL أو TP صفر بعد التأكيد لـ {symbol}")
             else:
-                # إشارة مراقبة
                 await send_watch_signal(send_session, result)
                 logger.info(f"👀 إشارة مراقبة لـ {symbol}")
 
@@ -179,15 +244,10 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
 
 # -------------------- دوال إرسال الرسائل --------------------
 async def send_message_async(session, chat_id, message):
-    """إرسال رسالة إلى تليجرام مع إعادة محاولة"""
     url = f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendMessage"
     for attempt in range(3):
         try:
-            async with session.post(
-                url,
-                json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
-                timeout=5
-            ) as resp:
+            async with session.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=5) as resp:
                 if resp.status == 200:
                     return
                 elif resp.status == 429:
@@ -201,7 +261,6 @@ async def send_message_async(session, chat_id, message):
             await asyncio.sleep(2 ** attempt)
 
 async def send_to_all_subscribers(session, message):
-    """إرسال رسالة لجميع المشتركين"""
     subscribers = await db.get_subscribers()
     if not subscribers:
         return
@@ -209,7 +268,6 @@ async def send_to_all_subscribers(session, message):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 async def send_confirmed_signal(session, signal):
-    """بناء وإرسال إشارة مؤكدة مع إدارة مخاطر صحيحة"""
     news = await fetch_news(session, signal['symbol'])
     news_text = f"\n📰 أخبار: {news['title']}" if news else ""
 
@@ -218,12 +276,10 @@ async def send_confirmed_signal(session, signal):
     take_profit = signal.get('take_profit', 0)
     pos_size = signal.get('position_size', 0.02)
 
-    # التحقق النهائي من صحة SL/TP
     if stop_loss == 0 or take_profit == 0:
         logger.error(f"❌ SL أو TP صفر لـ {signal['symbol']}")
         return
 
-    # التحقق من منطقية SL/TP حسب نوع الإشارة
     action = signal.get('action', 'NEUTRAL')
     if action == 'BUY':
         if stop_loss >= entry or take_profit <= entry:
@@ -234,8 +290,10 @@ async def send_confirmed_signal(session, signal):
             logger.error(f"❌ SL/TP غير منطقي للبيع في {signal['symbol']}")
             return
 
+    explosion_tag = "⚡ *انفجار!* " if signal.get('is_explosion', False) else ""
+
     msg = (
-        f"🔥 *إشارة مؤكدة!*\n"
+        f"{explosion_tag}🔥 *إشارة مؤكدة!*\n"
         f"📊 {signal['symbol']} | النقاط: {signal['score']}/10\n"
         f"🔔 {signal['signal']}\n\n"
         f"💰 سعر الدخول: `{entry:.4f}`\n"
@@ -249,17 +307,9 @@ async def send_confirmed_signal(session, signal):
     await send_to_all_subscribers(session, msg)
 
     if config.PAPER_TRADING:
-        await db.save_paper_trade(
-            signal['symbol'], 
-            signal['signal'], 
-            entry, 
-            stop_loss, 
-            take_profit, 
-            pos_size
-        )
+        await db.save_paper_trade(signal['symbol'], signal['signal'], entry, stop_loss, take_profit, pos_size)
 
 async def send_watch_signal(session, signal):
-    """إرسال إشارة مراقبة (تنبيه أولي)"""
     msg = (
         f"👀 *مراقبة*: {signal['symbol']}\n"
         f"📊 النقاط: {signal['score']}/10\n"
@@ -272,31 +322,25 @@ async def send_watch_signal(session, signal):
 
 # -------------------- دوال إدارة البوت --------------------
 async def post_init(application):
-    """تهيئة البوت بعد بدء التطبيق"""
     global background_tasks
     await db.init()
 
-    # حذف webhook مع تجاهل التحديثات المعلقة لتجنب Conflict
     await application.bot.delete_webhook(drop_pending_updates=True)
     logger.info("✅ Webhook deleted (drop_pending_updates=True)")
 
-    # انتظار 5 ثوانٍ للسماح للعمليات السابقة بالإغلاق
     await asyncio.sleep(5)
     logger.info("⏳ انتظار 5 ثوانٍ لتجنب التعارض")
 
-    # تشغيل المهام الخلفية مع مراقبتها
     scanner_task = asyncio.create_task(market_scanner_loop(), name="scanner")
     pinger_task = asyncio.create_task(self_pinger(), name="pinger")
     background_tasks = [scanner_task, pinger_task]
 
-    # مراقبة المهام الخلفية وإعادة تشغيلها إذا لزم الأمر
     asyncio.create_task(monitor_tasks())
 
     logger.info("✅ Scanner started")
     logger.info("✅ Self-Pinger started")
 
 async def monitor_tasks():
-    """مراقبة المهام الخلفية وإعادة تشغيلها إذا توقفت"""
     while not shutdown_event.is_set():
         for i, task in enumerate(background_tasks):
             if task.done():
@@ -307,7 +351,6 @@ async def monitor_tasks():
                     else:
                         logger.warning(f"⚠️ المهمة {task.get_name()} انتهت بشكل غير متوقع")
                     
-                    # إعادة تشغيل المهمة
                     if task.get_name() == "scanner":
                         new_task = asyncio.create_task(market_scanner_loop(), name="scanner")
                     else:
@@ -319,7 +362,6 @@ async def monitor_tasks():
         await asyncio.sleep(30)
 
 async def shutdown():
-    """إيقاف نظيف للمهام الخلفية"""
     logger.info("🛑 جارٍ إيقاف المهام الخلفية...")
     shutdown_event.set()
     for task in background_tasks:
@@ -336,31 +378,28 @@ async def shutdown():
     logger.info("✅ تم إيقاف جميع المهام")
 
 def main():
-    """الدالة الرئيسية لتشغيل البوت"""
-    # التحقق من وجود التوكن
     if not config.TELEGRAM_TOKEN:
         logger.error("❌ TELEGRAM_TOKEN غير موجود! يرجى تعيينه في متغيرات البيئة.")
         sys.exit(1)
 
-    # تشغيل Flask في خيط منفصل
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask Server Started")
 
-    # بناء تطبيق التليجرام
     application = Application.builder().token(config.TELEGRAM_TOKEN).post_init(post_init).build()
 
-    # إضافة معالجات الأوامر
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("approve", handlers.approve))
+    application.add_handler(CommandHandler("add", handlers.add_user))
     application.add_handler(CommandHandler("adduser", handlers.adduser))
+    application.add_handler(CommandHandler("removeuser", handlers.removeuser))
     application.add_handler(CommandHandler("status", handlers.status))
+    application.add_handler(CommandHandler("prewatch", handlers.prewatch))  # جديد
     application.add_handler(CommandHandler("performance", handlers.performance))
     application.add_handler(CommandHandler("signal", handlers.signal_now))
 
     logger.info("✅ Starting Telegram Bot with Polling...")
     try:
-        # منع الإنهاء المبكر مع stop_signals=None
         application.run_polling(
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
@@ -369,7 +408,6 @@ def main():
     except Exception as e:
         logger.error(f"💥 فشل التشغيل: {e}")
     finally:
-        # إيقاف نظيف عند الخروج مع معالجة الأخطاء
         try:
             asyncio.run(shutdown())
         except RuntimeError as e:
@@ -377,8 +415,6 @@ def main():
                 logger.info("ℹ️ تم إيقاف الحلقة بالفعل")
             else:
                 logger.error(f"خطأ في الإيقاف: {e}")
-        except Exception as e:
-            logger.error(f"خطأ غير متوقع أثناء الإيقاف: {e}")
 
 if __name__ == "__main__":
     try:
