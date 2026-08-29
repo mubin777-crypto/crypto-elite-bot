@@ -1,14 +1,15 @@
-# config.py - الإعدادات العامة مع إضافات المراقبة الاستباقية
+# config.py - تعديل مسار قاعدة البيانات
 import os
 
 class Config:
     # -------------------- متغيرات البيئة --------------------
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
-    DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///data/crypto_bot.db")
+    
+    # 🔥 التعديل: استخدام مسار افتراضي آمن (في المجلد الحالي)
+    DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///crypto_bot.db")
     PORT = int(os.environ.get("PORT", 10000))
     RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "localhost")
-
     # -------------------- مصادر البيانات --------------------
     BINANCE_US_BASE = "https://api.binance.us"
     BINANCE_COM_BASE = "https://api.binance.com"
