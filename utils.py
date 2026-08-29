@@ -1,8 +1,11 @@
-# utils.py - دوال مساعدة مع المراقبة الاستباقية
+# utils.py - دوال مساعدة مع دعم ccxt
 import asyncio
 import aiohttp
 import logging
 import time
+import ccxt
+import pandas as pd
+import numpy as np
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
@@ -10,7 +13,86 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
-# -------------------- دوال جلب البيانات --------------------
+# -------------------- دوال ccxt المحسنة --------------------
+def calculate_rsi_series(series, period=6):
+    """حساب RSI باستخدام pandas"""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+async def fetch_klines_ccxt(symbol: str, timeframe: str = '1h', limit: int = 50):
+    """جلب بيانات الشموع باستخدام ccxt"""
+    try:
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        })
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if len(ohlcv) < 10:
+            return None
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
+    except Exception as e:
+        logger.debug(f"ccxt error for {symbol}: {e}")
+        return None
+
+async def scan_market_ccxt(session, limit: int = 200):
+    """مسح السوق باستخدام ccxt (سريع)"""
+    try:
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        })
+        markets = exchange.load_markets()
+        symbols = [s for s in markets if s.endswith('/USDT') and 'UP/' not in s and 'DOWN/' not in s]
+        symbols = symbols[:limit]
+        
+        logger.info(f"🔍 فحص {len(symbols)} عملة باستخدام ccxt...")
+        candidates = []
+        
+        for symbol in symbols:
+            try:
+                df = await fetch_klines_ccxt(symbol, '1h', 50)
+                if df is None or len(df) < 30:
+                    continue
+                
+                df['vol_ma20'] = df['volume'].rolling(window=20).mean()
+                df['sma20'] = df['close'].rolling(window=20).mean()
+                df['std20'] = df['close'].rolling(window=20).std()
+                df['upper_band'] = df['sma20'] + (df['std20'] * 2)
+                df['rsi'] = calculate_rsi_series(df['close'], period=6)
+                
+                last = df.iloc[-1]
+                prev = df.iloc[-2]
+                
+                is_vol_spike = last['volume'] > (prev['vol_ma20'] * 2.5)
+                is_breakout = last['close'] >= last['upper_band']
+                is_rsi_momentum = 40 <= last['rsi'] <= 75 and last['rsi'] > prev['rsi']
+                
+                if is_vol_spike and is_breakout and is_rsi_momentum:
+                    candidates.append({
+                        'symbol': symbol.replace('/USDT', 'USDT'),
+                        'price': last['close'],
+                        'rsi': round(last['rsi'], 2),
+                        'volume_ratio': round(last['volume'] / prev['vol_ma20'], 2),
+                        'score': 80 + (last['rsi'] - 40) * 0.5
+                    })
+                    logger.info(f"✅ ccxt found: {symbol} | RSI: {last['rsi']:.1f} | Vol: {round(last['volume'] / prev['vol_ma20'], 2)}x")
+                    
+            except Exception as e:
+                logger.debug(f"Error processing {symbol}: {e}")
+                continue
+        
+        return candidates
+        
+    except Exception as e:
+        logger.error(f"ccxt scan error: {e}")
+        return []
+
+# -------------------- دوال جلب البيانات (الطريقة القديمة) --------------------
 async def fetch_binance_com_klines(session, symbol, interval='5m', limit=50):
     try:
         url = f"{config.BINANCE_COM_BASE}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -70,6 +152,24 @@ async def fetch_coinbase_klines(session, symbol, interval='5m', limit=50):
     return None
 
 async def fetch_klines(session, symbol, interval='5m', limit=50, retries=3):
+    # إذا كان ccxt مفعلاً، جربه أولاً
+    if config.USE_CCXT:
+        try:
+            tf_map = {'5m': '5m', '1h': '1h', '4h': '4h', '1m': '1m'}
+            ccxt_interval = tf_map.get(interval, '5m')
+            df = await fetch_klines_ccxt(symbol, ccxt_interval, limit)
+            if df is not None and len(df) > 10:
+                return {
+                    "prices": df['close'].tolist(),
+                    "highs": df['high'].tolist(),
+                    "lows": df['low'].tolist(),
+                    "volumes": df['volume'].tolist(),
+                    "opens": df['open'].tolist()
+                }
+        except Exception as e:
+            logger.debug(f"ccxt fetch failed for {symbol}: {e}")
+    
+    # fallback إلى الطريقة القديمة
     await asyncio.sleep(config.RATE_LIMIT_DELAY)
     for attempt in range(retries):
         data = await fetch_binance_com_klines(session, symbol, interval, limit)
@@ -86,6 +186,23 @@ async def fetch_klines(session, symbol, interval='5m', limit=50, retries=3):
     return None
 
 async def fetch_24hr_stats(session, symbol):
+    # استخدام ccxt إذا كان مفعلاً
+    if config.USE_CCXT:
+        try:
+            exchange = ccxt.binance({'enableRateLimit': True})
+            ticker = exchange.fetch_ticker(symbol)
+            return {
+                "volume": ticker.get('quoteVolume', 0),
+                "change_24h": ticker.get('percentage', 0),
+                "high": ticker.get('high', 0),
+                "low": ticker.get('low', 0),
+                "open": ticker.get('open', 0),
+                "last": ticker.get('last', 0)
+            }
+        except Exception as e:
+            logger.debug(f"ccxt ticker failed for {symbol}: {e}")
+    
+    # fallback
     try:
         url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr?symbol={symbol}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -143,6 +260,13 @@ async def fetch_24hr_stats(session, symbol):
 async def scan_market_for_opportunities(session):
     opportunities = []
     try:
+        # محاولة استخدام ccxt أولاً
+        if config.USE_CCXT:
+            ccxt_results = await scan_market_ccxt(session, config.CCXT_MAX_SYMBOLS)
+            if ccxt_results:
+                return ccxt_results
+        
+        # fallback إلى الطريقة القديمة
         url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with session.get(url, headers=headers, timeout=15) as resp:
@@ -286,6 +410,28 @@ async def analyze_pre_watch_candidate(session, candidate):
     }
 
 async def fetch_top_symbols(session, limit=100):
+    # استخدام ccxt إذا كان مفعلاً
+    if config.USE_CCXT:
+        try:
+            exchange = ccxt.binance({'enableRateLimit': True})
+            tickers = exchange.fetch_tickers()
+            candidates = []
+            for symbol, ticker in tickers.items():
+                if not symbol.endswith('/USDT'):
+                    continue
+                if 'UP/' in symbol or 'DOWN/' in symbol:
+                    continue
+                volume = ticker.get('quoteVolume', 0)
+                change = ticker.get('percentage', 0)
+                if volume < 100_000:
+                    continue
+                candidates.append((symbol.replace('/USDT', 'USDT'), volume, abs(change)))
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            return [sym for sym, _, _ in candidates[:limit]]
+        except Exception as e:
+            logger.error(f"ccxt top symbols error: {e}")
+    
+    # fallback
     try:
         url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
