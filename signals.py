@@ -1,4 +1,4 @@
-# signals.py - معدل بالكامل مع إصلاح إدارة المخاطر
+# signals.py - مع محرك الانفجار المبكر ونظام المراقبة الاستباقية
 import logging
 import asyncio
 from typing import Dict, List, Optional, Tuple
@@ -17,6 +17,7 @@ class SignalEngine:
         self.data_4h = data_4h
         self.stats = stats
         self.action = "NEUTRAL"
+        self.is_explosion = False
         self._analyze()
 
     def _analyze(self):
@@ -88,7 +89,7 @@ class SignalEngine:
             reasons.append("RSI متطرف")
         score *= weights.get('rsi', 1.0)
 
-        # الاتجاه (مع شرط ADX)
+        # الاتجاه
         if self.adx < 20:
             reasons.append(f"اتجاه ضعيف (ADX {self.adx:.1f})")
         elif self.trend_1d == 'bullish' and self.trend_4h == 'bullish':
@@ -137,7 +138,7 @@ class SignalEngine:
             reasons.append(f"حجم معتدل {self.volume_ratio:.1f}x")
         score *= weights.get('volume', 1.0)
 
-        # ADX (وزن إضافي)
+        # ADX
         if self.adx > 30:
             score += 1.0
             reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
@@ -155,9 +156,38 @@ class SignalEngine:
             score += 1.0
             reasons.append("📉 انضغاط سعري شديد - استعداد للانفجار")
 
+        # 🔥 محرك الانفجار المبكر
+        self.is_explosion = False
+        price_change = abs(self.change_1h)
+        volume_surge = self.volume_ratio > 2.0
+        high_volume = self.stats.get('volume', 0) > config.PRE_WATCH_MIN_VOLUME
+
+        if config.PRE_WATCH_ENABLED and (price_change > 1.5 and (volume_surge or high_volume)):
+            self.is_explosion = True
+            if price_change > 3.0:
+                score += 3.0
+                reasons.append(f"💥 انفجار سعري كبير ({self.change_1h:.1f}%)")
+            elif price_change > 2.0:
+                score += 2.0
+                reasons.append(f"🔥 انفجار سعري متوسط ({self.change_1h:.1f}%)")
+            else:
+                score += 1.0
+                reasons.append(f"📈 انفجار سعري خفيف ({self.change_1h:.1f}%)")
+
+            if volume_surge:
+                score += 1.0
+                reasons.append(f"📊 حجم مرتفع ({self.volume_ratio:.1f}x)")
+            elif high_volume:
+                score += 0.5
+                reasons.append(f"💰 حجم تداول كبير (${self.stats.get('volume', 0):,.0f})")
+
+            if self.rsi > 70:
+                score += 1.0
+                reasons.append("⚠️ RSI مرتفع - قد يكون انفجاراً مستمراً")
+
         final_score = round(min(score, 10.0), 1)
 
-        # تحديد الاتجاه والـ action
+        # تحديد الاتجاه
         if self.trend_1d == 'bullish' and self.trend_4h != 'bearish':
             self.action = "BUY"
         elif self.trend_1d == 'bearish' and self.trend_4h != 'bullish':
@@ -165,7 +195,7 @@ class SignalEngine:
         else:
             self.action = "NEUTRAL"
 
-        # تحديد نوع الإشارة بناءً على النقاط والاتجاه
+        # تحديد الإشارة
         if final_score >= 8.0 and self.action != "NEUTRAL":
             signal_type = "🟢 **شراء قوي**" if self.action == "BUY" else "🔴 **بيع قوي**"
         elif final_score >= 6.5 and self.action != "NEUTRAL":
@@ -175,13 +205,16 @@ class SignalEngine:
         else:
             signal_type = "⚪ **حيادي**"
 
-        # شروط صارمة للإشارات القابلة للتنفيذ
-        is_actionable = (
-            final_score >= config.SIGNAL_SCORE_THRESHOLD and 
-            self.action != "NEUTRAL" and
-            self.adx >= config.MIN_ADX_STRONG and
-            abs(self.change_1h) >= config.MIN_CHANGE_1H
-        )
+        if self.is_explosion:
+            actual_threshold = 4.0
+            is_actionable = final_score >= actual_threshold
+        else:
+            actual_threshold = config.SIGNAL_SCORE_THRESHOLD
+            is_actionable = (
+                final_score >= actual_threshold and
+                self.action != "NEUTRAL" and
+                self.adx >= config.MIN_ADX_STRONG
+            )
 
         return {
             "symbol": self.symbol,
@@ -202,31 +235,24 @@ class SignalEngine:
             "bb_width": round(bb_width, 2),
             "volume_spike": self.volume_spike,
             "low_volatility_compression": self.low_volatility_compression,
-            "action": self.action
+            "action": self.action,
+            "is_explosion": self.is_explosion
         }
 
     def calculate_risk(self, entry_price: float, action: str, stop_loss: float = None) -> Tuple[float, float, float]:
-        """
-        حساب وقف الخسارة، جني الأرباح، وحجم الصفقة
-        🔥 تم إصلاح منطق SL/TP للبيع (Short)
-        action: 'BUY' أو 'SELL'
-        """
         atr_stop = self.atr * 2 if self.atr > 0 else entry_price * 0.015
         min_stop = entry_price * 0.01
         min_tp = entry_price * 0.025
-        
+
         if action == 'BUY':
-            # الشراء: SL أسفل، TP أعلى
             if stop_loss is None:
                 stop_loss = entry_price - max(atr_stop, min_stop)
             take_profit = entry_price + max(atr_stop * 2, min_tp)
-        else:  # SELL
-            # 🔥 البيع: SL أعلى، TP أسفل (تم الإصلاح)
+        else:
             if stop_loss is None:
                 stop_loss = entry_price + max(atr_stop, min_stop)
             take_profit = entry_price - max(atr_stop * 2, min_tp)
-        
-        # حساب حجم الصفقة
+
         stop_distance = abs(entry_price - stop_loss) / entry_price
         if stop_distance == 0:
             position_size = 0.02
@@ -234,7 +260,7 @@ class SignalEngine:
             risk_amount = config.RISK_PER_TRADE
             position_fraction = risk_amount / stop_distance
             position_size = round(min(position_fraction, config.MAX_POSITION_SIZE_PCT / 100), 4)
-        
+
         return stop_loss, take_profit, position_size
 
 
@@ -245,9 +271,8 @@ class ConfirmationEngine:
         self.wait_candles = config.CONFIRMATION_WAIT_CANDLES
 
     async def wait_and_confirm(self, session):
-        # إذا كان هناك انفجار حجم، تخطي التأكيد
-        if self.initial.volume_spike:
-            logger.info(f"⚡ انفجار حجم مفاجئ لـ {self.initial.symbol}، تخطي التأكيد")
+        if self.initial.volume_spike or self.initial.is_explosion:
+            logger.info(f"⚡ انفجار لـ {self.initial.symbol}، تخطي التأكيد")
             from utils import fetch_klines, fetch_24hr_stats
             data_5m = await fetch_klines(session, self.initial.symbol, '5m', 100)
             data_1h = await fetch_klines(session, self.initial.symbol, '1h', 30)
@@ -257,15 +282,14 @@ class ConfirmationEngine:
                 return None
             new_engine = SignalEngine(self.initial.symbol, data_5m, data_1h, data_4h, stats)
             new_eval = await new_engine.evaluate()
-            if new_eval['is_actionable']:
+            if new_eval['is_actionable'] or new_eval['is_explosion']:
                 self.confirmed = new_eval
                 self.confirmed['signal'] = self.confirmed['signal'].replace("مراقبة", "تأكيد سريع")
                 return self.confirmed
             else:
-                logger.info(f"⚠️ انفجار حجم لـ {self.initial.symbol} لكن الإشارة غير قابلة للتنفيذ")
+                logger.info(f"⚠️ انفجار لـ {self.initial.symbol} لكن الإشارة غير قابلة للتنفيذ")
                 return None
 
-        # الانتظار العادي
         wait_seconds = 5 * 60 * self.wait_candles
         logger.info(f"⏳ انتظار {wait_seconds} ثانية لتأكيد إشارة {self.initial.symbol}")
         await asyncio.sleep(wait_seconds)
