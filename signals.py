@@ -1,4 +1,4 @@
-# signals.py - مع محرك الانفجار المبكر ونظام المراقبة الاستباقية
+# signals.py - مع دعم ADX وتحسينات الانفجار
 import logging
 import asyncio
 from typing import Dict, List, Optional, Tuple
@@ -138,13 +138,21 @@ class SignalEngine:
             reasons.append(f"حجم معتدل {self.volume_ratio:.1f}x")
         score *= weights.get('volume', 1.0)
 
-        # ADX
-        if self.adx > 30:
-            score += 1.0
-            reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
-        elif self.adx > 25:
-            score += 0.5
-            reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
+        # ADX (تم تعزيز الوزن)
+        if config.ENABLE_ADX_FILTER:
+            if self.adx > 30:
+                score += 1.5
+                reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
+            elif self.adx > 25:
+                score += 0.8
+                reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
+        else:
+            if self.adx > 30:
+                score += 1.0
+                reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
+            elif self.adx > 25:
+                score += 0.5
+                reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
 
         # بولينجر
         bb_width = (self.bb['upper'] - self.bb['lower']) / self.bb['middle'] * 100 if self.bb['middle'] > 0 else 0
@@ -205,16 +213,23 @@ class SignalEngine:
         else:
             signal_type = "⚪ **حيادي**"
 
+        # شروط الإشارة مع مراعاة الانفجار و ADX
         if self.is_explosion:
             actual_threshold = 4.0
             is_actionable = final_score >= actual_threshold
         else:
             actual_threshold = config.SIGNAL_SCORE_THRESHOLD
-            is_actionable = (
-                final_score >= actual_threshold and
-                self.action != "NEUTRAL" and
-                self.adx >= config.MIN_ADX_STRONG
-            )
+            if config.ENABLE_ADX_FILTER:
+                is_actionable = (
+                    final_score >= actual_threshold and
+                    self.action != "NEUTRAL" and
+                    self.adx >= config.MIN_ADX_STRONG
+                )
+            else:
+                is_actionable = (
+                    final_score >= actual_threshold and
+                    self.action != "NEUTRAL"
+                )
 
         return {
             "symbol": self.symbol,
