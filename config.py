@@ -1,15 +1,14 @@
-# config.py - تعديل مسار قاعدة البيانات
+# config.py - الإعدادات العامة مع دعم ccxt و ADX
 import os
 
 class Config:
     # -------------------- متغيرات البيئة --------------------
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
-    
-    # 🔥 التعديل: استخدام مسار افتراضي آمن (في المجلد الحالي)
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///crypto_bot.db")
     PORT = int(os.environ.get("PORT", 10000))
     RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "localhost")
+
     # -------------------- مصادر البيانات --------------------
     BINANCE_US_BASE = "https://api.binance.us"
     BINANCE_COM_BASE = "https://api.binance.com"
@@ -38,20 +37,30 @@ class Config:
     PAPER_TRADING = True
     INITIAL_CAPITAL = 10000.0
     MAX_OPEN_TRADES = 3
-    DYNAMIC_SYMBOLS_LIMIT = 100  # زيادة إلى 100
-    DYNAMIC_UPDATE_INTERVAL = 900  # 15 دقيقة
+    DYNAMIC_SYMBOLS_LIMIT = 100
+    DYNAMIC_UPDATE_INTERVAL = 900
     ADAPTIVE_THRESHOLD = True
 
-    # -------------------- إعدادات المراقبة الاستباقية (جديدة) --------------------
-    PRE_WATCH_ENABLED = True
-    PRE_WATCH_SCAN_INTERVAL = 300  # 5 دقائق
-    PRE_WATCH_MIN_VOLUME = 1_000_000  # 1M دولار
-    PRE_WATCH_MIN_CHANGE = 2.0  # 2% تغير
-    PRE_WATCH_MAX_SUPPLY = 1_000_000_000  # 1B دولار كحد أقصى للقيمة السوقية
-    PRE_WATCH_ALERT_THRESHOLD = 70  # نسبة الثقة % (من 100)
-    PRE_WATCH_MAX_SYMBOLS = 20  # أقصى عملات تحت المراقبة في نفس الوقت
+    # -------------------- إعدادات ccxt (جديد) --------------------
+    USE_CCXT = True                      # تفعيل استخدام ccxt
+    CCXT_EXCHANGE = "binance"            # أو "binanceus"
+    CCXT_RATE_LIMIT = 1200
+    CCXT_MAX_SYMBOLS = 200               # حد أقصى للعملات في كل مسح
 
-    # -------------------- قائمة العملات الأساسية (موسعة) --------------------
+    # -------------------- إعدادات ADX (جديد) --------------------
+    ENABLE_ADX_FILTER = True
+    MIN_ADX_STRONG = 25
+
+    # -------------------- إعدادات المراقبة الاستباقية --------------------
+    PRE_WATCH_ENABLED = True
+    PRE_WATCH_SCAN_INTERVAL = 300
+    PRE_WATCH_MIN_VOLUME = 1_000_000
+    PRE_WATCH_MIN_CHANGE = 2.0
+    PRE_WATCH_MAX_SUPPLY = 1_000_000_000
+    PRE_WATCH_ALERT_THRESHOLD = 70
+    PRE_WATCH_MAX_SYMBOLS = 20
+
+    # -------------------- قائمة العملات الأساسية --------------------
     CORE_UNIVERSE = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
         "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -64,7 +73,6 @@ class Config:
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
         "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT",
-        # إضافة عملات جديدة للانفجارات
         "HNTUSDT", "PONSUSDT", "GIGGLEUSDT", "MAGMAUSDT", "LIGHTUSDT", "EDENUSDT"
     ]
 
