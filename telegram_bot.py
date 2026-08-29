@@ -1,4 +1,4 @@
-# telegram_bot.py - أوامر التليجرام (مع إضافة /add)
+# telegram_bot.py - أوامر التليجرام (مع /prewatch و /add)
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -65,9 +65,8 @@ class TelegramHandlers:
             logger.error(f"❌ خطأ في /approve: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
 
-    # -------------------- الأمر الجديد /add (إضافة مباشرة) --------------------
+    # -------------------- الأمر /add (إضافة مباشرة) --------------------
     async def add_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """إضافة مستخدم مباشرة بدون انتظار (للمالك فقط)"""
         user_id = str(update.effective_user.id)
         logger.info(f"📩 أمر /add من {user_id}")
         try:
@@ -82,10 +81,8 @@ class TelegramHandlers:
                 target = arg.strip()
                 if not target.isdigit():
                     continue
-                # إضافة مباشرة دون انتظار
                 await self.db.add_subscriber(target)
                 added.append(target)
-                # إرسال رسالة ترحيب للمستخدم المضاف
                 try:
                     await context.bot.send_message(
                         chat_id=target,
@@ -103,13 +100,10 @@ class TelegramHandlers:
             logger.error(f"❌ خطأ في /add: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء إضافة المستخدمين.")
 
-    # -------------------- أوامر إدارة المستخدمين --------------------
     async def adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """إضافة مستخدم (قديم، نحتفظ به للتوافق)"""
         await self.add_user(update, context)
 
     async def removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """إزالة مستخدم (للمالك)"""
         user_id = str(update.effective_user.id)
         logger.info(f"📩 أمر /removeuser من {user_id}")
         try:
@@ -137,14 +131,16 @@ class TelegramHandlers:
         try:
             subscribers = await self.db.get_subscribers()
             pending = await self.db.get_pending()
+            pre_watch = await self.db.get_pre_watch()
             await update.message.reply_text(
                 f"📊 *حالة البوت المحسن*\n"
                 f"👥 المشتركين: {len(subscribers)}\n"
                 f"⏳ في الانتظار: {len(pending)}\n"
+                f"🔭 تحت المراقبة: {len(pre_watch)}\n"
                 f"💧 الحد الأدنى للسيولة: ${config.MIN_VOLUME_USD:,}\n"
                 f"📊 عتبة الإشارة: {config.SIGNAL_SCORE_THRESHOLD}/10\n"
                 f"⏱️ فترة التبريد: {config.COOLDOWN_MINUTES} دقيقة\n"
-                f"📡 البيانات: Binance.US → Coinbase → CoinCap\n"
+                f"📡 البيانات: Binance.com → Binance.US → Coinbase → CoinCap\n"
                 f"🧪 المحاكاة: {'مفعلة' if config.PAPER_TRADING else 'معطلة'}",
                 parse_mode="Markdown"
             )
@@ -182,6 +178,35 @@ class TelegramHandlers:
             logger.error(f"❌ خطأ في /performance: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء جلب بيانات الأداء.")
 
+    # -------------------- أمر /prewatch (جديد) --------------------
+    async def prewatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = str(update.effective_user.id)
+        logger.info(f"📩 أمر /prewatch من {user_id}")
+        try:
+            pre_watch = await self.db.get_pre_watch(limit=20)
+            if not pre_watch:
+                await update.message.reply_text("🔭 لا توجد عملات تحت المراقبة حالياً.")
+                return
+            msg = "🔭 *قائمة المراقبة الاستباقية*\n\n"
+            for i, item in enumerate(pre_watch, 1):
+                symbol = item['symbol']
+                score = item['score']
+                change = item['change_24h']
+                volume = item['volume_24h'] / 1_000_000
+                reason = item['reason'][:50] + "..." if len(item['reason']) > 50 else item['reason']
+                emoji = "📈" if change > 0 else "📉"
+                msg += (
+                    f"{i}. {emoji} *{symbol}*\n"
+                    f"   النقاط: {score:.0f}% | التغير: {change:+.1f}%\n"
+                    f"   الحجم: ${volume:.1f}M | السبب: {reason}\n\n"
+                )
+            msg += "🔄 *تحديث كل 5 دقائق* - هذه العملات قد تنفجر قريباً"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            logger.info(f"✅ تم الرد على /prewatch للمستخدم {user_id}")
+        except Exception as e:
+            logger.error(f"❌ خطأ في /prewatch: {e}")
+            await update.message.reply_text("⚠️ حدث خطأ أثناء جلب قائمة المراقبة.")
+
     async def signal_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         logger.info(f"📩 أمر /signal من {user_id}")
@@ -203,7 +228,6 @@ class TelegramHandlers:
                     return
                 engine = SignalEngine(sym, data_5m, data_1h, data_4h, stats)
                 result = await engine.evaluate()
-                # حساب المخاطر حسب نوع الإشارة
                 action = result.get('action', 'NEUTRAL')
                 if action == 'NEUTRAL':
                     stop_loss = take_profit = pos_size = 0
