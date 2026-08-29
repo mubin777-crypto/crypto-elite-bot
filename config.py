@@ -1,4 +1,4 @@
-# config.py - الإعدادات العامة مع العتبات المخفضة
+# config.py - عتبات منخفضة جداً للسوق الهادئ
 import os
 
 class Config:
@@ -15,26 +15,25 @@ class Config:
     COINBASE_BASE = "https://api.exchange.coinbase.com"
     COINCAP_BASE = "https://api.coincap.io/v2"
     CRYPTOPANIC_BASE = "https://cryptopanic.com/api/v1"
-    COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
-    # -------------------- إعدادات البوت الأساسية --------------------
+    # -------------------- إعدادات البوت (عتبات منخفضة) --------------------
     DB_PATH = DATABASE_URL.replace("sqlite:///", "")
     RATE_LIMIT_DELAY = 0.1
     SEMAPHORE_LIMIT = 5
     COOLDOWN_MINUTES = 45
-    MIN_VOLUME_USD = 200_000
-    MIN_VOLATILITY_DAILY = 0.3
+    MIN_VOLUME_USD = 100_000
+    MIN_VOLATILITY_DAILY = 0.1
 
-    # 🔥 العتبات المخفضة (بعد التعديل)
-    SIGNAL_SCORE_THRESHOLD = 6.0          # كانت 6.5 (خفضت)
+    # 🔥 عتبات منخفضة جداً للسوق الهادئ
+    SIGNAL_SCORE_THRESHOLD = 4.5        # كانت 6.0
     CONFIRMATION_SCORE_BONUS = 0.5
-    CONFIRMATION_WAIT_CANDLES = 2
+    CONFIRMATION_WAIT_CANDLES = 1       # 5 دقائق فقط
     RISK_PER_TRADE = 0.01
     MAX_POSITION_SIZE_PCT = 2.0
-    MIN_CHANGE_1H = 0.15                  # كانت 0.25 (خفضت)
+    MIN_CHANGE_1H = 0.05                # كانت 0.15
     RSI_PERIOD = 6
     ADX_PERIOD = 14
-    MIN_ADX_STRONG = 15                   # كانت 25 (خفضت)
+    MIN_ADX_STRONG = 8                  # كانت 15
     DAILY_LOSS_LIMIT_PCT = 3.0
     PAPER_TRADING = True
     INITIAL_CAPITAL = 10000.0
@@ -43,47 +42,43 @@ class Config:
     DYNAMIC_UPDATE_INTERVAL = 900
     ADAPTIVE_THRESHOLD = True
 
-    # -------------------- إعدادات ccxt --------------------
-    USE_CCXT = True
+    # -------------------- ccxt (معطل مؤقتاً) --------------------
+    USE_CCXT = False                    # تعطيل ccxt حتى يثبت عمله
     CCXT_EXCHANGE = "binance"
     CCXT_RATE_LIMIT = 1200
     CCXT_MAX_SYMBOLS = 200
 
-    # -------------------- إعدادات ADX --------------------
+    # -------------------- ADX --------------------
     ENABLE_ADX_FILTER = True
-    MIN_ADX_STRONG = 15                   # كانت 25 (خفضت)
+    MIN_ADX_STRONG = 8                  # كانت 15
 
-    # -------------------- إعدادات المراقبة الاستباقية (مخفضة) --------------------
+    # -------------------- المراقبة الاستباقية (منخفضة) --------------------
     PRE_WATCH_ENABLED = True
     PRE_WATCH_SCAN_INTERVAL = 300
-    PRE_WATCH_MIN_VOLUME = 300_000        # كانت 1_000_000 (خفضت)
-    PRE_WATCH_MIN_CHANGE = 1.0            # كانت 2.0 (خفضت)
+    PRE_WATCH_MIN_VOLUME = 100_000      # كانت 300_000
+    PRE_WATCH_MIN_CHANGE = 0.5          # كانت 1.0
     PRE_WATCH_MAX_SUPPLY = 1_000_000_000
-    PRE_WATCH_ALERT_THRESHOLD = 70
+    PRE_WATCH_ALERT_THRESHOLD = 60      # كانت 70
     PRE_WATCH_MAX_SYMBOLS = 20
 
     # -------------------- قائمة العملات الأساسية --------------------
     CORE_UNIVERSE = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
-        "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
-        "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ICPUSDT", "ETCUSDT", "XTZUSDT",
-        "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
-        "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
-        "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT",  # "CROUSDT" محذوف (غير مدرج)
-        "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
-        "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
-        "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT",
-        "HNTUSDT", "PONSUSDT", "GIGGLEUSDT", "MAGMAUSDT", "LIGHTUSDT", "EDENUSDT"
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+        "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
+        "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ETCUSDT",
+        "XLMUSDT", "VETUSDT", "TRXUSDT", "AAVEUSDT", "MKRUSDT",
+        "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT",
+        "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "COMPUSDT",
+        "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT",
+        "IMXUSDT", "INJUSDT", "LDOUSDT",
+        "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
     ]
 
-    # -------------------- الأطر الزمنية --------------------
     TIMEFRAMES = {
         "5m": {"limit": 100, "weight": 1.0},
         "1h": {"limit": 30, "weight": 1.5},
         "4h": {"limit": 20, "weight": 2.0},
-        "1d": {"limit": 10, "weight": 2.5}
     }
 
 config = Config()
