@@ -1,23 +1,24 @@
-# config.py - الإعدادات العامة (مع متغير البيئة DATABASE_URL)
+# config.py - الإعدادات العامة مع إضافات المراقبة الاستباقية
 import os
 
 class Config:
     # -------------------- متغيرات البيئة --------------------
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
-    # 🔥 استخدام متغير البيئة DATABASE_URL مع قيمة افتراضية
-    DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///crypto_bot.db")
+    DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///data/crypto_bot.db")
     PORT = int(os.environ.get("PORT", 10000))
     RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "localhost")
 
     # -------------------- مصادر البيانات --------------------
     BINANCE_US_BASE = "https://api.binance.us"
+    BINANCE_COM_BASE = "https://api.binance.com"
     COINBASE_BASE = "https://api.exchange.coinbase.com"
     COINCAP_BASE = "https://api.coincap.io/v2"
     CRYPTOPANIC_BASE = "https://cryptopanic.com/api/v1"
+    COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
     # -------------------- إعدادات البوت الأساسية --------------------
-    DB_PATH = DATABASE_URL.replace("sqlite:///", "")  # استخراج المسار
+    DB_PATH = DATABASE_URL.replace("sqlite:///", "")
     RATE_LIMIT_DELAY = 0.1
     SEMAPHORE_LIMIT = 5
     COOLDOWN_MINUTES = 45
@@ -36,13 +37,22 @@ class Config:
     PAPER_TRADING = True
     INITIAL_CAPITAL = 10000.0
     MAX_OPEN_TRADES = 3
-    DYNAMIC_SYMBOLS_LIMIT = 70
-    DYNAMIC_UPDATE_INTERVAL = 1800
+    DYNAMIC_SYMBOLS_LIMIT = 100  # زيادة إلى 100
+    DYNAMIC_UPDATE_INTERVAL = 900  # 15 دقيقة
     ADAPTIVE_THRESHOLD = True
 
-    # -------------------- قائمة العملات الأساسية --------------------
+    # -------------------- إعدادات المراقبة الاستباقية (جديدة) --------------------
+    PRE_WATCH_ENABLED = True
+    PRE_WATCH_SCAN_INTERVAL = 300  # 5 دقائق
+    PRE_WATCH_MIN_VOLUME = 1_000_000  # 1M دولار
+    PRE_WATCH_MIN_CHANGE = 2.0  # 2% تغير
+    PRE_WATCH_MAX_SUPPLY = 1_000_000_000  # 1B دولار كحد أقصى للقيمة السوقية
+    PRE_WATCH_ALERT_THRESHOLD = 70  # نسبة الثقة % (من 100)
+    PRE_WATCH_MAX_SYMBOLS = 20  # أقصى عملات تحت المراقبة في نفس الوقت
+
+    # -------------------- قائمة العملات الأساسية (موسعة) --------------------
     CORE_UNIVERSE = [
-        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
         "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
         "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ICPUSDT", "ETCUSDT", "XTZUSDT",
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
@@ -52,7 +62,9 @@ class Config:
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
+        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT",
+        # إضافة عملات جديدة للانفجارات
+        "HNTUSDT", "PONSUSDT", "GIGGLEUSDT", "MAGMAUSDT", "LIGHTUSDT", "EDENUSDT"
     ]
 
     # -------------------- الأطر الزمنية --------------------
