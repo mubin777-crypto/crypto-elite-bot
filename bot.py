@@ -3,7 +3,7 @@
 
 """
 bot.py - الملف الرئيسي لتشغيل البوت
-الإصدار النهائي مع المراقبة الاستباقية ومحرك الانفجار
+الإصدار النهائي V8 مع دعم ccxt و ADX
 """
 
 import os
@@ -22,7 +22,7 @@ from database import db
 from utils import (
     self_pinger, fetch_top_symbols, fetch_klines, fetch_24hr_stats,
     fetch_news, symbol_to_currency_name, scan_market_for_opportunities,
-    analyze_pre_watch_candidate
+    analyze_pre_watch_candidate, scan_market_ccxt
 )
 from telegram_bot import handlers
 from signals import SignalEngine, ConfirmationEngine
@@ -38,7 +38,7 @@ app = Flask('')
 @app.route('/')
 @app.route('/healthcheck')
 def home():
-    return "✅ Elite Bot V7 - Pre-Watch Engine Active"
+    return "✅ Elite Bot V8 - ccxt + ADX + PreWatch"
 
 def run_flask():
     app.run(host='0.0.0.0', port=config.PORT, debug=False, use_reloader=False)
@@ -48,12 +48,11 @@ dynamic_watch_list = []
 last_dynamic_update = 0
 background_tasks = []
 shutdown_event = asyncio.Event()
-pre_watch_cache = {}
 
 # -------------------- حلقة المسح الرئيسية --------------------
 async def market_scanner_loop():
     global dynamic_watch_list, last_dynamic_update
-    logger.info("🚀 بدء الماسح المحسن (مع المراقبة الاستباقية)...")
+    logger.info("🚀 بدء الماسح المحسن (مع ccxt و ADX)...")
     semaphore = asyncio.Semaphore(config.SEMAPHORE_LIMIT)
     
     while not shutdown_event.is_set():
@@ -62,6 +61,28 @@ async def market_scanner_loop():
                 async with aiohttp.ClientSession() as send_session:
                     while not shutdown_event.is_set():
                         try:
+                            # 1. المسح السريع باستخدام ccxt
+                            if config.USE_CCXT:
+                                try:
+                                    logger.info("🔍 بدء المسح السريع باستخدام ccxt...")
+                                    ccxt_results = await scan_market_ccxt(session, config.CCXT_MAX_SYMBOLS)
+                                    if ccxt_results:
+                                        for result in ccxt_results[:10]:
+                                            symbol = result['symbol']
+                                            if result['score'] > 70:
+                                                await db.add_to_pre_watch(
+                                                    symbol,
+                                                    result['score'],
+                                                    result.get('volume', 0),
+                                                    result.get('change_24h', 0),
+                                                    0,
+                                                    f"ccxt: RSI {result['rsi']}, Vol {result['volume_ratio']}x"
+                                                )
+                                                logger.info(f"🔭 ccxt added {symbol} to pre-watch (score: {result['score']})")
+                                except Exception as e:
+                                    logger.error(f"ccxt scan error: {e}")
+
+                            # 2. تحديث القائمة الديناميكية
                             if time.time() - last_dynamic_update > config.DYNAMIC_UPDATE_INTERVAL:
                                 new_symbols = await fetch_top_symbols(session, config.DYNAMIC_SYMBOLS_LIMIT)
                                 if new_symbols:
@@ -69,9 +90,11 @@ async def market_scanner_loop():
                                     last_dynamic_update = time.time()
                                     logger.info(f"🔥 تحديث القائمة الديناميكية: {len(dynamic_watch_list)} عملة")
 
+                            # 3. المراقبة الاستباقية
                             if config.PRE_WATCH_ENABLED:
                                 await pre_watch_scanner(session, send_session)
 
+                            # 4. المسح الأساسي
                             all_symbols = list(set(config.CORE_UNIVERSE + dynamic_watch_list))
                             logger.info(f"🔄 فحص {len(all_symbols)} عملة ...")
 
