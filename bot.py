@@ -3,7 +3,7 @@
 
 """
 bot.py - الملف الرئيسي لتشغيل البوت
-الإصدار النهائي مع نظام المراقبة الاستباقية
+الإصدار النهائي مع المراقبة الاستباقية ومحرك الانفجار
 """
 
 import os
@@ -48,11 +48,10 @@ dynamic_watch_list = []
 last_dynamic_update = 0
 background_tasks = []
 shutdown_event = asyncio.Event()
-pre_watch_cache = {}  # تخزين مؤقت للعملات المراقبة
+pre_watch_cache = {}
 
 # -------------------- حلقة المسح الرئيسية --------------------
 async def market_scanner_loop():
-    """حلقة المسح الرئيسية مع المراقبة الاستباقية"""
     global dynamic_watch_list, last_dynamic_update
     logger.info("🚀 بدء الماسح المحسن (مع المراقبة الاستباقية)...")
     semaphore = asyncio.Semaphore(config.SEMAPHORE_LIMIT)
@@ -63,7 +62,6 @@ async def market_scanner_loop():
                 async with aiohttp.ClientSession() as send_session:
                     while not shutdown_event.is_set():
                         try:
-                            # 1. تحديث القائمة الديناميكية
                             if time.time() - last_dynamic_update > config.DYNAMIC_UPDATE_INTERVAL:
                                 new_symbols = await fetch_top_symbols(session, config.DYNAMIC_SYMBOLS_LIMIT)
                                 if new_symbols:
@@ -71,11 +69,9 @@ async def market_scanner_loop():
                                     last_dynamic_update = time.time()
                                     logger.info(f"🔥 تحديث القائمة الديناميكية: {len(dynamic_watch_list)} عملة")
 
-                            # 2. المراقبة الاستباقية (جديدة)
                             if config.PRE_WATCH_ENABLED:
                                 await pre_watch_scanner(session, send_session)
 
-                            # 3. المسح الأساسي
                             all_symbols = list(set(config.CORE_UNIVERSE + dynamic_watch_list))
                             logger.info(f"🔄 فحص {len(all_symbols)} عملة ...")
 
@@ -104,28 +100,21 @@ async def market_scanner_loop():
 
 # -------------------- المراقبة الاستباقية --------------------
 async def pre_watch_scanner(session, send_session):
-    """مسح السوق لاكتشاف الفرص الجديدة"""
-    global pre_watch_cache
     try:
         logger.info("🔭 بدء المسح الاستباقي...")
         opportunities = await scan_market_for_opportunities(session)
         
-        # التحقق من كل فرصة
         for opp in opportunities[:config.PRE_WATCH_MAX_SYMBOLS]:
             symbol = opp["symbol"]
-            
-            # التحقق من عدم وجودها بالفعل في المراقبة
             pre_watch = await db.get_pre_watch(limit=100)
             existing = [p["symbol"] for p in pre_watch]
             if symbol in existing:
                 continue
             
-            # تحليل عميق
             analysis = await analyze_pre_watch_candidate(session, opp)
             if not analysis:
                 continue
             
-            # حفظ في قاعدة البيانات
             await db.add_to_pre_watch(
                 symbol,
                 analysis["score"],
@@ -135,21 +124,18 @@ async def pre_watch_scanner(session, send_session):
                 ", ".join(analysis["reasons"][:3])
             )
             
-            # إرسال تنبيه إذا كانت النقاط عالية
             if analysis["score"] >= config.PRE_WATCH_ALERT_THRESHOLD:
                 await send_pre_watch_alert(send_session, analysis)
                 await db.mark_pre_watch_alert_sent(symbol)
             
             logger.info(f"🔭 تمت إضافة {symbol} إلى المراقبة (نقاط: {analysis['score']})")
         
-        # تنظيف العملات القديمة
         await db.clean_expired_pre_watch(48)
         
     except Exception as e:
         logger.error(f"خطأ في المراقبة الاستباقية: {e}")
 
 async def send_pre_watch_alert(session, analysis):
-    """إرسال تنبيه مراقبة استباقية"""
     symbol = analysis["symbol"]
     score = analysis["score"]
     change = analysis["change_24h"]
@@ -174,14 +160,12 @@ async def send_pre_watch_alert(session, analysis):
 async def process_single_symbol(session, symbol, semaphore, send_session):
     async with semaphore:
         try:
-            # التحقق من التبريد
             cooldown = await db.get_cooldown(symbol)
             if cooldown:
                 last_time = datetime.fromisoformat(cooldown)
                 if (datetime.now(timezone.utc) - last_time) < timedelta(minutes=config.COOLDOWN_MINUTES):
                     return None
 
-            # جلب البيانات
             data_5m = await fetch_klines(session, symbol, '5m', 100)
             data_1h = await fetch_klines(session, symbol, '1h', 30)
             data_4h = await fetch_klines(session, symbol, '4h', 20)
@@ -190,7 +174,6 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             if not data_5m or not data_1h or not data_4h or stats.get('volume', 0) < config.MIN_VOLUME_USD:
                 return None
 
-            # التحليل الأساسي
             engine = SignalEngine(symbol, data_5m, data_1h, data_4h, stats)
             result = await engine.evaluate()
 
@@ -213,14 +196,12 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             result['take_profit'] = take_profit
             result['position_size'] = pos_size
 
-            # إشارة انفجار فورية
             if result.get('is_explosion', False):
                 await send_confirmed_signal(send_session, result)
                 await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
                 logger.info(f"⚡ إشارة انفجار فورية لـ {symbol}: {result['signal']}")
                 return result
 
-            # إشارة عادية مع تأكيد
             if "شراء" in result['signal'] or "بيع" in result['signal']:
                 conf_engine = ConfirmationEngine(engine)
                 confirmed = await conf_engine.wait_and_confirm(session)
@@ -394,7 +375,7 @@ def main():
     application.add_handler(CommandHandler("adduser", handlers.adduser))
     application.add_handler(CommandHandler("removeuser", handlers.removeuser))
     application.add_handler(CommandHandler("status", handlers.status))
-    application.add_handler(CommandHandler("prewatch", handlers.prewatch))  # جديد
+    application.add_handler(CommandHandler("prewatch", handlers.prewatch))
     application.add_handler(CommandHandler("performance", handlers.performance))
     application.add_handler(CommandHandler("signal", handlers.signal_now))
 
