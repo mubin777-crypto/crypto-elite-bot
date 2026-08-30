@@ -82,7 +82,7 @@ async def market_scanner_loop():
                                 except Exception as e:
                                     logger.error(f"ccxt scan error: {e}")
 
-                            # 2. تحديث القائمة الديناميكية (أفضل 100 عملة من حيث الحجم)
+                            # 2. تحديث القائمة الديناميكية
                             if time.time() - last_dynamic_update > config.DYNAMIC_UPDATE_INTERVAL:
                                 new_symbols = await fetch_top_symbols(session, config.DYNAMIC_SYMBOLS_LIMIT)
                                 if new_symbols:
@@ -90,11 +90,11 @@ async def market_scanner_loop():
                                     last_dynamic_update = time.time()
                                     logger.info(f"🔥 تحديث القائمة الديناميكية: {len(dynamic_watch_list)} عملة")
 
-                            # 3. المراقبة الاستباقية (تضيف العملات الصامتة إلى قاعدة البيانات)
+                            # 3. المراقبة الاستباقية
                             if config.PRE_WATCH_ENABLED:
                                 await pre_watch_scanner(session, send_session)
 
-                            # 4. 🔥 جمع العملات المرشحة للتحليل (الأساسية + الديناميكية + المرصودة)
+                            # 4. جمع العملات المرشحة للتحليل
                             pre_watch_symbols = []
                             if config.SCAN_UNLISTED_SYMBOLS:
                                 pre_watch_symbols = await db.get_pre_watch(limit=config.MAX_PREWATCH_TO_SCAN)
@@ -205,7 +205,6 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             engine = SignalEngine(symbol, data_5m, data_1h, data_4h, stats)
             result = await engine.evaluate()
             
-            # ✅ سجل النقاط لمراقبة الأداء
             logger.info(f"📊 {symbol}: score={result['score']}, action={result['action']}, early_breakout={result.get('is_early_breakout', False)}")
 
             if not result['is_actionable'] and not result['is_explosion'] and not result.get('is_early_breakout', False):
@@ -227,7 +226,6 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             result['take_profit'] = take_profit
             result['position_size'] = pos_size
 
-            # إشارات الانفجار المبكر لها أولوية عالية
             if result.get('is_early_breakout', False):
                 await send_confirmed_signal(send_session, result, early=True)
                 await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
@@ -401,7 +399,7 @@ async def shutdown():
     await db.close()
     logger.info("✅ تم إيقاف جميع المهام")
 
-# -------------------- الوظيفة الرئيسية (تم تعديلها لحل مشكلة Event Loop وأوامر التليجرام) --------------------
+# -------------------- الوظيفة الرئيسية (الحل النهائي) --------------------
 def main():
     if not config.TELEGRAM_TOKEN:
         logger.error("❌ TELEGRAM_TOKEN غير موجود! يرجى تعيينه في متغيرات البيئة.")
@@ -425,26 +423,24 @@ def main():
 
     logger.info("✅ Starting Telegram Bot with Polling...")
     
-    # ✅ التعديل الجذري: استخدام run_polling مباشرة (بدون حلقة يدوية)
-    # هذا يسمح للمكتبة بإدارة الحلقة بنفسها، مما يحل مشكلة استجابة الأوامر
+    # ✅ الحل النهائي: تشغيل polling داخل asyncio.run()
+    # هذه هي الطريقة الصحيحة في الإصدارات الحديثة من python-telegram-bot
     try:
-        application.run_polling(
+        asyncio.run(application.run_polling(
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
             stop_signals=None
-        )
+        ))
+    except KeyboardInterrupt:
+        logger.info("🛑 تم إيقاف البوت يدوياً")
     except Exception as e:
         logger.error(f"💥 فشل التشغيل: {e}")
-        raise
     finally:
-        # إيقاف المهام الخلفية
         try:
+            # محاولة إيقاف المهام الخلفية بشكل آمن
             asyncio.run(shutdown())
-        except RuntimeError as e:
-            if "Event loop is closed" in str(e):
-                logger.info("ℹ️ تم إيقاف الحلقة بالفعل")
-            else:
-                logger.error(f"خطأ في الإيقاف: {e}")
+        except RuntimeError:
+            pass
 
 if __name__ == "__main__":
     try:
