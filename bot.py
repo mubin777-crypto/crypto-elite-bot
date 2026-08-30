@@ -401,7 +401,7 @@ async def shutdown():
     await db.close()
     logger.info("✅ تم إيقاف جميع المهام")
 
-# -------------------- الوظيفة الرئيسية --------------------
+# -------------------- الوظيفة الرئيسية (تم تعديلها لحل مشكلة Event Loop وأوامر التليجرام) --------------------
 def main():
     if not config.TELEGRAM_TOKEN:
         logger.error("❌ TELEGRAM_TOKEN غير موجود! يرجى تعيينه في متغيرات البيئة.")
@@ -425,17 +425,26 @@ def main():
 
     logger.info("✅ Starting Telegram Bot with Polling...")
     
-    # حل مشكلة Event Loop
+    # ✅ التعديل الجذري: استخدام run_polling مباشرة (بدون حلقة يدوية)
+    # هذا يسمح للمكتبة بإدارة الحلقة بنفسها، مما يحل مشكلة استجابة الأوامر
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         application.run_polling(
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
             stop_signals=None
         )
+    except Exception as e:
+        logger.error(f"💥 فشل التشغيل: {e}")
+        raise
     finally:
-        loop.close()
+        # إيقاف المهام الخلفية
+        try:
+            asyncio.run(shutdown())
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                logger.info("ℹ️ تم إيقاف الحلقة بالفعل")
+            else:
+                logger.error(f"خطأ في الإيقاف: {e}")
 
 if __name__ == "__main__":
     try:
