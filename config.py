@@ -15,7 +15,7 @@ class Config:
     COINCAP_BASE = "https://api.coincap.io/v2"
     CRYPTOPANIC_BASE = "https://cryptopanic.com/api/v1"
 
-    # -------------------- إعدادات البوت (عتبات وسطية للصيد الذكي) --------------------
+    # -------------------- إعدادات البوت (عتبات وسطية) --------------------
     DB_PATH = DATABASE_URL.replace("sqlite:///", "")
     RATE_LIMIT_DELAY = 0.1
     SEMAPHORE_LIMIT = 5
@@ -23,16 +23,15 @@ class Config:
     MIN_VOLUME_USD = 100_000
     MIN_VOLATILITY_DAILY = 0.1
 
-    # 🔥 عتبات وسطية (توازن بين الوهم والحقيقة)
-    SIGNAL_SCORE_THRESHOLD = 4.5          # عتبة ذهبية
+    SIGNAL_SCORE_THRESHOLD = 4.5
     CONFIRMATION_SCORE_BONUS = 0.5
-    CONFIRMATION_WAIT_CANDLES = 0         # تخطي التأكيد في السوق الهادئ
+    CONFIRMATION_WAIT_CANDLES = 0
     RISK_PER_TRADE = 0.01
     MAX_POSITION_SIZE_PCT = 2.0
-    MIN_CHANGE_1H = 0.1                   # تغير بسيط مقبول
+    MIN_CHANGE_1H = 0.1
     RSI_PERIOD = 6
     ADX_PERIOD = 14
-    MIN_ADX_STRONG = 12                   # وسط (8 ضعيف، 25 صارم)
+    MIN_ADX_STRONG = 12
     DAILY_LOSS_LIMIT_PCT = 3.0
     PAPER_TRADING = True
     INITIAL_CAPITAL = 10000.0
@@ -41,7 +40,7 @@ class Config:
     DYNAMIC_UPDATE_INTERVAL = 900
     ADAPTIVE_THRESHOLD = True
 
-    # -------------------- ccxt (مفعل لسرعة ودقة البيانات) --------------------
+    # -------------------- ccxt --------------------
     USE_CCXT = True
     CCXT_EXCHANGE = "binance"
     CCXT_RATE_LIMIT = 1200
@@ -51,22 +50,22 @@ class Config:
     ENABLE_ADX_FILTER = True
     MIN_ADX_STRONG = 12
 
-    # -------------------- المراقبة الاستباقية (لصيد العملات الصامتة) --------------------
+    # -------------------- المراقبة الاستباقية --------------------
     PRE_WATCH_ENABLED = True
     PRE_WATCH_SCAN_INTERVAL = 300
-    PRE_WATCH_MIN_VOLUME = 75_000        # وسطية
-    PRE_WATCH_MIN_CHANGE = 0.4           # وسطية
+    PRE_WATCH_MIN_VOLUME = 75_000
+    PRE_WATCH_MIN_CHANGE = 0.4
     PRE_WATCH_MAX_SUPPLY = 1_000_000_000
-    PRE_WATCH_ALERT_THRESHOLD = 55       # وسطية
+    PRE_WATCH_ALERT_THRESHOLD = 55
     PRE_WATCH_MAX_SYMBOLS = 20
 
     # -------------------- ضوابط مسح العملات غير المدرجة --------------------
-    MAX_PREWATCH_TO_SCAN = 30            # أقصى عدد من عملات Pre-watch لتحليلها في كل دورة
-    SCAN_UNLISTED_SYMBOLS = True         # تفعيل فحص العملات غير المدرجة
+    MAX_PREWATCH_TO_SCAN = 30
+    SCAN_UNLISTED_SYMBOLS = True
 
     # -------------------- قواعد الانفجار المبكر --------------------
-    BB_SQUEEZE_THRESHOLD = 2.0           # انضغاط بولينجر أقل من 2%
-    EARLY_VOLUME_RATIO = 1.8             # حجم يتدفق بصمت (أموال ذكية)
+    BB_SQUEEZE_THRESHOLD = 2.0
+    EARLY_VOLUME_RATIO = 1.8
 
     # -------------------- قائمة العملات الأساسية (موسعة) --------------------
     CORE_UNIVERSE = [
@@ -76,11 +75,11 @@ class Config:
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "TONUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", 
+        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
     ]
 
     TIMEFRAMES = {
