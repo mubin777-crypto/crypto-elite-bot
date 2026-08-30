@@ -193,15 +193,48 @@ class SignalEngine:
 
         final_score = round(min(score, 10.0), 1)
 
-        # تحديد الاتجاه
-        if self.trend_1d == 'bullish' and self.trend_4h != 'bearish':
-            self.action = "BUY"
-        elif self.trend_1d == 'bearish' and self.trend_4h != 'bullish':
-            self.action = "SELL"
-        else:
-            self.action = "NEUTRAL"
+        # ============================================================
+        # 🔥 المنطق الذكي لتحديد الإشارة (BUY/SELL/NEUTRAL)
+        # الوسطية + الحماية من مناطق التشبع + احترام الانفجار المبكر
+        # ============================================================
+        
+        # نمنع الشراء في قمم موجة صاعدة، ونمنع البيع في قيعان موجة هابطة
+        is_overbought = self.rsi > 75
+        is_oversold = self.rsi < 25
 
-        # تحديد الإشارة
+        # 1. الحالة القوية: نقاط عالية جداً (زخم داخلي قوي) مع تجنب التشبع
+        if final_score >= 6.0 and not is_overbought and not is_oversold:
+            if self.trend_4h != 'bearish' or self.trend_1d == 'bullish':
+                self.action = "BUY"
+            elif self.trend_4h != 'bullish' or self.trend_1d == 'bearish':
+                self.action = "SELL"
+            else:
+                # إذا كان كل شيء جانبي ولكن النقاط عالية، نأخذ إشارة من 1H
+                self.action = "BUY" if self.trend_1h == 'bullish' else "SELL" if self.trend_1h == 'bearish' else "NEUTRAL"
+
+        # 2. الحالة المتوسطة: نقاط جيدة، نشترط اتجاه 4H واضح مع تجنب التشبع
+        elif 4.5 <= final_score < 6.0:
+            if self.trend_4h == 'bullish' and not is_overbought:
+                self.action = "BUY"
+            elif self.trend_4h == 'bearish' and not is_oversold:
+                self.action = "SELL"
+            else:
+                self.action = "NEUTRAL"
+
+        # 3. الحالة الضعيفة: نقاط منخفضة، نفضل الحياد إلا إذا كان الانفجار المبكر مفعلاً
+        else:
+            # إذا كان انفجاراً مبكراً (is_early_breakout) نعطيه فرصة حتى لو نقاطه منخفضة
+            if self.is_early_breakout and not is_overbought:
+                self.action = "BUY"
+            elif self.is_early_breakout and not is_oversold:
+                self.action = "SELL"
+            else:
+                self.action = "NEUTRAL"
+
+        # ============================================================
+        # تحديد نوع الإشارة النهائي (للرسائل)
+        # ============================================================
+        
         if final_score >= 8.0 and self.action != "NEUTRAL":
             signal_type = "🟢 **شراء قوي**" if self.action == "BUY" else "🔴 **بيع قوي**"
         elif final_score >= 6.5 and self.action != "NEUTRAL":
@@ -211,10 +244,10 @@ class SignalEngine:
         else:
             signal_type = "⚪ **حيادي**"
 
-        # شروط الإشارة مع مراعاة الانفجار المبكر وال ADX
+        # شروط الإشارة القابلة للتنفيذ (مع مراعاة الانفجار المبكر و ADX)
         if self.is_early_breakout:
             actual_threshold = 3.8
-            is_actionable = final_score >= actual_threshold and self.action != "SELL"
+            is_actionable = final_score >= actual_threshold and self.action != "NEUTRAL"
         elif self.is_explosion:
             actual_threshold = 4.0
             is_actionable = final_score >= actual_threshold
