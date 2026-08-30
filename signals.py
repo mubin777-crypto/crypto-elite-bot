@@ -1,8 +1,6 @@
-# signals.py - مع دعم ADX وتحسينات الانفجار
 import logging
 import asyncio
 from typing import Dict, List, Optional, Tuple
-
 from config import config
 from indicators import Indicators
 from database import db
@@ -32,7 +30,6 @@ class SignalEngine:
         self.atr = Indicators.calculate_atr(self.highs, self.lows, self.prices, 14)
         self.macd = Indicators.calculate_macd(self.prices)
         self.bb = Indicators.calculate_bollinger(self.prices)
-
         self.trend_1h = self._get_trend(self.data_1h['prices'])
         self.trend_4h = self._get_trend(self.data_4h['prices'])
         self.trend_1d = self._get_trend(self.data_4h['prices'])
@@ -43,10 +40,13 @@ class SignalEngine:
             self.change_1h = 0.0
 
         avg_volume = sum(self.volumes[-12:]) / 12 if len(self.volumes) >= 12 else 1
-        self.volume_ratio = self.volumes[-1] / avg_volume if avg_volume > 0 else 0
+        # ✅ إصلاح volume_ratio: تجنب القسمة على صفر
+        if len(self.volumes) >= 12 and avg_volume > 0:
+            self.volume_ratio = self.volumes[-1] / avg_volume
+        else:
+            self.volume_ratio = 1.0  # قيمة افتراضية
 
         self.volume_spike = self.volume_ratio > 3.0
-
         price_range = (max(self.prices[-10:]) - min(self.prices[-10:])) / self.current_price if self.current_price > 0 else 0
         self.low_volatility_compression = price_range < 0.01
 
@@ -76,93 +76,70 @@ class SignalEngine:
 
         # RSI
         if 45 <= self.rsi <= 55:
-            score += 4.0
-            reasons.append("RSI مثالي")
+            score += 4.0; reasons.append("RSI مثالي")
         elif 30 <= self.rsi < 45 or 55 < self.rsi <= 60:
-            score += 3.0
-            reasons.append("RSI جيد")
+            score += 3.0; reasons.append("RSI جيد")
         elif 20 <= self.rsi < 30 or 60 < self.rsi <= 70:
-            score += 1.5
-            reasons.append("RSI حذر")
+            score += 1.5; reasons.append("RSI حذر")
         else:
-            score += 0.5
-            reasons.append("RSI متطرف")
+            score += 0.5; reasons.append("RSI متطرف")
         score *= weights.get('rsi', 1.0)
 
         # الاتجاه
         if self.adx < 20:
             reasons.append(f"اتجاه ضعيف (ADX {self.adx:.1f})")
         elif self.trend_1d == 'bullish' and self.trend_4h == 'bullish':
-            score += 3.5
-            reasons.append("اتجاه صاعد قوي (4H+1D)")
+            score += 3.5; reasons.append("اتجاه صاعد قوي (4H+1D)")
         elif self.trend_4h == 'bullish':
-            score += 2.5
-            reasons.append("اتجاه صاعد (4H)")
+            score += 2.5; reasons.append("اتجاه صاعد (4H)")
         elif self.trend_1h == 'bullish':
-            score += 1.5
-            reasons.append("اتجاه صاعد (1H)")
+            score += 1.5; reasons.append("اتجاه صاعد (1H)")
         elif self.trend_1d == 'bearish' and self.trend_4h == 'bearish':
-            score += 3.5
-            reasons.append("اتجاه هابط قوي (4H+1D)")
+            score += 3.5; reasons.append("اتجاه هابط قوي (4H+1D)")
         elif self.trend_4h == 'bearish':
-            score += 2.5
-            reasons.append("اتجاه هابط (4H)")
+            score += 2.5; reasons.append("اتجاه هابط (4H)")
         elif self.trend_1h == 'bearish':
-            score += 1.5
-            reasons.append("اتجاه هابط (1H)")
+            score += 1.5; reasons.append("اتجاه هابط (1H)")
         else:
             reasons.append("اتجاه جانبي")
         score *= weights.get('trend', 1.0)
 
         # الزخم
         if self.change_1h > 1.5:
-            score += 1.5
-            reasons.append(f"زخم قوي {self.change_1h:.1f}%")
+            score += 1.5; reasons.append(f"زخم قوي {self.change_1h:.1f}%")
         elif self.change_1h > 0.5:
-            score += 0.8
-            reasons.append(f"زخم معتدل {self.change_1h:.1f}%")
+            score += 0.8; reasons.append(f"زخم معتدل {self.change_1h:.1f}%")
         else:
-            score += 0.0
-            reasons.append("زخم ضعيف")
+            score += 0.0; reasons.append("زخم ضعيف")
         score *= weights.get('momentum', 1.0)
 
         # الحجم
         if self.volume_spike:
-            score += 2.0
-            reasons.append(f"🚀 انفجار حجم مفاجئ ({self.volume_ratio:.1f}x)")
+            score += 2.0; reasons.append(f"🚀 انفجار حجم مفاجئ ({self.volume_ratio:.1f}x)")
         elif self.volume_ratio >= 2.0:
-            score += 0.7
-            reasons.append(f"حجم جيد {self.volume_ratio:.1f}x")
+            score += 0.7; reasons.append(f"حجم جيد {self.volume_ratio:.1f}x")
         elif self.volume_ratio >= 1.3:
-            score += 0.4
-            reasons.append(f"حجم معتدل {self.volume_ratio:.1f}x")
+            score += 0.4; reasons.append(f"حجم معتدل {self.volume_ratio:.1f}x")
         score *= weights.get('volume', 1.0)
 
-        # ADX (تم تعزيز الوزن)
+        # ADX
         if config.ENABLE_ADX_FILTER:
             if self.adx > 30:
-                score += 1.5
-                reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
+                score += 1.5; reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
             elif self.adx > 25:
-                score += 0.8
-                reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
+                score += 0.8; reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
         else:
             if self.adx > 30:
-                score += 1.0
-                reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
+                score += 1.0; reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
             elif self.adx > 25:
-                score += 0.5
-                reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
+                score += 0.5; reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
 
         # بولينجر
         bb_width = (self.bb['upper'] - self.bb['lower']) / self.bb['middle'] * 100 if self.bb['middle'] > 0 else 0
         if bb_width < 2.0:
-            score += 0.5
-            reasons.append(f"انضغاط بولينجر ({bb_width:.1f}%)")
-
+            score += 0.5; reasons.append(f"انضغاط بولينجر ({bb_width:.1f}%)")
         if self.low_volatility_compression:
-            score += 1.0
-            reasons.append("📉 انضغاط سعري شديد - استعداد للانفجار")
+            score += 1.0; reasons.append("📉 انضغاط سعري شديد - استعداد للانفجار")
 
         # 🔥 محرك الانفجار المبكر
         self.is_explosion = False
@@ -173,25 +150,17 @@ class SignalEngine:
         if config.PRE_WATCH_ENABLED and (price_change > 1.5 and (volume_surge or high_volume)):
             self.is_explosion = True
             if price_change > 3.0:
-                score += 3.0
-                reasons.append(f"💥 انفجار سعري كبير ({self.change_1h:.1f}%)")
+                score += 3.0; reasons.append(f"💥 انفجار سعري كبير ({self.change_1h:.1f}%)")
             elif price_change > 2.0:
-                score += 2.0
-                reasons.append(f"🔥 انفجار سعري متوسط ({self.change_1h:.1f}%)")
+                score += 2.0; reasons.append(f"🔥 انفجار سعري متوسط ({self.change_1h:.1f}%)")
             else:
-                score += 1.0
-                reasons.append(f"📈 انفجار سعري خفيف ({self.change_1h:.1f}%)")
-
+                score += 1.0; reasons.append(f"📈 انفجار سعري خفيف ({self.change_1h:.1f}%)")
             if volume_surge:
-                score += 1.0
-                reasons.append(f"📊 حجم مرتفع ({self.volume_ratio:.1f}x)")
+                score += 1.0; reasons.append(f"📊 حجم مرتفع ({self.volume_ratio:.1f}x)")
             elif high_volume:
-                score += 0.5
-                reasons.append(f"💰 حجم تداول كبير (${self.stats.get('volume', 0):,.0f})")
-
+                score += 0.5; reasons.append(f"💰 حجم تداول كبير (${self.stats.get('volume', 0):,.0f})")
             if self.rsi > 70:
-                score += 1.0
-                reasons.append("⚠️ RSI مرتفع - قد يكون انفجاراً مستمراً")
+                score += 1.0; reasons.append("⚠️ RSI مرتفع - قد يكون انفجاراً مستمراً")
 
         final_score = round(min(score, 10.0), 1)
 
@@ -277,7 +246,6 @@ class SignalEngine:
             position_size = round(min(position_fraction, config.MAX_POSITION_SIZE_PCT / 100), 4)
 
         return stop_loss, take_profit, position_size
-
 
 class ConfirmationEngine:
     def __init__(self, signal_engine: SignalEngine):
