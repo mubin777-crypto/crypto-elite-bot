@@ -121,7 +121,7 @@ class TelegramHandlers:
             logger.error(f"❌ خطأ في /removeuser: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
 
-    # -------------------- أوامر الحالة والأداء --------------------
+    # -------------------- أوامر الحالة والأداء (مع سجلات للتأكد من الاستدعاء) --------------------
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         logger.info(f"📩 أمر /status من {user_id}")
@@ -129,7 +129,8 @@ class TelegramHandlers:
             subscribers = await self.db.get_subscribers()
             pending = await self.db.get_pending()
             pre_watch = await self.db.get_pre_watch()
-            await update.message.reply_text(
+            
+            msg = (
                 f"📊 *حالة البوت المحسن*\n"
                 f"👥 المشتركين: {len(subscribers)}\n"
                 f"⏳ في الانتظار: {len(pending)}\n"
@@ -137,11 +138,13 @@ class TelegramHandlers:
                 f"💧 الحد الأدنى للسيولة: ${config.MIN_VOLUME_USD:,}\n"
                 f"📊 عتبة الإشارة: {config.SIGNAL_SCORE_THRESHOLD}/10\n"
                 f"⏱️ فترة التبريد: {config.COOLDOWN_MINUTES} دقيقة\n"
-                f"📡 البيانات: ccxt → Binance.com → Binance.US → Coinbase → CoinCap\n"
-                f"🧪 المحاكاة: {'مفعلة' if config.PAPER_TRADING else 'معطلة'}",
-                parse_mode="Markdown"
+                f"📡 البيانات: ccxt → Binance.com → Binance.US → Coinbase\n"
+                f"🧪 المحاكاة: {'مفعلة' if config.PAPER_TRADING else 'معطلة'}"
             )
-            logger.info(f"✅ تم الرد على /status للمستخدم {user_id}")
+            
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            logger.info(f"✅ تم إرسال الرد على /status للمستخدم {user_id}")
+            
         except Exception as e:
             logger.error(f"❌ خطأ في /status: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء جلب حالة البوت.")
@@ -170,7 +173,7 @@ class TelegramHandlers:
                 f"📉 خسائر متتالية: {perf[12]}"
             )
             await update.message.reply_text(msg, parse_mode="Markdown")
-            logger.info(f"✅ تم الرد على /performance للمستخدم {user_id}")
+            logger.info(f"✅ تم إرسال الرد على /performance للمستخدم {user_id}")
         except Exception as e:
             logger.error(f"❌ خطأ في /performance: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء جلب بيانات الأداء.")
@@ -198,7 +201,7 @@ class TelegramHandlers:
                 )
             msg += "🔄 *تحديث كل 5 دقائق* - هذه العملات قد تنفجر قريباً"
             await update.message.reply_text(msg, parse_mode="Markdown")
-            logger.info(f"✅ تم الرد على /prewatch للمستخدم {user_id}")
+            logger.info(f"✅ تم إرسال الرد على /prewatch للمستخدم {user_id}")
         except Exception as e:
             logger.error(f"❌ خطأ في /prewatch: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء جلب قائمة المراقبة.")
@@ -244,7 +247,7 @@ class TelegramHandlers:
                     f"📊 حجم الصفقة: `{pos_size*100:.2f}%`"
                 )
                 await update.message.reply_text(msg, parse_mode="Markdown")
-                logger.info(f"✅ تم الرد على /signal {sym} للمستخدم {user_id}")
+                logger.info(f"✅ تم إرسال الرد على /signal {sym} للمستخدم {user_id}")
         except Exception as e:
             logger.error(f"❌ خطأ في /signal {sym}: {e}")
             await update.message.reply_text(f"⚠️ حدث خطأ أثناء تحليل {sym}.")
