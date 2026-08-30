@@ -16,6 +16,7 @@ class SignalEngine:
         self.stats = stats
         self.action = "NEUTRAL"
         self.is_explosion = False
+        self.is_early_breakout = False
         self._analyze()
 
     def _analyze(self):
@@ -30,6 +31,12 @@ class SignalEngine:
         self.atr = Indicators.calculate_atr(self.highs, self.lows, self.prices, 14)
         self.macd = Indicators.calculate_macd(self.prices)
         self.bb = Indicators.calculate_bollinger(self.prices)
+        
+        # مؤشرات إضافية للقنص المبكر
+        self.bb_width = (self.bb['upper'] - self.bb['lower']) / self.bb['middle'] * 100 if self.bb['middle'] > 0 else 0
+        self.price_to_upper_ratio = self.current_price / self.bb['upper'] if self.bb['upper'] > 0 else 0.5
+        self.avg_volume_short = sum(self.volumes[-5:]) / 5 if len(self.volumes) >= 5 else self.volumes[-1]
+        
         self.trend_1h = self._get_trend(self.data_1h['prices'])
         self.trend_4h = self._get_trend(self.data_4h['prices'])
         self.trend_1d = self._get_trend(self.data_4h['prices'])
@@ -40,11 +47,10 @@ class SignalEngine:
             self.change_1h = 0.0
 
         avg_volume = sum(self.volumes[-12:]) / 12 if len(self.volumes) >= 12 else 1
-        # ✅ إصلاح volume_ratio: تجنب القسمة على صفر
         if len(self.volumes) >= 12 and avg_volume > 0:
             self.volume_ratio = self.volumes[-1] / avg_volume
         else:
-            self.volume_ratio = 1.0  # قيمة افتراضية
+            self.volume_ratio = 1.0
 
         self.volume_spike = self.volume_ratio > 3.0
         price_range = (max(self.prices[-10:]) - min(self.prices[-10:])) / self.current_price if self.current_price > 0 else 0
@@ -135,32 +141,55 @@ class SignalEngine:
                 score += 0.5; reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
 
         # بولينجر
-        bb_width = (self.bb['upper'] - self.bb['lower']) / self.bb['middle'] * 100 if self.bb['middle'] > 0 else 0
-        if bb_width < 2.0:
-            score += 0.5; reasons.append(f"انضغاط بولينجر ({bb_width:.1f}%)")
+        if self.bb_width < 2.0:
+            score += 0.5; reasons.append(f"انضغاط بولينجر ({self.bb_width:.1f}%)")
         if self.low_volatility_compression:
             score += 1.0; reasons.append("📉 انضغاط سعري شديد - استعداد للانفجار")
 
-        # 🔥 محرك الانفجار المبكر
-        self.is_explosion = False
+        # -------------------- محرك الانفجار المبكر (القنص قبل الانفجار) --------------------
+        self.is_early_breakout = False
+        
+        # الشروط الذكية للانفجار المبكر:
+        is_squeezing = self.bb_width < config.BB_SQUEEZE_THRESHOLD
+        is_volume_building = self.volume_ratio > config.EARLY_VOLUME_RATIO
+        is_near_breakout = self.price_to_upper_ratio > 0.985
+        is_trend_ok = self.trend_4h != 'bearish'
+        
+        if is_squeezing and is_volume_building and is_near_breakout and is_trend_ok:
+            self.is_early_breakout = True
+            score += 3.0
+            reasons.append("🚀 انفجار وشيك (انضغاط + حجم صامت + مقاومة)")
+            
+            if len(self.volumes) >= 6 and self.volumes[-1] > self.volumes[-3]:
+                score += 1.0
+                reasons.append("📈 حجم في تزايد مستمر")
+        
+        # انفجار متأخر (حدث بالفعل)
+        elif self.volume_spike and self.change_1h > 1.2 and self.current_price > self.bb['upper']:
+            self.is_explosion = True
+            score += 1.5
+            reasons.append(f"⚠️ انفجار متأخر ({self.change_1h:.1f}%) - مخاطرة أعلى")
+        
+        # انفجار سعري كبير (احتياطي)
         price_change = abs(self.change_1h)
         volume_surge = self.volume_ratio > 2.0
         high_volume = self.stats.get('volume', 0) > config.PRE_WATCH_MIN_VOLUME
-
+        
         if config.PRE_WATCH_ENABLED and (price_change > 1.5 and (volume_surge or high_volume)):
-            self.is_explosion = True
-            if price_change > 3.0:
-                score += 3.0; reasons.append(f"💥 انفجار سعري كبير ({self.change_1h:.1f}%)")
-            elif price_change > 2.0:
-                score += 2.0; reasons.append(f"🔥 انفجار سعري متوسط ({self.change_1h:.1f}%)")
-            else:
-                score += 1.0; reasons.append(f"📈 انفجار سعري خفيف ({self.change_1h:.1f}%)")
-            if volume_surge:
-                score += 1.0; reasons.append(f"📊 حجم مرتفع ({self.volume_ratio:.1f}x)")
-            elif high_volume:
-                score += 0.5; reasons.append(f"💰 حجم تداول كبير (${self.stats.get('volume', 0):,.0f})")
-            if self.rsi > 70:
-                score += 1.0; reasons.append("⚠️ RSI مرتفع - قد يكون انفجاراً مستمراً")
+            if not self.is_early_breakout:
+                self.is_explosion = True
+                if price_change > 3.0:
+                    score += 3.0; reasons.append(f"💥 انفجار سعري كبير ({self.change_1h:.1f}%)")
+                elif price_change > 2.0:
+                    score += 2.0; reasons.append(f"🔥 انفجار سعري متوسط ({self.change_1h:.1f}%)")
+                else:
+                    score += 1.0; reasons.append(f"📈 انفجار سعري خفيف ({self.change_1h:.1f}%)")
+                if volume_surge:
+                    score += 1.0; reasons.append(f"📊 حجم مرتفع ({self.volume_ratio:.1f}x)")
+                elif high_volume:
+                    score += 0.5; reasons.append(f"💰 حجم تداول كبير (${self.stats.get('volume', 0):,.0f})")
+                if self.rsi > 70:
+                    score += 1.0; reasons.append("⚠️ RSI مرتفع - قد يكون انفجاراً مستمراً")
 
         final_score = round(min(score, 10.0), 1)
 
@@ -182,8 +211,11 @@ class SignalEngine:
         else:
             signal_type = "⚪ **حيادي**"
 
-        # شروط الإشارة مع مراعاة الانفجار و ADX
-        if self.is_explosion:
+        # شروط الإشارة مع مراعاة الانفجار المبكر وال ADX
+        if self.is_early_breakout:
+            actual_threshold = 3.8
+            is_actionable = final_score >= actual_threshold and self.action != "SELL"
+        elif self.is_explosion:
             actual_threshold = 4.0
             is_actionable = final_score >= actual_threshold
         else:
@@ -216,11 +248,12 @@ class SignalEngine:
             "trend_1d": self.trend_1d,
             "pivot": self.pivot,
             "breakout": self.breakout,
-            "bb_width": round(bb_width, 2),
+            "bb_width": round(self.bb_width, 2),
             "volume_spike": self.volume_spike,
             "low_volatility_compression": self.low_volatility_compression,
             "action": self.action,
-            "is_explosion": self.is_explosion
+            "is_explosion": self.is_explosion,
+            "is_early_breakout": self.is_early_breakout
         }
 
     def calculate_risk(self, entry_price: float, action: str, stop_loss: float = None) -> Tuple[float, float, float]:
@@ -254,6 +287,11 @@ class ConfirmationEngine:
         self.wait_candles = config.CONFIRMATION_WAIT_CANDLES
 
     async def wait_and_confirm(self, session):
+        # تخطي التأكيد في حالات الانفجار المبكر أو إذا كانت العتبة صفر
+        if self.initial.is_early_breakout or self.wait_candles == 0:
+            logger.info(f"⚡ تخطي التأكيد لـ {self.initial.symbol} (انفجار مبكر أو وضع سريع)")
+            return await self.initial.evaluate()
+        
         if self.initial.volume_spike or self.initial.is_explosion:
             logger.info(f"⚡ انفجار لـ {self.initial.symbol}، تخطي التأكيد")
             from utils import fetch_klines, fetch_24hr_stats
@@ -265,7 +303,7 @@ class ConfirmationEngine:
                 return None
             new_engine = SignalEngine(self.initial.symbol, data_5m, data_1h, data_4h, stats)
             new_eval = await new_engine.evaluate()
-            if new_eval['is_actionable'] or new_eval['is_explosion']:
+            if new_eval['is_actionable'] or new_eval['is_explosion'] or new_eval.get('is_early_breakout', False):
                 self.confirmed = new_eval
                 self.confirmed['signal'] = self.confirmed['signal'].replace("مراقبة", "تأكيد سريع")
                 return self.confirmed
