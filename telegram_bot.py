@@ -1,8 +1,6 @@
-# telegram_bot.py - أوامر التليجرام (مع /prewatch و /add)
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
-
 from database import db
 from config import config
 
@@ -65,7 +63,6 @@ class TelegramHandlers:
             logger.error(f"❌ خطأ في /approve: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
 
-    # -------------------- الأمر /add (إضافة مباشرة) --------------------
     async def add_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         logger.info(f"📩 أمر /add من {user_id}")
@@ -140,7 +137,7 @@ class TelegramHandlers:
                 f"💧 الحد الأدنى للسيولة: ${config.MIN_VOLUME_USD:,}\n"
                 f"📊 عتبة الإشارة: {config.SIGNAL_SCORE_THRESHOLD}/10\n"
                 f"⏱️ فترة التبريد: {config.COOLDOWN_MINUTES} دقيقة\n"
-                f"📡 البيانات: Binance.com → Binance.US → Coinbase → CoinCap\n"
+                f"📡 البيانات: ccxt → Binance.com → Binance.US → Coinbase → CoinCap\n"
                 f"🧪 المحاكاة: {'مفعلة' if config.PAPER_TRADING else 'معطلة'}",
                 parse_mode="Markdown"
             )
@@ -178,7 +175,6 @@ class TelegramHandlers:
             logger.error(f"❌ خطأ في /performance: {e}")
             await update.message.reply_text("⚠️ حدث خطأ أثناء جلب بيانات الأداء.")
 
-    # -------------------- أمر /prewatch (جديد) --------------------
     async def prewatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         logger.info(f"📩 أمر /prewatch من {user_id}")
