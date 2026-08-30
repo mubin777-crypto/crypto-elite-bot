@@ -1,26 +1,15 @@
-# utils.py - دوال مساعدة مع دعم ccxt
 import asyncio
 import aiohttp
 import logging
 import time
 import ccxt
-import pandas as pd
-import numpy as np
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
-
 from config import config
 
 logger = logging.getLogger(__name__)
 
 # -------------------- دوال ccxt المحسنة --------------------
-def calculate_rsi_series(series, period=6):
-    """حساب RSI باستخدام pandas"""
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
 
 async def fetch_klines_ccxt(symbol: str, timeframe: str = '1h', limit: int = 50):
     """جلب بيانات الشموع باستخدام ccxt"""
@@ -32,9 +21,15 @@ async def fetch_klines_ccxt(symbol: str, timeframe: str = '1h', limit: int = 50)
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         if len(ohlcv) < 10:
             return None
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        return df
+        # تحويل البيانات إلى قاموس بدون pandas
+        return {
+            "prices": [float(c[4]) for c in ohlcv],
+            "highs": [float(c[2]) for c in ohlcv],
+            "lows": [float(c[3]) for c in ohlcv],
+            "volumes": [float(c[5]) for c in ohlcv],
+            "opens": [float(c[1]) for c in ohlcv],
+            "timestamps": [c[0] for c in ohlcv]
+        }
     except Exception as e:
         logger.debug(f"ccxt error for {symbol}: {e}")
         return None
@@ -49,50 +44,68 @@ async def scan_market_ccxt(session, limit: int = 200):
         markets = exchange.load_markets()
         symbols = [s for s in markets if s.endswith('/USDT') and 'UP/' not in s and 'DOWN/' not in s]
         symbols = symbols[:limit]
-        
         logger.info(f"🔍 فحص {len(symbols)} عملة باستخدام ccxt...")
         candidates = []
-        
         for symbol in symbols:
             try:
                 df = await fetch_klines_ccxt(symbol, '1h', 50)
-                if df is None or len(df) < 30:
+                if df is None or len(df['prices']) < 30:
                     continue
-                
-                df['vol_ma20'] = df['volume'].rolling(window=20).mean()
-                df['sma20'] = df['close'].rolling(window=20).mean()
-                df['std20'] = df['close'].rolling(window=20).std()
-                df['upper_band'] = df['sma20'] + (df['std20'] * 2)
-                df['rsi'] = calculate_rsi_series(df['close'], period=6)
-                
-                last = df.iloc[-1]
-                prev = df.iloc[-2]
-                
-                is_vol_spike = last['volume'] > (prev['vol_ma20'] * 2.5)
-                is_breakout = last['close'] >= last['upper_band']
-                is_rsi_momentum = 40 <= last['rsi'] <= 75 and last['rsi'] > prev['rsi']
-                
+                # حساب المتوسطات يدوياً
+                prices = df['prices']
+                volumes = df['volumes']
+                vol_ma20 = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else volumes[-1]
+                sma20 = sum(prices[-20:]) / 20 if len(prices) >= 20 else prices[-1]
+                # انحراف معياري يدوي
+                std20 = (sum((p - sma20) ** 2 for p in prices[-20:]) / 20) ** 0.5 if len(prices) >= 20 else 0
+                upper_band = sma20 + (std20 * 2)
+                # RSI يدوي
+                rsi = calculate_rsi_from_list(prices, period=6)
+                last = prices[-1]
+                prev = prices[-2] if len(prices) >= 2 else last
+                vol_last = volumes[-1]
+                vol_prev_ma = vol_ma20
+                is_vol_spike = vol_last > (vol_prev_ma * 2.5)
+                is_breakout = last >= upper_band
+                is_rsi_momentum = 40 <= rsi <= 75 and rsi > calculate_rsi_from_list(prices[:-1], period=6)
                 if is_vol_spike and is_breakout and is_rsi_momentum:
                     candidates.append({
                         'symbol': symbol.replace('/USDT', 'USDT'),
-                        'price': last['close'],
-                        'rsi': round(last['rsi'], 2),
-                        'volume_ratio': round(last['volume'] / prev['vol_ma20'], 2),
-                        'score': 80 + (last['rsi'] - 40) * 0.5
+                        'price': last,
+                        'rsi': round(rsi, 2),
+                        'volume_ratio': round(vol_last / vol_prev_ma, 2) if vol_prev_ma > 0 else 1.0,
+                        'score': 80 + (rsi - 40) * 0.5
                     })
-                    logger.info(f"✅ ccxt found: {symbol} | RSI: {last['rsi']:.1f} | Vol: {round(last['volume'] / prev['vol_ma20'], 2)}x")
-                    
+                    logger.info(f"✅ ccxt found: {symbol} | RSI: {rsi:.1f} | Vol: {round(vol_last / vol_prev_ma, 2)}x")
             except Exception as e:
                 logger.debug(f"Error processing {symbol}: {e}")
                 continue
-        
         return candidates
-        
     except Exception as e:
         logger.error(f"ccxt scan error: {e}")
         return []
 
+def calculate_rsi_from_list(prices: List[float], period: int = 14) -> float:
+    """حساب RSI من قائمة أسعار بدون pandas"""
+    if len(prices) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        gains.append(diff if diff >= 0 else 0.0)
+        losses.append(abs(diff) if diff < 0 else 0.0)
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
 # -------------------- دوال جلب البيانات (الطريقة القديمة) --------------------
+
 async def fetch_binance_com_klines(session, symbol, interval='5m', limit=50):
     try:
         url = f"{config.BINANCE_COM_BASE}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -157,18 +170,12 @@ async def fetch_klines(session, symbol, interval='5m', limit=50, retries=3):
         try:
             tf_map = {'5m': '5m', '1h': '1h', '4h': '4h', '1m': '1m'}
             ccxt_interval = tf_map.get(interval, '5m')
-            df = await fetch_klines_ccxt(symbol, ccxt_interval, limit)
-            if df is not None and len(df) > 10:
-                return {
-                    "prices": df['close'].tolist(),
-                    "highs": df['high'].tolist(),
-                    "lows": df['low'].tolist(),
-                    "volumes": df['volume'].tolist(),
-                    "opens": df['open'].tolist()
-                }
+            data = await fetch_klines_ccxt(symbol, ccxt_interval, limit)
+            if data is not None and len(data['prices']) > 10:
+                return data
         except Exception as e:
             logger.debug(f"ccxt fetch failed for {symbol}: {e}")
-    
+
     # fallback إلى الطريقة القديمة
     await asyncio.sleep(config.RATE_LIMIT_DELAY)
     for attempt in range(retries):
@@ -201,7 +208,7 @@ async def fetch_24hr_stats(session, symbol):
             }
         except Exception as e:
             logger.debug(f"ccxt ticker failed for {symbol}: {e}")
-    
+
     # fallback
     try:
         url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr?symbol={symbol}"
@@ -219,6 +226,7 @@ async def fetch_24hr_stats(session, symbol):
                 }
     except:
         pass
+
     try:
         url = f"{config.BINANCE_US_BASE}/api/v3/ticker/24hr?symbol={symbol}"
         async with session.get(url, timeout=8) as resp:
@@ -234,6 +242,7 @@ async def fetch_24hr_stats(session, symbol):
                 }
     except:
         pass
+
     try:
         symbol_cb = symbol.replace('USDT', '-USD')
         url = f"{config.COINBASE_BASE}/products/{symbol_cb}/stats"
@@ -254,9 +263,11 @@ async def fetch_24hr_stats(session, symbol):
                 }
     except:
         pass
+
     return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0, "last": 0}
 
 # -------------------- دوال المراقبة الاستباقية --------------------
+
 async def scan_market_for_opportunities(session):
     opportunities = []
     try:
@@ -265,7 +276,7 @@ async def scan_market_for_opportunities(session):
             ccxt_results = await scan_market_ccxt(session, config.CCXT_MAX_SYMBOLS)
             if ccxt_results:
                 return ccxt_results
-        
+
         # fallback إلى الطريقة القديمة
         url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -280,64 +291,50 @@ async def scan_market_for_opportunities(session):
                         continue
                     if any(ex in symbol for ex in ["UP", "DOWN", "BULL", "BEAR", "HALF"]):
                         continue
-                    
                     volume = float(item.get('quoteVolume', 0))
                     change = float(item.get('priceChangePercent', 0))
                     high = float(item.get('highPrice', 0))
                     low = float(item.get('lowPrice', 0))
                     last = float(item.get('lastPrice', 0))
-                    
+
                     if volume < config.PRE_WATCH_MIN_VOLUME:
                         continue
                     if abs(change) < config.PRE_WATCH_MIN_CHANGE:
                         continue
-                    
+
                     score = 0
                     reasons = []
-                    
                     if change > 5.0:
-                        score += 40
-                        reasons.append(f"زخم صاعد قوي {change:.1f}%")
+                        score += 40; reasons.append(f"زخم صاعد قوي {change:.1f}%")
                     elif change > 3.0:
-                        score += 30
-                        reasons.append(f"زخم صاعد {change:.1f}%")
+                        score += 30; reasons.append(f"زخم صاعد {change:.1f}%")
                     elif change > 2.0:
-                        score += 20
-                        reasons.append(f"زخم معتدل {change:.1f}%")
+                        score += 20; reasons.append(f"زخم معتدل {change:.1f}%")
                     elif change < -3.0:
-                        score += 30
-                        reasons.append(f"انهيار {change:.1f}%")
+                        score += 30; reasons.append(f"انهيار {change:.1f}%")
                     elif change < -2.0:
-                        score += 20
-                        reasons.append(f"تراجع {change:.1f}%")
-                    
+                        score += 20; reasons.append(f"تراجع {change:.1f}%")
+
                     if volume > 50_000_000:
-                        score += 30
-                        reasons.append(f"حجم ضخم (${volume/1_000_000:.1f}M)")
+                        score += 30; reasons.append(f"حجم ضخم (${volume/1_000_000:.1f}M)")
                     elif volume > 10_000_000:
-                        score += 20
-                        reasons.append(f"حجم كبير (${volume/1_000_000:.1f}M)")
+                        score += 20; reasons.append(f"حجم كبير (${volume/1_000_000:.1f}M)")
                     elif volume > 5_000_000:
-                        score += 10
-                        reasons.append(f"حجم متوسط (${volume/1_000_000:.1f}M)")
-                    
+                        score += 10; reasons.append(f"حجم متوسط (${volume/1_000_000:.1f}M)")
+
                     if high > 0 and low > 0:
                         volatility = ((high - low) / low) * 100
                         if volatility > 10:
-                            score += 20
-                            reasons.append(f"تقلب عالٍ {volatility:.1f}%")
+                            score += 20; reasons.append(f"تقلب عالٍ {volatility:.1f}%")
                         elif volatility > 5:
-                            score += 10
-                            reasons.append(f"تقلب متوسط {volatility:.1f}%")
-                    
+                            score += 10; reasons.append(f"تقلب متوسط {volatility:.1f}%")
+
                     approx_market_cap = volume * last / 100 if last > 0 else 0
                     if 10_000_000 < approx_market_cap < 500_000_000:
-                        score += 10
-                        reasons.append(f"قيمة سوقية مناسبة (${approx_market_cap/1_000_000:.1f}M)")
+                        score += 10; reasons.append(f"قيمة سوقية مناسبة (${approx_market_cap/1_000_000:.1f}M)")
                     elif approx_market_cap < 10_000_000:
-                        score += 5
-                        reasons.append(f"قيمة سوقية صغيرة (${approx_market_cap/1_000_000:.1f}M)")
-                    
+                        score += 5; reasons.append(f"قيمة سوقية صغيرة (${approx_market_cap/1_000_000:.1f}M)")
+
                     if score >= 50:
                         opportunities.append({
                             "symbol": symbol,
@@ -352,7 +349,7 @@ async def scan_market_for_opportunities(session):
                         })
     except Exception as e:
         logger.error(f"Error scanning market: {e}")
-    
+
     opportunities.sort(key=lambda x: x["score"], reverse=True)
     return opportunities[:config.PRE_WATCH_MAX_SYMBOLS]
 
@@ -361,41 +358,36 @@ async def analyze_pre_watch_candidate(session, candidate):
     data_5m = await fetch_klines(session, symbol, '5m', 100)
     if not data_5m:
         return None
-    
+
     from indicators import Indicators
     prices = data_5m['prices']
     highs = data_5m['highs']
     lows = data_5m['lows']
     volumes = data_5m['volumes']
-    
+
     rsi = Indicators.calculate_rsi(prices, config.RSI_PERIOD)
     adx = Indicators.calculate_adx(highs, lows, prices, config.ADX_PERIOD)
-    volume_ratio = volumes[-1] / (sum(volumes[-12:]) / 12) if len(volumes) >= 12 else 1
-    
+    avg_volume = sum(volumes[-12:]) / 12 if len(volumes) >= 12 else 1
+    volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 1
+
     final_score = candidate["score"]
     reasons = candidate["reasons"].copy()
-    
+
     if rsi > 70:
-        final_score += 10
-        reasons.append(f"RSI مرتفع ({rsi:.1f}) - زخم قوي")
+        final_score += 10; reasons.append(f"RSI مرتفع ({rsi:.1f}) - زخم قوي")
     elif rsi > 60:
-        final_score += 5
-        reasons.append(f"RSI جيد ({rsi:.1f})")
-    
+        final_score += 5; reasons.append(f"RSI جيد ({rsi:.1f})")
+
     if adx > 25:
-        final_score += 15
-        reasons.append(f"اتجاه قوي (ADX {adx:.1f})")
+        final_score += 15; reasons.append(f"اتجاه قوي (ADX {adx:.1f})")
     elif adx > 20:
-        final_score += 10
-        reasons.append(f"اتجاه متوسط (ADX {adx:.1f})")
-    
+        final_score += 10; reasons.append(f"اتجاه متوسط (ADX {adx:.1f})")
+
     if volume_ratio > 3.0:
-        final_score += 15
-        reasons.append(f"انفجار حجم ({volume_ratio:.1f}x)")
+        final_score += 15; reasons.append(f"انفجار حجم ({volume_ratio:.1f}x)")
     elif volume_ratio > 2.0:
-        final_score += 10
-        reasons.append(f"حجم مرتفع ({volume_ratio:.1f}x)")
-    
+        final_score += 10; reasons.append(f"حجم مرتفع ({volume_ratio:.1f}x)")
+
     return {
         "symbol": symbol,
         "price": candidate["price"],
@@ -430,7 +422,7 @@ async def fetch_top_symbols(session, limit=100):
             return [sym for sym, _, _ in candidates[:limit]]
         except Exception as e:
             logger.error(f"ccxt top symbols error: {e}")
-    
+
     # fallback
     try:
         url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr"
@@ -456,6 +448,7 @@ async def fetch_top_symbols(session, limit=100):
                 return [sym for sym, _, _ in candidates[:limit]]
     except Exception as e:
         logger.error(f"Binance.com error: {e}")
+
     try:
         url = f"{config.BINANCE_US_BASE}/api/v3/ticker/24hr"
         async with session.get(url, timeout=10) as resp:
@@ -475,6 +468,7 @@ async def fetch_top_symbols(session, limit=100):
                 return [sym for sym, _, _ in candidates[:limit]]
     except Exception as e:
         logger.error(f"Binance.US error: {e}")
+
     return []
 
 async def fetch_news(session, symbol):
