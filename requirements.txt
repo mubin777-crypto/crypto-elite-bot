@@ -3,5 +3,3 @@ aiosqlite==0.20.0
 Flask==3.0.3
 python-telegram-bot==21.7
 ccxt==4.1.88
-pandas==2.2.2
-numpy==1.26.4
