@@ -199,6 +199,9 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
 
             engine = SignalEngine(symbol, data_5m, data_1h, data_4h, stats)
             result = await engine.evaluate()
+            
+            # ✅ سجل النقاط لمراقبة الأداء (تمت الإضافة هنا)
+            logger.info(f"📊 {symbol}: score={result['score']}, action={result['action']}, is_explosion={result['is_explosion']}")
 
             if not result['is_actionable'] and not result['is_explosion']:
                 return None
@@ -381,6 +384,7 @@ async def shutdown():
     await db.close()
     logger.info("✅ تم إيقاف جميع المهام")
 
+# -------------------- الوظيفة الرئيسية (تم تعديلها لحل مشكلة Event Loop) --------------------
 def main():
     if not config.TELEGRAM_TOKEN:
         logger.error("❌ TELEGRAM_TOKEN غير موجود! يرجى تعيينه في متغيرات البيئة.")
@@ -403,22 +407,22 @@ def main():
     application.add_handler(CommandHandler("signal", handlers.signal_now))
 
     logger.info("✅ Starting Telegram Bot with Polling...")
+    
+    # 🔥 التعديل الجذري لحل مشكلة "There is no current event loop in thread 'MainThread'"
     try:
+        # إنشاء حلقة أحداث جديدة يدوياً
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # تشغيل البوت باستخدام الحلقة الجديدة
         application.run_polling(
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
             stop_signals=None
         )
-    except Exception as e:
-        logger.error(f"💥 فشل التشغيل: {e}")
     finally:
-        try:
-            asyncio.run(shutdown())
-        except RuntimeError as e:
-            if "Event loop is closed" in str(e):
-                logger.info("ℹ️ تم إيقاف الحلقة بالفعل")
-            else:
-                logger.error(f"خطأ في الإيقاف: {e}")
+        # إغلاق الحلقة بشكل آمن بعد الانتهاء
+        loop.close()
 
 if __name__ == "__main__":
     try:
