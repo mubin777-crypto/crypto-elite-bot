@@ -423,10 +423,11 @@ def main():
 
     logger.info("✅ Starting Telegram Bot with Polling...")
     
-    # ✅ الحل النهائي: تشغيل polling داخل asyncio.run()
-    # هذه هي الطريقة الصحيحة في الإصدارات الحديثة من python-telegram-bot
+    # ✅ الحل النهائي: إنشاء حلقة أحداث يدوياً وتشغيل polling داخلها
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        asyncio.run(application.run_polling(
+        loop.run_until_complete(application.run_polling(
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
             stop_signals=None
@@ -437,10 +438,11 @@ def main():
         logger.error(f"💥 فشل التشغيل: {e}")
     finally:
         try:
-            # محاولة إيقاف المهام الخلفية بشكل آمن
-            asyncio.run(shutdown())
-        except RuntimeError:
+            # محاولة إيقاف المهام الخلفية باستخدام نفس الحلقة
+            loop.run_until_complete(shutdown())
+        except:
             pass
+        loop.close()
 
 if __name__ == "__main__":
     try:
