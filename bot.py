@@ -3,7 +3,7 @@
 
 """
 bot.py - الملف الرئيسي لتشغيل البوت
-الإصدار النهائي V8 مع دعم ccxt و ADX
+الإصدار النهائي V8 مع دعم ccxt و ADX ودمج Pre-watch
 """
 
 import os
@@ -82,7 +82,7 @@ async def market_scanner_loop():
                                 except Exception as e:
                                     logger.error(f"ccxt scan error: {e}")
 
-                            # 2. تحديث القائمة الديناميكية
+                            # 2. تحديث القائمة الديناميكية (أفضل 100 عملة من حيث الحجم)
                             if time.time() - last_dynamic_update > config.DYNAMIC_UPDATE_INTERVAL:
                                 new_symbols = await fetch_top_symbols(session, config.DYNAMIC_SYMBOLS_LIMIT)
                                 if new_symbols:
@@ -90,13 +90,18 @@ async def market_scanner_loop():
                                     last_dynamic_update = time.time()
                                     logger.info(f"🔥 تحديث القائمة الديناميكية: {len(dynamic_watch_list)} عملة")
 
-                            # 3. المراقبة الاستباقية
+                            # 3. المراقبة الاستباقية (تضيف العملات الصامتة إلى قاعدة البيانات)
                             if config.PRE_WATCH_ENABLED:
                                 await pre_watch_scanner(session, send_session)
 
-                            # 4. المسح الأساسي
-                            all_symbols = list(set(config.CORE_UNIVERSE + dynamic_watch_list))
-                            logger.info(f"🔄 فحص {len(all_symbols)} عملة ...")
+                            # 4. 🔥 جمع العملات المرشحة للتحليل (الأساسية + الديناميكية + المرصودة)
+                            pre_watch_symbols = []
+                            if config.SCAN_UNLISTED_SYMBOLS:
+                                pre_watch_symbols = await db.get_pre_watch(limit=config.MAX_PREWATCH_TO_SCAN)
+                            pre_watch_list = [p["symbol"] for p in pre_watch_symbols]
+
+                            all_symbols = list(set(config.CORE_UNIVERSE + dynamic_watch_list + pre_watch_list))
+                            logger.info(f"🔄 فحص {len(all_symbols)} عملة (تشمل {len(pre_watch_list)} من Pre-watch)...")
 
                             tasks = [
                                 process_single_symbol(session, symbol, semaphore, send_session)
@@ -200,14 +205,14 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             engine = SignalEngine(symbol, data_5m, data_1h, data_4h, stats)
             result = await engine.evaluate()
             
-            # ✅ سجل النقاط لمراقبة الأداء (تمت الإضافة هنا)
-            logger.info(f"📊 {symbol}: score={result['score']}, action={result['action']}, is_explosion={result['is_explosion']}")
+            # ✅ سجل النقاط لمراقبة الأداء
+            logger.info(f"📊 {symbol}: score={result['score']}, action={result['action']}, early_breakout={result.get('is_early_breakout', False)}")
 
-            if not result['is_actionable'] and not result['is_explosion']:
+            if not result['is_actionable'] and not result['is_explosion'] and not result.get('is_early_breakout', False):
                 return None
 
             action = result.get('action', 'NEUTRAL')
-            if action == "NEUTRAL" and not result['is_explosion']:
+            if action == "NEUTRAL" and not result['is_explosion'] and not result.get('is_early_breakout', False):
                 return None
 
             stop_loss, take_profit, pos_size = engine.calculate_risk(
@@ -222,8 +227,15 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
             result['take_profit'] = take_profit
             result['position_size'] = pos_size
 
+            # إشارات الانفجار المبكر لها أولوية عالية
+            if result.get('is_early_breakout', False):
+                await send_confirmed_signal(send_session, result, early=True)
+                await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
+                logger.info(f"🚀 قنص مبكر لـ {symbol}: {result['signal']}")
+                return result
+
             if result.get('is_explosion', False):
-                await send_confirmed_signal(send_session, result)
+                await send_confirmed_signal(send_session, result, early=False)
                 await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
                 logger.info(f"⚡ إشارة انفجار فورية لـ {symbol}: {result['signal']}")
                 return result
@@ -239,7 +251,7 @@ async def process_single_symbol(session, symbol, semaphore, send_session):
                         confirmed['take_profit'] = tp
                         confirmed['position_size'] = ps
                         if sl != 0 and tp != 0:
-                            await send_confirmed_signal(send_session, confirmed)
+                            await send_confirmed_signal(send_session, confirmed, early=False)
                             await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
                             logger.info(f"✅ إشارة مؤكدة لـ {symbol}: {confirmed['signal']}")
             else:
@@ -274,7 +286,7 @@ async def send_to_all_subscribers(session, message):
     tasks = [send_message_async(session, chat_id, message) for chat_id in subscribers]
     await asyncio.gather(*tasks, return_exceptions=True)
 
-async def send_confirmed_signal(session, signal):
+async def send_confirmed_signal(session, signal, early=False):
     news = await fetch_news(session, signal['symbol'])
     news_text = f"\n📰 أخبار: {news['title']}" if news else ""
 
@@ -297,7 +309,12 @@ async def send_confirmed_signal(session, signal):
             logger.error(f"❌ SL/TP غير منطقي للبيع في {signal['symbol']}")
             return
 
-    explosion_tag = "⚡ *انفجار!* " if signal.get('is_explosion', False) else ""
+    if early:
+        explosion_tag = "🚀 *قنص مبكر!* "
+    elif signal.get('is_explosion', False):
+        explosion_tag = "⚡ *انفجار!* "
+    else:
+        explosion_tag = "🔥 "
 
     msg = (
         f"{explosion_tag}🔥 *إشارة مؤكدة!*\n"
@@ -384,7 +401,7 @@ async def shutdown():
     await db.close()
     logger.info("✅ تم إيقاف جميع المهام")
 
-# -------------------- الوظيفة الرئيسية (تم تعديلها لحل مشكلة Event Loop) --------------------
+# -------------------- الوظيفة الرئيسية --------------------
 def main():
     if not config.TELEGRAM_TOKEN:
         logger.error("❌ TELEGRAM_TOKEN غير موجود! يرجى تعيينه في متغيرات البيئة.")
@@ -408,20 +425,16 @@ def main():
 
     logger.info("✅ Starting Telegram Bot with Polling...")
     
-    # 🔥 التعديل الجذري لحل مشكلة "There is no current event loop in thread 'MainThread'"
+    # حل مشكلة Event Loop
     try:
-        # إنشاء حلقة أحداث جديدة يدوياً
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        # تشغيل البوت باستخدام الحلقة الجديدة
         application.run_polling(
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
             stop_signals=None
         )
     finally:
-        # إغلاق الحلقة بشكل آمن بعد الانتهاء
         loop.close()
 
 if __name__ == "__main__":
