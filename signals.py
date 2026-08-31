@@ -1,369 +1,260 @@
-import logging
-import asyncio
+"""
+signals.py - محرك توليد الإشارات مع إصلاح حساب المخاطرة ومعالجة الـ NaN.
+"""
+import numpy as np
+import pandas as pd
 from typing import Dict, List, Optional, Tuple
-from config import config
-from indicators import Indicators
+from datetime import datetime, timezone
+from config import CFG
+from indicators import TechnicalIndicators
+from utils import calculate_atr, safe_divide, AdaptiveWeights, logger
 from database import db
 
-logger = logging.getLogger(__name__)
-
 class SignalEngine:
-    def __init__(self, symbol: str, data_5m: Dict, data_1h: Dict, data_4h: Dict, stats: Dict):
-        self.symbol = symbol
-        self.data_5m = data_5m
-        self.data_1h = data_1h
-        self.data_4h = data_4h
-        self.stats = stats
-        self.action = "NEUTRAL"
-        self.is_explosion = False
-        self.is_early_breakout = False
-        self._analyze()
+    def __init__(self):
+        self.indicators = TechnicalIndicators()
+        self.adaptive = AdaptiveWeights(CFG.WEIGHTS)
+        saved = db.get_adaptive_weights()
+        if saved:
+            self.adaptive.weights = saved
 
-    def _analyze(self):
-        self.prices = self.data_5m['prices']
-        self.highs = self.data_5m['highs']
-        self.lows = self.data_5m['lows']
-        self.volumes = self.data_5m['volumes']
-        self.current_price = self.prices[-1] if self.prices else 0
+    def analyze(self, symbol: str, df_5m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> Optional[Dict]:
+        if len(df_5m) < CFG.SMA_SLOW + 10:
+            return None
 
-        self.rsi = Indicators.calculate_rsi(self.prices, config.RSI_PERIOD)
-        self.adx = Indicators.calculate_adx(self.highs, self.lows, self.prices, config.ADX_PERIOD)
-        self.atr = Indicators.calculate_atr(self.highs, self.lows, self.prices, 14)
-        self.macd = Indicators.calculate_macd(self.prices)
-        self.bb = Indicators.calculate_bollinger(self.prices)
-        
-        # مؤشرات إضافية للقنص المبكر
-        self.bb_width = (self.bb['upper'] - self.bb['lower']) / self.bb['middle'] * 100 if self.bb['middle'] > 0 else 0
-        self.price_to_upper_ratio = self.current_price / self.bb['upper'] if self.bb['upper'] > 0 else 0.5
-        self.avg_volume_short = sum(self.volumes[-5:]) / 5 if len(self.volumes) >= 5 else self.volumes[-1]
-        
-        self.trend_1h = self._get_trend(self.data_1h['prices'])
-        self.trend_4h = self._get_trend(self.data_4h['prices'])
-        self.trend_1d = self._get_trend(self.data_4h['prices'])
+        ind_5m = self.indicators.compute_all(df_5m)
+        if not ind_5m:
+            return None
 
-        if len(self.prices) >= 6 and self.prices[-6] > 0:
-            self.change_1h = ((self.prices[-1] - self.prices[-6]) / self.prices[-6]) * 100
-        else:
-            self.change_1h = 0.0
+        trend_4h = self._get_trend_direction(df_4h)
+        last_idx = len(df_5m) - 1
+        prev_idx = last_idx - 1
+        close = df_5m["close"].iloc[last_idx]
+        rsi_val = ind_5m["rsi"].iloc[last_idx]
+        adx_val = ind_5m["adx"].iloc[last_idx]
+        sma20 = ind_5m["sma20"].iloc[last_idx]
+        sma50 = ind_5m["sma50"].iloc[last_idx]
+        momentum = ind_5m["momentum"].iloc[last_idx]
+        vol_ratio = ind_5m["volume_ratio"].iloc[last_idx]
+        bb = ind_5m["bb"]
+        bb_upper = bb["upper"].iloc[last_idx]
+        bb_lower = bb["lower"].iloc[last_idx]
+        is_squeeze = bb["squeeze"].iloc[last_idx]
+        macd_hist = ind_5m["macd"]["histogram"].iloc[last_idx]
+        macd_hist_prev = ind_5m["macd"]["histogram"].iloc[prev_idx]
+        pivots = ind_5m["pivots"]
+        atr = calculate_atr(df_5m, CFG.ATR_PERIOD).iloc[last_idx]
 
-        avg_volume = sum(self.volumes[-12:]) / 12 if len(self.volumes) >= 12 else 1
-        if len(self.volumes) >= 12 and avg_volume > 0:
-            self.volume_ratio = self.volumes[-1] / avg_volume
-        else:
-            self.volume_ratio = 1.0
+        if db.get_last_signal_time(symbol, CFG.COOLDOWN_MINUTES):
+            return None
 
-        self.volume_spike = self.volume_ratio > 3.0
-        price_range = (max(self.prices[-10:]) - min(self.prices[-10:])) / self.current_price if self.current_price > 0 else 0
-        self.low_volatility_compression = price_range < 0.01
+        daily_stats = db.get_daily_stats()
+        if daily_stats.get("pnl", 0) <= -(CFG.VIRTUAL_CAPITAL * CFG.MAX_DAILY_LOSS_PERCENT / 100):
+            logger.warning("Daily loss limit reached", extra={"symbol": symbol})
+            return None
 
-        self.pivot = Indicators.get_pivot_points(
-            self.stats.get('high', self.current_price),
-            self.stats.get('low', self.current_price),
-            self.stats.get('last', self.current_price)
-        )
-        self.breakout = Indicators.detect_breakout(self.prices, self.highs, self.lows, self.atr, 20)
-
-    def _get_trend(self, prices: List[float]) -> str:
-        if len(prices) < 20:
-            return 'neutral'
-        sma20 = sum(prices[-20:]) / 20
-        sma50 = sum(prices[-50:]) / 50 if len(prices) >= 50 else sma20
-        current = prices[-1]
-        if current > sma20 and sma20 > sma50:
-            return 'bullish'
-        elif current < sma20 and sma20 < sma50:
-            return 'bearish'
-        return 'neutral'
-
-    async def evaluate(self) -> Dict:
-        score = 0.0
+        scores = {}
         reasons = []
-        weights = await db.get_factor_weights() if config.ADAPTIVE_THRESHOLD else {}
 
-        # RSI
-        if 45 <= self.rsi <= 55:
-            score += 4.0; reasons.append("RSI مثالي")
-        elif 30 <= self.rsi < 45 or 55 < self.rsi <= 60:
-            score += 3.0; reasons.append("RSI جيد")
-        elif 20 <= self.rsi < 30 or 60 < self.rsi <= 70:
-            score += 1.5; reasons.append("RSI حذر")
-        else:
-            score += 0.5; reasons.append("RSI متطرف")
-        score *= weights.get('rsi', 1.0)
+        # 1. الاتجاه
+        trend_score = 0
+        if trend_4h == "UP" and close > sma50 and sma20 > sma50:
+            trend_score = 1.0
+            reasons.append("الاتجاه الرئيسي صاعد (4h)")
+        elif trend_4h == "DOWN" and close < sma50 and sma20 < sma50:
+            trend_score = 1.0
+            reasons.append("الاتجاه الرئيسي هابط (4h)")
+        scores["trend"] = trend_score
 
-        # الاتجاه
-        if self.adx < 20:
-            reasons.append(f"اتجاه ضعيف (ADX {self.adx:.1f})")
-        elif self.trend_1d == 'bullish' and self.trend_4h == 'bullish':
-            score += 3.5; reasons.append("اتجاه صاعد قوي (4H+1D)")
-        elif self.trend_4h == 'bullish':
-            score += 2.5; reasons.append("اتجاه صاعد (4H)")
-        elif self.trend_1h == 'bullish':
-            score += 1.5; reasons.append("اتجاه صاعد (1H)")
-        elif self.trend_1d == 'bearish' and self.trend_4h == 'bearish':
-            score += 3.5; reasons.append("اتجاه هابط قوي (4H+1D)")
-        elif self.trend_4h == 'bearish':
-            score += 2.5; reasons.append("اتجاه هابط (4H)")
-        elif self.trend_1h == 'bearish':
-            score += 1.5; reasons.append("اتجاه هابط (1H)")
-        else:
-            reasons.append("اتجاه جانبي")
-        score *= weights.get('trend', 1.0)
+        # 2. الزخم
+        mom_score = 0
+        if trend_4h == "UP" and momentum > 0.5:
+            mom_score = 1.0
+            reasons.append(f"زخم إيجابي ({momentum:.2f}%)")
+        elif trend_4h == "DOWN" and momentum < -0.5:
+            mom_score = 1.0
+            reasons.append(f"زخم سلبي ({momentum:.2f}%)")
+        scores["momentum"] = mom_score
 
-        # الزخم
-        if self.change_1h > 1.5:
-            score += 1.5; reasons.append(f"زخم قوي {self.change_1h:.1f}%")
-        elif self.change_1h > 0.5:
-            score += 0.8; reasons.append(f"زخم معتدل {self.change_1h:.1f}%")
-        else:
-            score += 0.0; reasons.append("زخم ضعيف")
-        score *= weights.get('momentum', 1.0)
+        # 3. الحجم
+        vol_score = 0
+        if vol_ratio >= CFG.VOLUME_SPIKE_RATIO:
+            vol_score = 1.0
+            reasons.append(f"ارتفاع الحجم ({vol_ratio:.1f}x)")
+        elif vol_ratio >= 1.2:
+            vol_score = 0.5
+        scores["volume"] = vol_score
 
-        # الحجم
-        if self.volume_spike:
-            score += 2.0; reasons.append(f"🚀 انفجار حجم مفاجئ ({self.volume_ratio:.1f}x)")
-        elif self.volume_ratio >= 2.0:
-            score += 0.7; reasons.append(f"حجم جيد {self.volume_ratio:.1f}x")
-        elif self.volume_ratio >= 1.3:
-            score += 0.4; reasons.append(f"حجم معتدل {self.volume_ratio:.1f}x")
-        score *= weights.get('volume', 1.0)
+        # 4. التقلب
+        vol_score_bb = 0
+        if is_squeeze:
+            vol_score_bb = 0.8
+            reasons.append("انضغاط بولينجر")
+        if close > bb_upper and trend_4h == "UP":
+            vol_score_bb = max(vol_score_bb, 0.6)
+            reasons.append("اختراق الحد العلوي")
+        elif close < bb_lower and trend_4h == "DOWN":
+            vol_score_bb = max(vol_score_bb, 0.6)
+            reasons.append("اختراق الحد السفلي")
+        scores["volatility"] = vol_score_bb
 
-        # ADX
-        if config.ENABLE_ADX_FILTER:
-            if self.adx > 30:
-                score += 1.5; reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
-            elif self.adx > 25:
-                score += 0.8; reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
-        else:
-            if self.adx > 30:
-                score += 1.0; reasons.append(f"اتجاه قوي (ADX {self.adx:.1f})")
-            elif self.adx > 25:
-                score += 0.5; reasons.append(f"اتجاه متوسط (ADX {self.adx:.1f})")
+        # 5. RSI
+        rsi_score = 0
+        if trend_4h == "UP" and 30 <= rsi_val <= 50:
+            rsi_score = 1.0
+            reasons.append(f"RSI في منطقة الشراء ({rsi_val:.1f})")
+        elif trend_4h == "DOWN" and 50 <= rsi_val <= 70:
+            rsi_score = 1.0
+            reasons.append(f"RSI في منطقة البيع ({rsi_val:.1f})")
+        scores["rsi"] = rsi_score
 
-        # بولينجر
-        if self.bb_width < 2.0:
-            score += 0.5; reasons.append(f"انضغاط بولينجر ({self.bb_width:.1f}%)")
-        if self.low_volatility_compression:
-            score += 1.0; reasons.append("📉 انضغاط سعري شديد - استعداد للانفجار")
+        # 6. MACD
+        macd_score = 0
+        if macd_hist > 0 and macd_hist_prev <= 0 and trend_4h == "UP":
+            macd_score = 1.0
+            reasons.append("تقاطع MACD إيجابي")
+        elif macd_hist < 0 and macd_hist_prev >= 0 and trend_4h == "DOWN":
+            macd_score = 1.0
+            reasons.append("تقاطع MACD سلبي")
+        scores["macd"] = macd_score
 
-        # -------------------- محرك الانفجار المبكر (القنص قبل الانفجار) --------------------
-        self.is_early_breakout = False
-        
-        # الشروط الذكية للانفجار المبكر:
-        is_squeezing = self.bb_width < config.BB_SQUEEZE_THRESHOLD
-        is_volume_building = self.volume_ratio > config.EARLY_VOLUME_RATIO
-        is_near_breakout = self.price_to_upper_ratio > 0.985
-        is_trend_ok = self.trend_4h != 'bearish'
-        
-        if is_squeezing and is_volume_building and is_near_breakout and is_trend_ok:
-            self.is_early_breakout = True
-            score += 3.0
-            reasons.append("🚀 انفجار وشيك (انضغاط + حجم صامت + مقاومة)")
-            
-            if len(self.volumes) >= 6 and self.volumes[-1] > self.volumes[-3]:
-                score += 1.0
-                reasons.append("📈 حجم في تزايد مستمر")
-        
-        # انفجار متأخر (حدث بالفعل)
-        elif self.volume_spike and self.change_1h > 1.2 and self.current_price > self.bb['upper']:
-            self.is_explosion = True
-            score += 1.5
-            reasons.append(f"⚠️ انفجار متأخر ({self.change_1h:.1f}%) - مخاطرة أعلى")
-        
-        # انفجار سعري كبير (احتياطي)
-        price_change = abs(self.change_1h)
-        volume_surge = self.volume_ratio > 2.0
-        high_volume = self.stats.get('volume', 0) > config.PRE_WATCH_MIN_VOLUME
-        
-        if config.PRE_WATCH_ENABLED and (price_change > 1.5 and (volume_surge or high_volume)):
-            if not self.is_early_breakout:
-                self.is_explosion = True
-                if price_change > 3.0:
-                    score += 3.0; reasons.append(f"💥 انفجار سعري كبير ({self.change_1h:.1f}%)")
-                elif price_change > 2.0:
-                    score += 2.0; reasons.append(f"🔥 انفجار سعري متوسط ({self.change_1h:.1f}%)")
-                else:
-                    score += 1.0; reasons.append(f"📈 انفجار سعري خفيف ({self.change_1h:.1f}%)")
-                if volume_surge:
-                    score += 1.0; reasons.append(f"📊 حجم مرتفع ({self.volume_ratio:.1f}x)")
-                elif high_volume:
-                    score += 0.5; reasons.append(f"💰 حجم تداول كبير (${self.stats.get('volume', 0):,.0f})")
-                if self.rsi > 70:
-                    score += 1.0; reasons.append("⚠️ RSI مرتفع - قد يكون انفجاراً مستمراً")
+        # 7. Pivot
+        pivot_score = 0
+        if trend_4h == "UP" and abs(close - pivots["r1"]) / close < 0.005:
+            pivot_score = 0.8
+            reasons.append("اقتراب من مقاومة يومية")
+        elif trend_4h == "DOWN" and abs(close - pivots["s1"]) / close < 0.005:
+            pivot_score = 0.8
+            reasons.append("اقتراب من دعم يومي")
+        scores["pivot"] = pivot_score
 
-        final_score = round(min(score, 10.0), 1)
+        if adx_val < CFG.ADX_WEAK_TREND and not self._early_snipe_check(df_5m, ind_5m):
+            return None
 
-        # ============================================================
-        # 🔥 المنطق الذكي لتحديد الإشارة (BUY/SELL/NEUTRAL)
-        # الوسطية + الحماية من مناطق التشبع + احترام الانفجار المبكر
-        # ============================================================
-        
-        # نمنع الشراء في قمم موجة صاعدة، ونمنع البيع في قيعان موجة هابطة
-        is_overbought = self.rsi > 75
-        is_oversold = self.rsi < 25
+        total_score = sum(score * self.adaptive.weights.get(factor, 0.1) * 10 for factor, score in scores.items())
+        if trend_4h == "SIDEWAYS" and adx_val < 20:
+            total_score = min(total_score, CFG.MAX_SCORE_SIDEWAYS)
 
-        # 1. الحالة القوية: نقاط عالية جداً (زخم داخلي قوي) مع تجنب التشبع
-        if final_score >= 6.0 and not is_overbought and not is_oversold:
-            if self.trend_4h != 'bearish' or self.trend_1d == 'bullish':
-                self.action = "BUY"
-            elif self.trend_4h != 'bullish' or self.trend_1d == 'bearish':
-                self.action = "SELL"
-            else:
-                # إذا كان كل شيء جانبي ولكن النقاط عالية، نأخذ إشارة من 1H
-                self.action = "BUY" if self.trend_1h == 'bullish' else "SELL" if self.trend_1h == 'bearish' else "NEUTRAL"
+        if total_score < CFG.MIN_SCORE:
+            return None
 
-        # 2. الحالة المتوسطة: نقاط جيدة، نشترط اتجاه 4H واضح مع تجنب التشبع
-        elif 4.5 <= final_score < 6.0:
-            if self.trend_4h == 'bullish' and not is_overbought:
-                self.action = "BUY"
-            elif self.trend_4h == 'bearish' and not is_oversold:
-                self.action = "SELL"
-            else:
-                self.action = "NEUTRAL"
+        signal_type = "BUY" if trend_4h == "UP" else "SELL" if trend_4h == "DOWN" else "NEUTRAL"
+        if signal_type == "NEUTRAL":
+            return None
 
-        # 3. الحالة الضعيفة: نقاط منخفضة، نفضل الحياد إلا إذا كان الانفجار المبكر مفعلاً
-        else:
-            # إذا كان انفجاراً مبكراً (is_early_breakout) نعطيه فرصة حتى لو نقاطه منخفضة
-            if self.is_early_breakout and not is_overbought:
-                self.action = "BUY"
-            elif self.is_early_breakout and not is_oversold:
-                self.action = "SELL"
-            else:
-                self.action = "NEUTRAL"
+        sl, tp, risk = self._calculate_risk_levels(close, atr, pivots, signal_type)
+        if sl is None or tp is None:
+            return None
 
-        # ============================================================
-        # تحديد نوع الإشارة النهائي (للرسائل)
-        # ============================================================
-        
-        if final_score >= 8.0 and self.action != "NEUTRAL":
-            signal_type = "🟢 **شراء قوي**" if self.action == "BUY" else "🔴 **بيع قوي**"
-        elif final_score >= 6.5 and self.action != "NEUTRAL":
-            signal_type = "🟢 **شراء**" if self.action == "BUY" else "🔴 **بيع**"
-        elif final_score >= 4.5:
-            signal_type = "🟡 **مراقبة**"
-        else:
-            signal_type = "⚪ **حيادي**"
+        rr_ratio = abs(tp - close) / risk if risk > 0 else 0
+        if rr_ratio < CFG.MIN_RR_RATIO:
+            return None
 
-        # شروط الإشارة القابلة للتنفيذ (مع مراعاة الانفجار المبكر و ADX)
-        if self.is_early_breakout:
-            actual_threshold = 3.8
-            is_actionable = final_score >= actual_threshold and self.action != "NEUTRAL"
-        elif self.is_explosion:
-            actual_threshold = 4.0
-            is_actionable = final_score >= actual_threshold
-        else:
-            actual_threshold = config.SIGNAL_SCORE_THRESHOLD
-            if config.ENABLE_ADX_FILTER:
-                is_actionable = (
-                    final_score >= actual_threshold and
-                    self.action != "NEUTRAL" and
-                    self.adx >= config.MIN_ADX_STRONG
-                )
-            else:
-                is_actionable = (
-                    final_score >= actual_threshold and
-                    self.action != "NEUTRAL"
-                )
+        risk_amount_usdt = CFG.VIRTUAL_CAPITAL * CFG.RISK_PER_TRADE_PERCENT / 100
+        units = safe_divide(risk_amount_usdt, risk, 0)
+        max_units = (CFG.VIRTUAL_CAPITAL * 0.5) / close if close > 0 else 0
+        position_size = min(units, max_units)
+
+        confidence = min(100, total_score * 10)
+        if confidence < CFG.MIN_CONFIDENCE:
+            return None
 
         return {
-            "symbol": self.symbol,
-            "price": self.current_price,
-            "rsi": round(self.rsi, 1),
-            "adx": round(self.adx, 1),
-            "change_1h": round(self.change_1h, 2),
-            "volume_ratio": round(self.volume_ratio, 1),
-            "score": final_score,
-            "signal": signal_type,
+            "symbol": symbol,
+            "timeframe": "5m",
+            "type": signal_type,
+            "entry_price": round(close, 8),
+            "stop_loss": round(sl, 8),
+            "take_profit": round(tp, 8),
+            "position_size": round(position_size, 4),
+            "confidence": round(confidence, 1),
+            "score": round(total_score, 2),
             "reasons": reasons,
-            "is_actionable": is_actionable,
-            "trend_1h": self.trend_1h,
-            "trend_4h": self.trend_4h,
-            "trend_1d": self.trend_1d,
-            "pivot": self.pivot,
-            "breakout": self.breakout,
-            "bb_width": round(self.bb_width, 2),
-            "volume_spike": self.volume_spike,
-            "low_volatility_compression": self.low_volatility_compression,
-            "action": self.action,
-            "is_explosion": self.is_explosion,
-            "is_early_breakout": self.is_early_breakout
+            "adx": round(adx_val, 2),
+            "rsi": round(rsi_val, 2),
+            "volume_ratio": round(vol_ratio, 2),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    def calculate_risk(self, entry_price: float, action: str, stop_loss: float = None) -> Tuple[float, float, float]:
-        atr_stop = self.atr * 2 if self.atr > 0 else entry_price * 0.015
-        min_stop = entry_price * 0.01
-        min_tp = entry_price * 0.025
+    def _get_trend_direction(self, df: pd.DataFrame) -> str:
+        if len(df) < CFG.SMA_SLOW:
+            return "SIDEWAYS"
+        sma20 = df["close"].rolling(window=CFG.SMA_FAST).mean().iloc[-1]
+        sma50 = df["close"].rolling(window=CFG.SMA_SLOW).mean().iloc[-1]
+        close = df["close"].iloc[-1]
+        if close > sma20 > sma50:
+            return "UP"
+        elif close < sma20 < sma50:
+            return "DOWN"
+        return "SIDEWAYS"
 
-        if action == 'BUY':
-            if stop_loss is None:
-                stop_loss = entry_price - max(atr_stop, min_stop)
-            take_profit = entry_price + max(atr_stop * 2, min_tp)
-        else:
-            if stop_loss is None:
-                stop_loss = entry_price + max(atr_stop, min_stop)
-            take_profit = entry_price - max(atr_stop * 2, min_tp)
+    def _early_snipe_check(self, df: pd.DataFrame, ind: Dict) -> bool:
+        bb = ind["bb"]
+        vol = ind["volume_ratio"]
+        squeeze_3 = bb["squeeze"].iloc[-3:].all() if len(bb["squeeze"]) >= 3 else False
+        vol_spike = vol.iloc[-1] >= 1.8
+        high_20 = df["high"].iloc[-20:].max()
+        close = df["close"].iloc[-1]
+        near_resistance = abs(close - high_20) / high_20 < 0.01 if high_20 > 0 else False
+        return squeeze_3 and vol_spike and near_resistance
 
-        stop_distance = abs(entry_price - stop_loss) / entry_price
-        if stop_distance == 0:
-            position_size = 0.02
-        else:
-            risk_amount = config.RISK_PER_TRADE
-            position_fraction = risk_amount / stop_distance
-            position_size = round(min(position_fraction, config.MAX_POSITION_SIZE_PCT / 100), 4)
+    # 🔥 إضافة فحص صارم للـ NaN لحماية البوت من الأخطاء الصامتة
+    def _calculate_risk_levels(self, entry: float, atr: float, pivots: Dict[str, float],
+                               signal_type: str) -> Tuple[Optional[float], Optional[float], float]:
+        if entry <= 0:
+            return None, None, 0.0
 
-        return stop_loss, take_profit, position_size
+        buffer = 1.0 - CFG.SL_BUFFER_PERCENT  # 0.997
 
-class ConfirmationEngine:
-    def __init__(self, signal_engine: SignalEngine):
-        self.initial = signal_engine
-        self.confirmed = None
-        self.wait_candles = config.CONFIRMATION_WAIT_CANDLES
-
-    async def wait_and_confirm(self, session):
-        # تخطي التأكيد في حالات الانفجار المبكر أو إذا كانت العتبة صفر
-        if self.initial.is_early_breakout or self.wait_candles == 0:
-            logger.info(f"⚡ تخطي التأكيد لـ {self.initial.symbol} (انفجار مبكر أو وضع سريع)")
-            return await self.initial.evaluate()
-        
-        if self.initial.volume_spike or self.initial.is_explosion:
-            logger.info(f"⚡ انفجار لـ {self.initial.symbol}، تخطي التأكيد")
-            from utils import fetch_klines, fetch_24hr_stats
-            data_5m = await fetch_klines(session, self.initial.symbol, '5m', 100)
-            data_1h = await fetch_klines(session, self.initial.symbol, '1h', 30)
-            data_4h = await fetch_klines(session, self.initial.symbol, '4h', 20)
-            stats = await fetch_24hr_stats(session, self.initial.symbol)
-            if not data_5m or not data_1h or not data_4h:
-                return None
-            new_engine = SignalEngine(self.initial.symbol, data_5m, data_1h, data_4h, stats)
-            new_eval = await new_engine.evaluate()
-            if new_eval['is_actionable'] or new_eval['is_explosion'] or new_eval.get('is_early_breakout', False):
-                self.confirmed = new_eval
-                self.confirmed['signal'] = self.confirmed['signal'].replace("مراقبة", "تأكيد سريع")
-                return self.confirmed
+        if entry < 0.01:
+            if signal_type == "BUY":
+                sl = entry * 0.97
+                tp = entry * 1.06
             else:
-                logger.info(f"⚠️ انفجار لـ {self.initial.symbol} لكن الإشارة غير قابلة للتنفيذ")
-                return None
+                sl = entry * 1.03
+                tp = entry * 0.94
+            risk = abs(entry - sl)
+            return sl, tp, risk
 
-        wait_seconds = 5 * 60 * self.wait_candles
-        logger.info(f"⏳ انتظار {wait_seconds} ثانية لتأكيد إشارة {self.initial.symbol}")
-        await asyncio.sleep(wait_seconds)
+        atr_sl = atr * CFG.ATR_SL_MULTIPLIER
 
-        from utils import fetch_klines, fetch_24hr_stats
-        data_5m = await fetch_klines(session, self.initial.symbol, '5m', 100)
-        data_1h = await fetch_klines(session, self.initial.symbol, '1h', 30)
-        data_4h = await fetch_klines(session, self.initial.symbol, '4h', 20)
-        stats = await fetch_24hr_stats(session, self.initial.symbol)
-        if not data_5m or not data_1h or not data_4h:
-            return None
+        if signal_type == "BUY":
+            sl_atr = entry - atr_sl
+            # 🔥 فحص الـ NaN ومنع الضرب بالقيم غير الصالحة
+            s1_val = pivots.get("s1", sl_atr)
+            if pd.isna(s1_val) or s1_val is None or s1_val == 0:
+                sl_support = sl_atr
+            else:
+                sl_support = s1_val * buffer if s1_val < entry else sl_atr
 
-        new_engine = SignalEngine(self.initial.symbol, data_5m, data_1h, data_4h, stats)
-        new_eval = await new_engine.evaluate()
-        if new_eval['score'] >= self.initial.score + config.CONFIRMATION_SCORE_BONUS:
-            self.confirmed = new_eval
-            self.confirmed['signal'] = self.confirmed['signal'].replace("مراقبة", "تأكيد")
-            self.confirmed['signal'] = self.confirmed['signal'].replace("شراء", "تأكيد شراء")
-            self.confirmed['signal'] = self.confirmed['signal'].replace("بيع", "تأكيد بيع")
-            return self.confirmed
-        else:
-            logger.info(f"❌ لم يتم تأكيد {self.initial.symbol} (درجة: {new_eval['score']} < {self.initial.score + config.CONFIRMATION_SCORE_BONUS})")
-            return None
+            sl = max(sl_atr, sl_support) if sl_support < entry else sl_atr
+            if sl >= entry:
+                sl = entry - atr_sl
+            risk = entry - sl
+            tp = entry + (risk * CFG.MIN_RR_RATIO)
+
+        else:  # SELL
+            sl_atr = entry + atr_sl
+            # 🔥 فحص الـ NaN
+            r1_val = pivots.get("r1", sl_atr)
+            if pd.isna(r1_val) or r1_val is None or r1_val == 0:
+                sl_resist = sl_atr
+            else:
+                sl_resist = r1_val / buffer if r1_val > entry else sl_atr
+
+            sl = min(sl_atr, sl_resist) if sl_resist > entry else sl_atr
+            if sl <= entry:
+                sl = entry + atr_sl
+            risk = sl - entry
+            tp = entry - (risk * CFG.MIN_RR_RATIO)
+
+        return sl, tp, risk
+
+    def update_weights_from_results(self, results: List[Dict]):
+        for res in results:
+            for factor in res.get("factors", []):
+                self.adaptive.update(factor, res.get("pnl", 0))
+        self.adaptive.recalculate()
+        db.save_adaptive_weights(self.adaptive.weights)
+
+engine = SignalEngine()
