@@ -1,508 +1,248 @@
+"""
+utils.py - طبقة جلب البيانات، الأدوات المساعدة، وتنقية البيانات لـ Binance.
+"""
 import asyncio
 import aiohttp
+import json
 import logging
 import time
-import ccxt
+from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
-from config import config
+import numpy as np
+import pandas as pd
+from config import CFG
 
-logger = logging.getLogger(__name__)
-
-# -------------------- دوال ccxt المحسنة --------------------
-
-async def fetch_klines_ccxt(symbol: str, timeframe: str = '1h', limit: int = 50):
-    """جلب بيانات الشموع باستخدام ccxt"""
-    try:
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if len(ohlcv) < 10:
-            return None
-        # تحويل البيانات إلى قاموس بدون pandas
-        return {
-            "prices": [float(c[4]) for c in ohlcv],
-            "highs": [float(c[2]) for c in ohlcv],
-            "lows": [float(c[3]) for c in ohlcv],
-            "volumes": [float(c[5]) for c in ohlcv],
-            "opens": [float(c[1]) for c in ohlcv],
-            "timestamps": [c[0] for c in ohlcv]
+# ─── إعداد التسجيل ───
+class JSONFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        log_obj = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "module": record.module,
+            "message": record.getMessage(),
         }
-    except Exception as e:
-        logger.debug(f"ccxt error for {symbol}: {e}")
-        return None
+        if hasattr(record, "extra"):
+            log_obj.update(record.extra)
+        return json.dumps(log_obj, ensure_ascii=False)
 
-async def scan_market_ccxt(session, limit: int = 200):
-    """مسح السوق باستخدام ccxt (سريع)"""
-    try:
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
-        markets = exchange.load_markets()
-        symbols = [s for s in markets if s.endswith('/USDT') and 'UP/' not in s and 'DOWN/' not in s]
-        symbols = symbols[:limit]
-        logger.info(f"🔍 فحص {len(symbols)} عملة باستخدام ccxt...")
-        candidates = []
-        for symbol in symbols:
+logger = logging.getLogger("crypto_bot")
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logger.addHandler(handler)
+logger.setLevel(getattr(logging, CFG.LOG_LEVEL))
+
+# 🔥 رفع عدد الطلبات المتزامنة من 5 إلى 10 لتسريع الأداء
+class RateLimiter:
+    def __init__(self, max_concurrent: int = CFG.MAX_CONCURRENT_REQUESTS, delay_between: float = 0.15):
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.delay = delay_between
+        self._last_request = 0.0
+
+    async def acquire(self):
+        await self.semaphore.acquire()
+        now = time.monotonic()
+        elapsed = now - self._last_request
+        if elapsed < self.delay:
+            await asyncio.sleep(self.delay - elapsed)
+        self._last_request = time.monotonic()
+
+    def release(self):
+        self.semaphore.release()
+
+limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
+
+# ─── مصادر البيانات ───
+BINANCE_ENDPOINTS = [
+    "https://api.binance.com",
+    "https://api.binance.us",
+]
+
+_symbol_filters_cache: Dict[str, Dict] = {}
+
+class DataFetcher:
+    def __init__(self):
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30),
+                headers={"Accept": "application/json"}
+            )
+        return self.session
+
+    async def fetch_klines(self, symbol: str, interval: str = "5m", limit: int = 250) -> pd.DataFrame:
+        params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
+        for base_url in BINANCE_ENDPOINTS:
             try:
-                df = await fetch_klines_ccxt(symbol, '1h', 50)
-                if df is None or len(df['prices']) < 30:
-                    continue
-                # حساب المتوسطات يدوياً
-                prices = df['prices']
-                volumes = df['volumes']
-                vol_ma20 = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else volumes[-1]
-                sma20 = sum(prices[-20:]) / 20 if len(prices) >= 20 else prices[-1]
-                # انحراف معياري يدوي
-                std20 = (sum((p - sma20) ** 2 for p in prices[-20:]) / 20) ** 0.5 if len(prices) >= 20 else 0
-                upper_band = sma20 + (std20 * 2)
-                # RSI يدوي
-                rsi = calculate_rsi_from_list(prices, period=6)
-                last = prices[-1]
-                prev = prices[-2] if len(prices) >= 2 else last
-                vol_last = volumes[-1]
-                vol_prev_ma = vol_ma20
-                is_vol_spike = vol_last > (vol_prev_ma * 2.5)
-                is_breakout = last >= upper_band
-                is_rsi_momentum = 40 <= rsi <= 75 and rsi > calculate_rsi_from_list(prices[:-1], period=6)
-                if is_vol_spike and is_breakout and is_rsi_momentum:
-                    candidates.append({
-                        'symbol': symbol.replace('/USDT', 'USDT'),
-                        'price': last,
-                        'rsi': round(rsi, 2),
-                        'volume_ratio': round(vol_last / vol_prev_ma, 2) if vol_prev_ma > 0 else 1.0,
-                        'score': 80 + (rsi - 40) * 0.5
-                    })
-                    logger.info(f"✅ ccxt found: {symbol} | RSI: {rsi:.1f} | Vol: {round(vol_last / vol_prev_ma, 2)}x")
-            except Exception as e:
-                logger.debug(f"Error processing {symbol}: {e}")
+                await limiter.acquire()
+                session = await self._get_session()
+                url = f"{base_url}/api/v3/klines"
+                async with session.get(url, params=params) as resp:
+                    limiter.release()
+                    if resp.status == 429:
+                        logger.warning("Rate limit hit", extra={"symbol": symbol})
+                        await asyncio.sleep(2)
+                        continue
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    if not data:
+                        continue
+                    df = self._parse_klines(data)
+                    df = self._clean_data(df)
+                    return df
+            except aiohttp.ClientError as e:
+                limiter.release()
+                logger.warning(f"Failover from {base_url}", extra={"error": str(e), "symbol": symbol})
+                await asyncio.sleep(1)
                 continue
-        return candidates
-    except Exception as e:
-        logger.error(f"ccxt scan error: {e}")
+            except Exception as e:
+                limiter.release()
+                logger.error(f"Error fetching {symbol}", extra={"error": str(e)})
+                raise
+        raise RuntimeError(f"All endpoints failed for {symbol}")
+
+    def _parse_klines(self, data: List[List[Any]]) -> pd.DataFrame:
+        columns = ["open_time", "open", "high", "low", "close", "volume",
+                   "close_time", "quote_volume", "trades", "taker_buy_base",
+                   "taker_buy_quote", "ignore"]
+        df = pd.DataFrame(data, columns=columns)
+        numeric_cols = ["open", "high", "low", "close", "volume", "quote_volume"]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        return df
+
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.sort_values("open_time").reset_index(drop=True)
+        df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+        for col in ["open", "high", "low", "close", "volume"]:
+            if df[col].isna().any():
+                df[col] = df[col].fillna(method="ffill", limit=3)
+                df[col] = df[col].fillna(method="bfill", limit=3)
+        return df
+
+    async def fetch_top_symbols(self, limit: int = 50) -> List[str]:
+        for base_url in BINANCE_ENDPOINTS:
+            try:
+                await limiter.acquire()
+                session = await self._get_session()
+                url = f"{base_url}/api/v3/ticker/24hr"
+                async with session.get(url) as resp:
+                    limiter.release()
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    usdt_pairs = [
+                        item for item in data
+                        if item["symbol"].endswith(CFG.QUOTE_ASSET)
+                        and float(item.get("quoteVolume", 0)) > 1_000_000
+                    ]
+                    usdt_pairs.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+                    return [item["symbol"] for item in usdt_pairs[:limit]]
+            except Exception as e:
+                limiter.release()
+                logger.warning(f"Failover fetching symbols from {base_url}", extra={"error": str(e)})
+                continue
+        raise RuntimeError("Failed to fetch top symbols")
+
+    async def fetch_24hr_tickers(self) -> List[Dict]:
+        """جلب بيانات 24 ساعة لجميع العملات في طلب واحد."""
+        for base_url in BINANCE_ENDPOINTS:
+            try:
+                await limiter.acquire()
+                session = await self._get_session()
+                url = f"{base_url}/api/v3/ticker/24hr"
+                async with session.get(url) as resp:
+                    limiter.release()
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    return [
+                        {
+                            "symbol": item["symbol"],
+                            "change_24h": float(item.get("priceChangePercent", 0)),
+                            "volume_24h": float(item.get("quoteVolume", 0)),
+                            "high": float(item.get("highPrice", 0)),
+                            "low": float(item.get("lowPrice", 0)),
+                        }
+                        for item in data
+                        if item["symbol"].endswith(CFG.QUOTE_ASSET)
+                    ]
+            except Exception as e:
+                limiter.release()
+                logger.warning(f"Failover 24hr from {base_url}", extra={"error": str(e)})
+                continue
         return []
 
-def calculate_rsi_from_list(prices: List[float], period: int = 14) -> float:
-    """حساب RSI من قائمة أسعار بدون pandas"""
-    if len(prices) < period + 1:
-        return 50.0
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        gains.append(diff if diff >= 0 else 0.0)
-        losses.append(abs(diff) if diff < 0 else 0.0)
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    async def get_symbol_filters(self, symbol: str) -> Dict:
+        if symbol in _symbol_filters_cache:
+            return _symbol_filters_cache[symbol]
+        for base_url in BINANCE_ENDPOINTS:
+            try:
+                await limiter.acquire()
+                session = await self._get_session()
+                url = f"{base_url}/api/v3/exchangeInfo"
+                async with session.get(url) as resp:
+                    limiter.release()
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    for s in data["symbols"]:
+                        if s["symbol"] == symbol:
+                            filters = {}
+                            for f in s["filters"]:
+                                if f["filterType"] == "PRICE_FILTER":
+                                    filters["tick_size"] = float(f["tickSize"])
+                                elif f["filterType"] == "LOT_SIZE":
+                                    filters["step_size"] = float(f["stepSize"])
+                                    filters["min_qty"] = float(f["minQty"])
+                            _symbol_filters_cache[symbol] = filters
+                            return filters
+            except Exception:
+                continue
+        return {"tick_size": 0.0001, "step_size": 0.000001, "min_qty": 0.0}
 
-# -------------------- دوال جلب البيانات (الطريقة القديمة) --------------------
+    def adjust_price(self, price: float, tick_size: float) -> float:
+        if tick_size <= 0:
+            return round(price, 8)
+        return round(round(price / tick_size) * tick_size, 8)
 
-async def fetch_binance_com_klines(session, symbol, interval='5m', limit=50):
-    try:
-        url = f"{config.BINANCE_COM_BASE}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        async with session.get(url, headers=headers, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and len(data) > 0:
-                    return {
-                        "prices": [float(c[4]) for c in data],
-                        "highs": [float(c[2]) for c in data],
-                        "lows": [float(c[3]) for c in data],
-                        "volumes": [float(c[5]) for c in data],
-                        "opens": [float(c[1]) for c in data]
-                    }
-    except Exception as e:
-        logger.debug(f"Binance.com error for {symbol}: {e}")
-    return None
+    def adjust_quantity(self, qty: float, step_size: float, min_qty: float) -> float:
+        if step_size <= 0:
+            return round(qty, 8)
+        adjusted = round(round(qty / step_size) * step_size, 8)
+        return max(adjusted, min_qty)
 
-async def fetch_binance_us_klines(session, symbol, interval='5m', limit=50):
-    try:
-        url = f"{config.BINANCE_US_BASE}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and len(data) > 0:
-                    return {
-                        "prices": [float(c[4]) for c in data],
-                        "highs": [float(c[2]) for c in data],
-                        "lows": [float(c[3]) for c in data],
-                        "volumes": [float(c[5]) for c in data],
-                        "opens": [float(c[1]) for c in data]
-                    }
-    except Exception as e:
-        logger.debug(f"Binance.US error for {symbol}: {e}")
-    return None
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
 
-async def fetch_coinbase_klines(session, symbol, interval='5m', limit=50):
-    try:
-        symbol_cb = symbol.replace('USDT', '-USD')
-        url = f"{config.COINBASE_BASE}/products/{symbol_cb}/candles"
-        granularity = 300 if interval == '5m' else 900
-        params = {'granularity': granularity, 'limit': limit}
-        async with session.get(url, params=params, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and len(data) > 0:
-                    return {
-                        "prices": [c[4] for c in data],
-                        "highs": [c[2] for c in data],
-                        "lows": [c[1] for c in data],
-                        "volumes": [c[5] for c in data],
-                        "opens": [c[3] for c in data]
-                    }
-    except Exception as e:
-        logger.debug(f"Coinbase error for {symbol}: {e}")
-    return None
+fetcher = DataFetcher()
 
-async def fetch_klines(session, symbol, interval='5m', limit=50, retries=3):
-    # إذا كان ccxt مفعلاً، جربه أولاً
-    if config.USE_CCXT:
-        try:
-            tf_map = {'5m': '5m', '1h': '1h', '4h': '4h', '1m': '1m'}
-            ccxt_interval = tf_map.get(interval, '5m')
-            data = await fetch_klines_ccxt(symbol, ccxt_interval, limit)
-            if data is not None and len(data['prices']) > 10:
-                return data
-        except Exception as e:
-            logger.debug(f"ccxt fetch failed for {symbol}: {e}")
+# ─── دوال مساعدة ───
+def safe_divide(a: float, b: float, default: float = 0.0) -> float:
+    return a / b if b != 0 else default
 
-    # fallback إلى الطريقة القديمة
-    await asyncio.sleep(config.RATE_LIMIT_DELAY)
-    for attempt in range(retries):
-        data = await fetch_binance_com_klines(session, symbol, interval, limit)
-        if data and len(data['prices']) > 10:
-            return data
-        data = await fetch_binance_us_klines(session, symbol, interval, limit)
-        if data and len(data['prices']) > 10:
-            return data
-        data = await fetch_coinbase_klines(session, symbol, interval, limit)
-        if data and len(data['prices']) > 10:
-            return data
-        if attempt < retries - 1:
-            await asyncio.sleep(2 ** attempt)
-    return None
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high, low, close = df["high"], df["low"], df["close"]
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=period, min_periods=period).mean()
 
-async def fetch_24hr_stats(session, symbol):
-    # استخدام ccxt إذا كان مفعلاً
-    if config.USE_CCXT:
-        try:
-            exchange = ccxt.binance({'enableRateLimit': True})
-            ticker = exchange.fetch_ticker(symbol)
-            return {
-                "volume": ticker.get('quoteVolume', 0),
-                "change_24h": ticker.get('percentage', 0),
-                "high": ticker.get('high', 0),
-                "low": ticker.get('low', 0),
-                "open": ticker.get('open', 0),
-                "last": ticker.get('last', 0)
-            }
-        except Exception as e:
-            logger.debug(f"ccxt ticker failed for {symbol}: {e}")
+class AdaptiveWeights:
+    def __init__(self, initial_weights: Dict[str, float]):
+        self.weights = initial_weights.copy()
+        self.performance_history: Dict[str, List[float]] = {k: [] for k in initial_weights}
 
-    # fallback
-    try:
-        url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr?symbol={symbol}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        async with session.get(url, headers=headers, timeout=8) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "volume": float(data.get('quoteVolume', 0)),
-                    "change_24h": float(data.get('priceChangePercent', 0)),
-                    "high": float(data.get('highPrice', 0)),
-                    "low": float(data.get('lowPrice', 0)),
-                    "open": float(data.get('openPrice', 0)),
-                    "last": float(data.get('lastPrice', 0))
-                }
-    except:
-        pass
+    def update(self, factor: str, result: float):
+        self.performance_history[factor].append(result)
+        self.performance_history[factor] = self.performance_history[factor][-30:]
 
-    try:
-        url = f"{config.BINANCE_US_BASE}/api/v3/ticker/24hr?symbol={symbol}"
-        async with session.get(url, timeout=8) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "volume": float(data.get('quoteVolume', 0)),
-                    "change_24h": float(data.get('priceChangePercent', 0)),
-                    "high": float(data.get('highPrice', 0)),
-                    "low": float(data.get('lowPrice', 0)),
-                    "open": float(data.get('openPrice', 0)),
-                    "last": float(data.get('lastPrice', 0))
-                }
-    except:
-        pass
-
-    try:
-        symbol_cb = symbol.replace('USDT', '-USD')
-        url = f"{config.COINBASE_BASE}/products/{symbol_cb}/stats"
-        async with session.get(url, timeout=8) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                last = float(data.get('last', 0))
-                open_price = float(data.get('open', 0))
-                change = ((last - open_price) / open_price * 100) if open_price != 0 else 0
-                volume = float(data.get('volume', 0)) * last
-                return {
-                    "volume": volume,
-                    "change_24h": change,
-                    "high": float(data.get('high', 0)),
-                    "low": float(data.get('low', 0)),
-                    "open": open_price,
-                    "last": last
-                }
-    except:
-        pass
-
-    return {"volume": 0, "change_24h": 0, "high": 0, "low": 0, "open": 0, "last": 0}
-
-# -------------------- دوال المراقبة الاستباقية --------------------
-
-async def scan_market_for_opportunities(session):
-    opportunities = []
-    try:
-        # محاولة استخدام ccxt أولاً
-        if config.USE_CCXT:
-            ccxt_results = await scan_market_ccxt(session, config.CCXT_MAX_SYMBOLS)
-            if ccxt_results:
-                return ccxt_results
-
-        # fallback إلى الطريقة القديمة
-        url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        async with session.get(url, headers=headers, timeout=15) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                for item in data:
-                    symbol = item.get('symbol', '')
-                    if not symbol.endswith('USDT'):
-                        continue
-                    if any(stable in symbol for stable in ["USDC", "FDUSD", "TUSD", "BUSD", "DAI"]):
-                        continue
-                    if any(ex in symbol for ex in ["UP", "DOWN", "BULL", "BEAR", "HALF"]):
-                        continue
-                    volume = float(item.get('quoteVolume', 0))
-                    change = float(item.get('priceChangePercent', 0))
-                    high = float(item.get('highPrice', 0))
-                    low = float(item.get('lowPrice', 0))
-                    last = float(item.get('lastPrice', 0))
-
-                    if volume < config.PRE_WATCH_MIN_VOLUME:
-                        continue
-                    if abs(change) < config.PRE_WATCH_MIN_CHANGE:
-                        continue
-
-                    score = 0
-                    reasons = []
-                    if change > 5.0:
-                        score += 40; reasons.append(f"زخم صاعد قوي {change:.1f}%")
-                    elif change > 3.0:
-                        score += 30; reasons.append(f"زخم صاعد {change:.1f}%")
-                    elif change > 2.0:
-                        score += 20; reasons.append(f"زخم معتدل {change:.1f}%")
-                    elif change < -3.0:
-                        score += 30; reasons.append(f"انهيار {change:.1f}%")
-                    elif change < -2.0:
-                        score += 20; reasons.append(f"تراجع {change:.1f}%")
-
-                    if volume > 50_000_000:
-                        score += 30; reasons.append(f"حجم ضخم (${volume/1_000_000:.1f}M)")
-                    elif volume > 10_000_000:
-                        score += 20; reasons.append(f"حجم كبير (${volume/1_000_000:.1f}M)")
-                    elif volume > 5_000_000:
-                        score += 10; reasons.append(f"حجم متوسط (${volume/1_000_000:.1f}M)")
-
-                    if high > 0 and low > 0:
-                        volatility = ((high - low) / low) * 100
-                        if volatility > 10:
-                            score += 20; reasons.append(f"تقلب عالٍ {volatility:.1f}%")
-                        elif volatility > 5:
-                            score += 10; reasons.append(f"تقلب متوسط {volatility:.1f}%")
-
-                    approx_market_cap = volume * last / 100 if last > 0 else 0
-                    if 10_000_000 < approx_market_cap < 500_000_000:
-                        score += 10; reasons.append(f"قيمة سوقية مناسبة (${approx_market_cap/1_000_000:.1f}M)")
-                    elif approx_market_cap < 10_000_000:
-                        score += 5; reasons.append(f"قيمة سوقية صغيرة (${approx_market_cap/1_000_000:.1f}M)")
-
-                    if score >= 50:
-                        opportunities.append({
-                            "symbol": symbol,
-                            "price": last,
-                            "change_24h": change,
-                            "volume_24h": volume,
-                            "market_cap_approx": approx_market_cap,
-                            "score": score,
-                            "reasons": reasons,
-                            "high": high,
-                            "low": low
-                        })
-    except Exception as e:
-        logger.error(f"Error scanning market: {e}")
-
-    opportunities.sort(key=lambda x: x["score"], reverse=True)
-    return opportunities[:config.PRE_WATCH_MAX_SYMBOLS]
-
-async def analyze_pre_watch_candidate(session, candidate):
-    symbol = candidate["symbol"]
-    data_5m = await fetch_klines(session, symbol, '5m', 100)
-    if not data_5m:
-        return None
-
-    from indicators import Indicators
-    prices = data_5m['prices']
-    highs = data_5m['highs']
-    lows = data_5m['lows']
-    volumes = data_5m['volumes']
-
-    rsi = Indicators.calculate_rsi(prices, config.RSI_PERIOD)
-    adx = Indicators.calculate_adx(highs, lows, prices, config.ADX_PERIOD)
-    avg_volume = sum(volumes[-12:]) / 12 if len(volumes) >= 12 else 1
-    volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 1
-
-    final_score = candidate["score"]
-    reasons = candidate["reasons"].copy()
-
-    if rsi > 70:
-        final_score += 10; reasons.append(f"RSI مرتفع ({rsi:.1f}) - زخم قوي")
-    elif rsi > 60:
-        final_score += 5; reasons.append(f"RSI جيد ({rsi:.1f})")
-
-    if adx > 25:
-        final_score += 15; reasons.append(f"اتجاه قوي (ADX {adx:.1f})")
-    elif adx > 20:
-        final_score += 10; reasons.append(f"اتجاه متوسط (ADX {adx:.1f})")
-
-    if volume_ratio > 3.0:
-        final_score += 15; reasons.append(f"انفجار حجم ({volume_ratio:.1f}x)")
-    elif volume_ratio > 2.0:
-        final_score += 10; reasons.append(f"حجم مرتفع ({volume_ratio:.1f}x)")
-
-    return {
-        "symbol": symbol,
-        "price": candidate["price"],
-        "change_24h": candidate["change_24h"],
-        "volume_24h": candidate["volume_24h"],
-        "market_cap": candidate["market_cap_approx"],
-        "score": final_score,
-        "reasons": reasons,
-        "rsi": rsi,
-        "adx": adx,
-        "volume_ratio": volume_ratio
-    }
-
-async def fetch_top_symbols(session, limit=100):
-    # استخدام ccxt إذا كان مفعلاً
-    if config.USE_CCXT:
-        try:
-            exchange = ccxt.binance({'enableRateLimit': True})
-            tickers = exchange.fetch_tickers()
-            candidates = []
-            for symbol, ticker in tickers.items():
-                if not symbol.endswith('/USDT'):
-                    continue
-                if 'UP/' in symbol or 'DOWN/' in symbol:
-                    continue
-                volume = ticker.get('quoteVolume', 0)
-                change = ticker.get('percentage', 0)
-                if volume < 100_000:
-                    continue
-                candidates.append((symbol.replace('/USDT', 'USDT'), volume, abs(change)))
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            return [sym for sym, _, _ in candidates[:limit]]
-        except Exception as e:
-            logger.error(f"ccxt top symbols error: {e}")
-
-    # fallback
-    try:
-        url = f"{config.BINANCE_COM_BASE}/api/v3/ticker/24hr"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        async with session.get(url, headers=headers, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                candidates = []
-                for item in data:
-                    symbol = item.get('symbol', '')
-                    if not symbol.endswith('USDT'):
-                        continue
-                    if any(stable in symbol for stable in ["USDC", "FDUSD", "TUSD", "BUSD", "DAI"]):
-                        continue
-                    if any(ex in symbol for ex in ["UP", "DOWN", "BULL", "BEAR", "HALF"]):
-                        continue
-                    volume = float(item.get('quoteVolume', 0))
-                    change = float(item.get('priceChangePercent', 0))
-                    if volume < 100_000:
-                        continue
-                    candidates.append((symbol, volume, abs(change)))
-                candidates.sort(key=lambda x: x[1], reverse=True)
-                return [sym for sym, _, _ in candidates[:limit]]
-    except Exception as e:
-        logger.error(f"Binance.com error: {e}")
-
-    try:
-        url = f"{config.BINANCE_US_BASE}/api/v3/ticker/24hr"
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                candidates = []
-                for item in data:
-                    symbol = item.get('symbol', '')
-                    if not symbol.endswith('USDT'):
-                        continue
-                    volume = float(item.get('quoteVolume', 0))
-                    change = float(item.get('priceChangePercent', 0))
-                    if volume < 100_000:
-                        continue
-                    candidates.append((symbol, volume, abs(change)))
-                candidates.sort(key=lambda x: x[1], reverse=True)
-                return [sym for sym, _, _ in candidates[:limit]]
-    except Exception as e:
-        logger.error(f"Binance.US error: {e}")
-
-    return []
-
-async def fetch_news(session, symbol):
-    try:
-        url = f"{config.CRYPTOPANIC_BASE}/posts/"
-        params = {'currencies': symbol.replace('USDT', ''), 'limit': 5}
-        async with session.get(url, params=params, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('results'):
-                    important = [item for item in data['results'] if item.get('metadata', {}).get('importance') in ['high', 'medium']]
-                    if important:
-                        return important[0]
-    except Exception as e:
-        logger.debug(f"News error for {symbol}: {e}")
-    return None
-
-async def self_pinger():
-    url = f"https://{config.RENDER_EXTERNAL_HOSTNAME}" if config.RENDER_EXTERNAL_HOSTNAME != "localhost" else f"http://localhost:{config.PORT}"
-    logger.info(f"🔄 Self-Pinger started, pinging {url} every 10 minutes")
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5) as resp:
-                    if resp.status == 200:
-                        logger.info("✅ Self-ping successful")
-                    else:
-                        logger.warning(f"⚠️ Self-ping status {resp.status}")
-        except Exception as e:
-            logger.error(f"❌ Self-ping error: {e}")
-        await asyncio.sleep(600)
-
-def symbol_to_currency_name(symbol):
-    mapping = {"BTCUSDT": "Bitcoin", "ETHUSDT": "Ethereum", "SOLUSDT": "Solana",
-               "XRPUSDT": "XRP", "DOGEUSDT": "Dogecoin", "ADAUSDT": "Cardano",
-               "DOTUSDT": "Polkadot", "LINKUSDT": "Chainlink", "UNIUSDT": "Uniswap"}
-    return mapping.get(symbol, symbol.replace("USDT", ""))
+    def recalculate(self):
+        scores = {}
+        for factor, history in self.performance_history.items():
+            scores[factor] = sum(1 for r in history if r > 0) / len(history) if history else 1.0
+        total = sum(scores.values())
+        if total > 0:
+            self.weights = {k: v / total for k, v in scores.items()}
+            logger.info("Adaptive weights updated", extra={"weights": self.weights})
