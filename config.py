@@ -1,91 +1,101 @@
+"""
+config.py - ملف الإعدادات المركزي للبوت.
+"""
 import os
+from dataclasses import dataclass, field
+from typing import List, Dict
 
+@dataclass
 class Config:
-    # -------------------- متغيرات البيئة --------------------
-    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-    ADMIN_CHAT_ID = os.environ.get("CHAT_ID", "")
-    DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///crypto_bot.db")
-    PORT = int(os.environ.get("PORT", 10000))
-    RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "localhost")
-
-    # -------------------- مصادر البيانات --------------------
-    BINANCE_US_BASE = "https://api.binance.us"
-    BINANCE_COM_BASE = "https://api.binance.com"
-    COINBASE_BASE = "https://api.exchange.coinbase.com"
-    COINCAP_BASE = "https://api.coincap.io/v2"
-    CRYPTOPANIC_BASE = "https://cryptopanic.com/api/v1"
-
-    # -------------------- إعدادات البوت (عتبات وسطية) --------------------
-    DB_PATH = DATABASE_URL.replace("sqlite:///", "")
-    RATE_LIMIT_DELAY = 0.1
-    SEMAPHORE_LIMIT = 5
-    COOLDOWN_MINUTES = 45
-    MIN_VOLUME_USD = 100_000
-    MIN_VOLATILITY_DAILY = 0.1
-
-    SIGNAL_SCORE_THRESHOLD = 4.5
-    CONFIRMATION_SCORE_BONUS = 0.5
-    CONFIRMATION_WAIT_CANDLES = 0
-    RISK_PER_TRADE = 0.01
-    MAX_POSITION_SIZE_PCT = 2.0
-    MIN_CHANGE_1H = 0.1
-    RSI_PERIOD = 6
-    ADX_PERIOD = 14
-    MIN_ADX_STRONG = 12
-    DAILY_LOSS_LIMIT_PCT = 3.0
-    PAPER_TRADING = True
-    INITIAL_CAPITAL = 10000.0
-    MAX_OPEN_TRADES = 3
-    DYNAMIC_SYMBOLS_LIMIT = 100
-    DYNAMIC_UPDATE_INTERVAL = 900
-    ADAPTIVE_THRESHOLD = True
-
-    # -------------------- ccxt --------------------
-    USE_CCXT = True
-    CCXT_EXCHANGE = "binance"
-    CCXT_RATE_LIMIT = 1200
-    CCXT_MAX_SYMBOLS = 200
-
-    # -------------------- ADX --------------------
-    ENABLE_ADX_FILTER = True
-    MIN_ADX_STRONG = 12
-
-    # -------------------- المراقبة الاستباقية --------------------
-    PRE_WATCH_ENABLED = True
-    PRE_WATCH_SCAN_INTERVAL = 300
-    PRE_WATCH_MIN_VOLUME = 75_000
-    PRE_WATCH_MIN_CHANGE = 0.4
-    PRE_WATCH_MAX_SUPPLY = 1_000_000_000
-    PRE_WATCH_ALERT_THRESHOLD = 55
-    PRE_WATCH_MAX_SYMBOLS = 20
-
-    # -------------------- ضوابط مسح العملات غير المدرجة --------------------
-    MAX_PREWATCH_TO_SCAN = 30
-    SCAN_UNLISTED_SYMBOLS = True
-
-    # -------------------- قواعد الانفجار المبكر --------------------
-    BB_SQUEEZE_THRESHOLD = 2.0
-    EARLY_VOLUME_RATIO = 1.8
-
-    # -------------------- قائمة العملات الأساسية (موسعة) --------------------
-    CORE_UNIVERSE = [
+    # ─── مفاتيح API ───
+    BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
+    BINANCE_SECRET_KEY: str = os.getenv("BINANCE_SECRET_KEY", "")
+    
+    # ─── Telegram ───
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_ADMIN_ID: int = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
+    TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
+    
+    # ─── إعدادات السوق ───
+    QUOTE_ASSET: str = "USDT"
+    TOP_N_COINS: int = 50
+    TIMEFRAMES: List[str] = field(default_factory=lambda: ["5m", "1h", "4h"])
+    SCAN_INTERVAL_SECONDS: int = 60
+    
+    # ─── إعدادات قاعدة البيانات ───
+    DB_PATH: str = "crypto_signals.db"
+    MAX_CANDLES_PER_SYMBOL: int = 250
+    
+    # ─── إعدادات المخاطر ───
+    VIRTUAL_CAPITAL: float = 10_000.0
+    RISK_PER_TRADE_PERCENT: float = 1.0
+    MAX_DAILY_LOSS_PERCENT: float = 3.0
+    COOLDOWN_MINUTES: int = 45
+    OPPOSITE_SIGNAL_COOLDOWN: int = 240
+    PRICE_TOLERANCE: float = 0.005
+    MIN_RR_RATIO: float = 2.0
+    SL_BUFFER_PERCENT: float = 0.003  # 0.3%
+    
+    # ─── عتبات المؤشرات ───
+    RSI_PERIOD: int = 6
+    RSI_OVERSOLD: float = 30.0
+    RSI_OVERBOUGHT: float = 70.0
+    ADX_PERIOD: int = 14
+    ADX_STRONG_TREND: float = 25.0
+    ADX_WEAK_TREND: float = 20.0
+    BB_PERIOD: int = 20
+    BB_STD: float = 2.0
+    BB_SQUEEZE_THRESHOLD: float = 0.05
+    SMA_FAST: int = 20
+    SMA_SLOW: int = 50
+    MACD_FAST: int = 12
+    MACD_SLOW: int = 26
+    MACD_SIGNAL: int = 9
+    MOMENTUM_PERIOD: int = 6
+    VOLUME_AVG_PERIOD: int = 12
+    VOLUME_SPIKE_RATIO: float = 1.5
+    ATR_PERIOD: int = 14
+    ATR_SL_MULTIPLIER: float = 1.5
+    
+    # ─── عتبات الإشارة ───
+    MIN_CONFIDENCE: float = 75.0
+    MIN_SCORE: float = 7.0
+    MAX_SCORE_SIDEWAYS: float = 6.0
+    
+    # ─── أوزان المؤشرات ───
+    WEIGHTS: Dict[str, float] = field(default_factory=lambda: {
+        "trend": 0.20, "momentum": 0.15, "volume": 0.15,
+        "volatility": 0.15, "rsi": 0.15, "macd": 0.10, "pivot": 0.10,
+    })
+    
+    # ─── قائمة العملات الأساسية ───
+    CORE_UNIVERSE: List[str] = field(default_factory=lambda: [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
         "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
         "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ICPUSDT", "ETCUSDT", "XTZUSDT",
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "TONUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT"
-    ]
+        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
+    ])
+    
+    # ─── إعدادات Pre-watch ───
+    SCAN_UNLISTED_SYMBOLS: bool = True
+    MAX_PREWATCH_TO_SCAN: int = 30
+    
+    # 🔥 إعدادات الأداء (حل عنق الزجاجة)
+    MAX_CONCURRENT_REQUESTS: int = 10  # رفع عدد الطلبات المتزامنة لتسريع المسح
+    REQUEST_DELAY: float = 0.05        # تقليل زمن الانتظار بين الطلبات
+    
+    # ─── النشر ───
+    RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
+    SELF_PING_INTERVAL: int = 300
+    
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "json"
 
-    TIMEFRAMES = {
-        "5m": {"limit": 100, "weight": 1.0},
-        "1h": {"limit": 30, "weight": 1.5},
-        "4h": {"limit": 20, "weight": 2.0},
-    }
-
-config = Config()
+CFG = Config()
