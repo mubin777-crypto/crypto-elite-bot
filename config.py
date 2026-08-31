@@ -76,11 +76,11 @@ class Config:
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "TONUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT"
+        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
     ])
     
     # ─── إعدادات Pre-watch ───
@@ -94,6 +94,9 @@ class Config:
     # ─── النشر ───
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
     SELF_PING_INTERVAL: int = 300
+    
+    # 🔥 إضافة متغير PORT لقراءة المنفذ من البيئة
+    PORT: int = int(os.getenv("PORT", "8080"))
     
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
