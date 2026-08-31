@@ -1,35 +1,24 @@
 """
-backtest.py - نظام اختبار خلفي مدمج لتقييم جودة الإشارات على البيانات التاريخية.
-متوافق مع هيكل قاعدة البيانات الجديد وإخراج الإشارات.
+backtest.py - نظام الاختبار الخلفي لتقييم الأداء.
 """
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Optional
+from datetime import datetime, timezone
 from config import CFG
 from utils import logger, fetcher
 from database import db
 
-
 class Backtester:
-    """
-    محاكاة تنفيذ الإشارات الصادرة عن البوت على بيانات تاريخية.
-    يقوم بحساب مقاييس الأداء مثل نسبة النجاح، معامل الربح، ونسبة شارب.
-    """
-
     def __init__(self):
         self.trades: List[Dict] = []
-        self._price_cache: Dict[str, pd.DataFrame] = {}  # تخزين مؤقت للبيانات
+        self._price_cache: Dict[str, pd.DataFrame] = {}
 
     async def _fetch_historical_data(self, symbol: str, days: int = 7) -> Optional[pd.DataFrame]:
-        """جلب بيانات تاريخية لإطار زمني 5 دقائق لعدد محدد من الأيام."""
         if symbol in self._price_cache:
             return self._price_cache[symbol]
-
         try:
-            # نحتاج إلى عدد كبير من الشموع لمحاكاة صفقة واحدة (نحو 20 شمعة بعد الإشارة)
-            # 7 أيام كافية للتغطية
-            limit = days * 24 * 12  # 12 شمعة 5 دقائق في الساعة
+            limit = days * 24 * 12
             df = await fetcher.fetch_klines(symbol, "5m", limit=min(limit, 500))
             if not df.empty:
                 self._price_cache[symbol] = df
@@ -39,9 +28,6 @@ class Backtester:
         return None
 
     async def simulate_signal(self, signal: Dict, df_future: pd.DataFrame) -> Dict:
-        """
-        محاكاة صفقة واحدة بناءً على إشارة وبيانات مستقبلية.
-        """
         entry = signal["entry_price"]
         sl = signal["stop_loss"]
         tp = signal["take_profit"]
@@ -68,7 +54,6 @@ class Backtester:
             result["status"] = "NO_DATA"
             return result
 
-        # محاكاة السير على الشموع المستقبلية (بحد أقصى 20 شمعة لتجنب التشتت)
         max_bars = 20
         for i, (_, row) in enumerate(df_future.head(max_bars).iterrows()):
             high = row["high"]
@@ -77,7 +62,6 @@ class Backtester:
             result["duration_bars"] = i + 1
 
             if signal_type == "BUY":
-                # فحص وقف الخسارة أولاً (حماية رأس المال)
                 if low <= sl:
                     result["exit_price"] = sl
                     result["pnl"] = (sl - entry) * position_size
@@ -85,7 +69,6 @@ class Backtester:
                     result["status"] = "HIT_SL"
                     result["exit_reason"] = "Stop Loss"
                     break
-                # فحص جني الأرباح
                 elif high >= tp:
                     result["exit_price"] = tp
                     result["pnl"] = (tp - entry) * position_size
@@ -93,7 +76,7 @@ class Backtester:
                     result["status"] = "HIT_TP"
                     result["exit_reason"] = "Take Profit"
                     break
-            else:  # SELL
+            else:
                 if high >= sl:
                     result["exit_price"] = sl
                     result["pnl"] = (entry - sl) * position_size
@@ -109,7 +92,6 @@ class Backtester:
                     result["exit_reason"] = "Take Profit"
                     break
 
-            # إذا انتهت الشموع دون الوصول إلى SL/TP
             if i == max_bars - 1 or i == len(df_future) - 1:
                 result["exit_price"] = close
                 if signal_type == "BUY":
@@ -125,11 +107,6 @@ class Backtester:
         return result
 
     async def run_on_history(self, signals: List[Dict], days_future: int = 1) -> Dict:
-        """
-        تشغيل الاختبار الخلفي على مجموعة إشارات.
-        signals: قائمة الإشارات من قاعدة البيانات.
-        days_future: عدد الأيام التي ننظر فيها للأمام لمحاكاة الصفقة (افتراضي يوم واحد).
-        """
         self.trades = []
         total = len(signals)
 
@@ -137,34 +114,26 @@ class Backtester:
             symbol = signal["symbol"]
             logger.info(f"Backtesting {idx+1}/{total}: {symbol}")
 
-            # جلب البيانات التاريخية للمستقبل (بعد وقت الإشارة)
             df_history = await self._fetch_historical_data(symbol, days=days_future + 1)
             if df_history is None or df_history.empty:
                 continue
 
-            # تحديد موقع الإشارة في البيانات
             signal_time = pd.to_datetime(signal.get("created_at") or signal.get("timestamp"))
             if pd.isna(signal_time):
                 continue
 
-            # جلب الشموع التي تلت وقت الإشارة
             future_mask = df_history["open_time"] > signal_time
             df_future = df_history[future_mask]
 
             if df_future.empty:
                 continue
 
-            # محاكاة الصفقة
             trade = await self.simulate_signal(signal, df_future)
             self.trades.append(trade)
-
-            # تحديث حالة الإشارة في قاعدة البيانات (اختياري)
-            # db.update_signal_status(signal.get("id"), trade["status"])
 
         return self._calculate_metrics()
 
     def _calculate_metrics(self) -> Dict:
-        """حساب مقاييس الأداء من قائمة الصفقات المحاكاة."""
         if not self.trades:
             return {
                 "total_trades": 0,
@@ -190,7 +159,6 @@ class Backtester:
         gross_loss = sum(abs(t["pnl"]) for t in losses)
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
 
-        # أقصى انخفاض متتالي
         max_consecutive_losses = 0
         current_streak = 0
         for t in self.trades:
@@ -200,10 +168,9 @@ class Backtester:
             else:
                 current_streak = 0
 
-        # نسبة شارب الشهرية (تقريبية)
         returns = [t["pnl"] for t in self.trades]
         if len(returns) > 1 and np.std(returns) > 0:
-            sharpe = (np.mean(returns) / np.std(returns)) * np.sqrt(30)  # شهرياً
+            sharpe = (np.mean(returns) / np.std(returns)) * np.sqrt(30)
         else:
             sharpe = 0.0
 
@@ -224,7 +191,6 @@ class Backtester:
         return metrics
 
     def generate_weekly_report(self, metrics: Dict) -> str:
-        """توليد تقرير أداء قابل للإرسال عبر Telegram."""
         report = (
             "📊 *تقرير الأداء الأسبوعي (Backtest)*\n\n"
             f"📈 إجمالي الصفقات: {metrics.get('total_trades', 0)}\n"
@@ -240,19 +206,4 @@ class Backtester:
         )
         return report
 
-    async def run_weekly_report(self) -> str:
-        """
-        تشغيل تقرير أسبوعي باستخدام آخر 7 أيام من الإشارات.
-        """
-        # جلب إشارات آخر 7 أيام من قاعدة البيانات
-        signals = db.get_signals_for_backtest(days=7)
-        if not signals:
-            return "📊 لا توجد إشارات كافية في الأيام السبعة الماضية لإجراء التقرير."
-
-        # تشغيل الاختبار الخلفي
-        metrics = await self.run_on_history(signals, days_future=1)
-        return self.generate_weekly_report(metrics)
-
-
-# كائن عمومي للاستخدام في جميع أنحاء البوت
 backtester = Backtester()
