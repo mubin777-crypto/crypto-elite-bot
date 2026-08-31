@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي للبوت مع خادم Web مدمج وتأكيد قراءة التوكن.
+bot.py - الملف الرئيسي مع فصل مهام التليجرام عن المسح.
 """
 import asyncio
 import os
@@ -23,22 +23,22 @@ class CryptoSignalBot:
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
         
-        # 🔥 تأكيد قراءة التوكن من البيئة
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if token:
             logger.info(f"✅ TELEGRAM_BOT_TOKEN موجود في البيئة (الطول: {len(token)} حرف)")
         else:
             logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة.")
-            # محاولة قراءة من CFG
             if CFG.TELEGRAM_BOT_TOKEN:
                 logger.info("ℹ️ تم العثور على التوكن في CFG.")
         
-        # 🔥 بدء التليجرام مع تأخير
-        await asyncio.sleep(1)
+        # بدء التليجرام (سيتم تشغيله في الخلفية)
         await telegram.start()
         
-        # جلب قائمة العملات
+        # جلب قائمة العملات (مع مهلة قصيرة)
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
+        if not self.symbols:
+            logger.warning("⚠️ لم يتم جلب أي عملات، سيتم استخدام القائمة الأساسية.")
+            self.symbols = CFG.CORE_UNIVERSE[:50]
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
     # ─── خادم HTTP ───
@@ -88,6 +88,7 @@ class CryptoSignalBot:
             df_1h = await fetcher.fetch_klines(symbol, "1h", 100)
             df_4h = await fetcher.fetch_klines(symbol, "4h", 100)
             if df_5m.empty or df_1h.empty or df_4h.empty:
+                logger.debug(f"⏭️ تخطي {symbol}: بيانات غير كافية")
                 return
 
             db.save_candles(symbol, "5m", df_5m)
@@ -127,8 +128,11 @@ class CryptoSignalBot:
     async def run_scan_cycle(self):
         logger.info("🔄 Starting scan cycle...")
         
-        if int(datetime.now(timezone.utc).minute) % 3 == 0:
-            await self.scan_market_for_opportunities()
+        try:
+            if int(datetime.now(timezone.utc).minute) % 3 == 0:
+                await self.scan_market_for_opportunities()
+        except Exception as e:
+            logger.error(f"خطأ في ماسح الفرص: {e}")
         
         pre_watch_symbols = db.get_active_prewatch(CFG.MAX_PREWATCH_TO_SCAN) if CFG.SCAN_UNLISTED_SYMBOLS else []
         all_symbols = list(set(CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols))
@@ -176,14 +180,31 @@ class CryptoSignalBot:
             await self.initialize()
             await self.start_web_server()
             
+            # 🔥 تشغيل مهام الخلفية (لا تمنع Event Loop)
             asyncio.create_task(self.health_check())
             asyncio.create_task(self.self_ping())
             
+            # 🔥 بدء تشغيل التليجرام كـ Updater منفصل (إذا لم يكن قد بدأ)
+            if telegram.app and not telegram.app.updater.running:
+                await telegram.app.updater.start_polling()
+                logger.info("✅ Telegram polling started")
+            
             while self.running:
-                await self.run_scan_cycle()
+                try:
+                    await self.run_scan_cycle()
+                except Exception as e:
+                    logger.error(f"❌ خطأ في دورة المسح: {e}")
                 await asyncio.sleep(CFG.SCAN_INTERVAL_SECONDS)
+                
+                # تحديث قائمة العملات كل ساعة
                 if datetime.now(timezone.utc).minute == 0:
-                    self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
+                    try:
+                        self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
+                        if not self.symbols:
+                            self.symbols = CFG.CORE_UNIVERSE[:50]
+                    except Exception as e:
+                        logger.error(f"خطأ في تحديث القائمة: {e}")
+                        
         except Exception as e:
             logger.critical("💥 Bot crashed", extra={"error": str(e)})
             raise
