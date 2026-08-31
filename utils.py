@@ -1,5 +1,5 @@
 """
-utils.py - طبقة جلب البيانات والأدوات المساعدة.
+utils.py - طبقة جلب البيانات والأدوات المساعدة مع تحسين endpoints.
 """
 import asyncio
 import aiohttp
@@ -51,10 +51,12 @@ class RateLimiter:
 
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
 
-# ─── مصادر البيانات ───
+# ─── مصادر البيانات (تم تعديل الترتيب) ───
 BINANCE_ENDPOINTS = [
-    "https://api.binance.com",
-    "https://api.binance.us",
+    "https://api1.binance.com",   # ✅ الأسرع والأكثر استقراراً
+    "https://api2.binance.com",   # احتياطي
+    "https://api3.binance.com",   # احتياطي
+    "https://api.binance.us",     # احتياطي أخير
 ]
 
 _symbol_filters_cache: Dict[str, Dict] = {}
