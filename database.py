@@ -29,6 +29,7 @@ class Database:
 
     def _init_tables(self):
         with self._connect() as conn:
+            # جدول الشموع
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS candles (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,6 +44,7 @@ class Database:
                     UNIQUE(symbol, timeframe, open_time)
                 )
             """)
+            # جدول الإشارات
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +62,7 @@ class Database:
                     status TEXT DEFAULT 'PENDING'
                 )
             """)
+            # جدول آخر إشارة (لمنع التكرار)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS last_signal (
                     symbol TEXT PRIMARY KEY,
@@ -70,6 +73,14 @@ class Database:
                     timestamp TEXT
                 )
             """)
+            # جدول التبريد
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS signal_cooldown (
+                    symbol TEXT PRIMARY KEY,
+                    last_signal_time TEXT
+                )
+            """)
+            # جدول الإحصائيات اليومية
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS daily_stats (
                     date TEXT PRIMARY KEY,
@@ -80,6 +91,7 @@ class Database:
                     capital REAL DEFAULT 0.0
                 )
             """)
+            # جدول حالة المسح
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS scan_state (
                     key TEXT PRIMARY KEY,
@@ -87,6 +99,7 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # جدول الأوزان التكيفية
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS adaptive_weights (
                     factor TEXT PRIMARY KEY,
@@ -94,6 +107,7 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # جدول المراقبة الاستباقية
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS pre_watch (
                     symbol TEXT PRIMARY KEY,
@@ -105,6 +119,7 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # الفهارس
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, open_time DESC)
             """)
@@ -112,6 +127,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol, created_at DESC)
             """)
 
+    # ==================== دوال الشموع ====================
     def save_candles(self, symbol: str, timeframe: str, df: pd.DataFrame):
         with self._connect() as conn:
             cutoff = datetime.now(timezone.utc) - timedelta(days=7)
@@ -151,6 +167,7 @@ class Database:
             df = df.sort_values("open_time").reset_index(drop=True)
             return df
 
+    # ==================== دوال الإشارات ====================
     def save_signal(self, signal: Dict) -> int:
         with self._connect() as conn:
             cursor = conn.execute("""
@@ -171,6 +188,20 @@ class Database:
             ))
             return cursor.lastrowid
 
+    def get_signals_for_backtest(self, days: int = 30) -> List[Dict]:
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT * FROM signals
+                WHERE created_at > datetime('now', '-{} days') AND status = 'PENDING'
+                ORDER BY created_at DESC
+            """.format(days)).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_signal_status(self, signal_id: int, status: str):
+        with self._connect() as conn:
+            conn.execute("UPDATE signals SET status=? WHERE id=?", (status, signal_id))
+
+    # ==================== دوال آخر إشارة ====================
     def get_last_signal(self, symbol: str) -> Optional[Dict]:
         with self._connect() as conn:
             row = conn.execute(
@@ -196,6 +227,24 @@ class Database:
                 (symbol, signal_type, price, action, direction, now)
             )
 
+    # ==================== دوال التبريد ====================
+    async def set_cooldown(self, symbol: str, timestamp: str):
+        """حفظ وقت آخر إشارة مع تأكيد الكتابة."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)",
+                (symbol, timestamp)
+            )
+            conn.commit()
+
+    async def get_cooldown(self, symbol: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_signal_time FROM signal_cooldown WHERE symbol=?",
+                (symbol,)
+            ).fetchone()
+            return row[0] if row else None
+
     def get_last_signal_time(self, symbol: str, minutes: int = 45) -> Optional[datetime]:
         with self._connect() as conn:
             row = conn.execute("""
@@ -205,6 +254,7 @@ class Database:
             """.format(minutes), (symbol,)).fetchone()
             return datetime.fromisoformat(row["created_at"]) if row else None
 
+    # ==================== دوال الإحصائيات اليومية ====================
     def get_daily_stats(self, date: Optional[str] = None) -> Dict:
         if date is None:
             date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -239,6 +289,7 @@ class Database:
         with self._connect() as conn:
             conn.execute("DELETE FROM daily_stats WHERE date=?", (date,))
 
+    # ==================== دوال Pre-watch ====================
     def get_active_prewatch(self, limit: int = 30) -> List[str]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -261,6 +312,7 @@ class Database:
                     updated_at = CURRENT_TIMESTAMP
             """, (symbol, score, change_24h, volume_24h, reason))
 
+    # ==================== دوال حالة المسح ====================
     def get_scan_state(self, key: str) -> Optional[str]:
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM scan_state WHERE key=?", (key,)).fetchone()
@@ -274,6 +326,7 @@ class Database:
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
             """, (key, value))
 
+    # ==================== دوال الأوزان التكيفية ====================
     def get_adaptive_weights(self) -> Optional[Dict[str, float]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT factor, weight FROM adaptive_weights").fetchall()
@@ -289,18 +342,5 @@ class Database:
                     VALUES (?, ?)
                     ON CONFLICT(factor) DO UPDATE SET weight=excluded.weight
                 """, (factor, weight))
-
-    def get_signals_for_backtest(self, days: int = 30) -> List[Dict]:
-        with self._connect() as conn:
-            rows = conn.execute("""
-                SELECT * FROM signals
-                WHERE created_at > datetime('now', '-{} days') AND status = 'PENDING'
-                ORDER BY created_at DESC
-            """.format(days)).fetchall()
-            return [dict(r) for r in rows]
-
-    def update_signal_status(self, signal_id: int, status: str):
-        with self._connect() as conn:
-            conn.execute("UPDATE signals SET status=? WHERE id=?", (status, signal_id))
 
 db = Database()
