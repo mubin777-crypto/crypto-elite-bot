@@ -2,10 +2,11 @@
 telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات.
 """
 import asyncio
-from typing import Dict
+import logging
+from typing import Dict, Optional
 from telegram import Update, Bot
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes
+    ApplicationBuilder, CommandHandler, ContextTypes, Application
 )
 from config import CFG
 from database import db
@@ -14,11 +15,28 @@ from utils import logger
 
 class TelegramManager:
     def __init__(self):
-        self.app = ApplicationBuilder().token(CFG.TELEGRAM_BOT_TOKEN).build()
-        self.bot: Bot = self.app.bot
+        self.app: Optional[Application] = None
+        self.bot: Optional[Bot] = None
+        self._token = CFG.TELEGRAM_BOT_TOKEN
+        self._initialized = False
+
+    def _ensure_initialized(self):
+        """تأكد من إنشاء التطبيق فقط عند الحاجة وبعد التحقق من التوكن."""
+        if self._initialized:
+            return
+        
+        if not self._token or self._token == "":
+            raise ValueError("❌ TELEGRAM_BOT_TOKEN غير معرّف. يرجى تعيينه في متغيرات البيئة.")
+        
+        self.app = ApplicationBuilder().token(self._token).build()
+        self.bot = self.app.bot
         self._setup_handlers()
+        self._initialized = True
+        logger.info("Telegram Application initialized successfully")
 
     def _setup_handlers(self):
+        if not self.app:
+            return
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("prewatch", self.cmd_prewatch))
@@ -29,6 +47,7 @@ class TelegramManager:
     def _is_admin(self, user_id: int) -> bool:
         return user_id == CFG.TELEGRAM_ADMIN_ID
 
+    # ─── الأوامر ───
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome = (
             "🤖 *بوت إشارات العملات الرقمية*\n\n"
@@ -59,7 +78,13 @@ class TelegramManager:
         )
 
     async def cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        report = backtester.generate_weekly_report(backtester._calculate_metrics())
+        # تشغيل الاختبار الخلفي على آخر 7 أيام من الإشارات
+        signals = db.get_signals_for_backtest(days=7)
+        if not signals:
+            await update.message.reply_text("📊 لا توجد إشارات كافية في الأيام السبعة الماضية لإجراء التقرير.")
+            return
+        metrics = await backtester.run_on_history(signals, days_future=1)
+        report = backtester.generate_weekly_report(metrics)
         await update.message.reply_text(report, parse_mode="Markdown")
 
     async def cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -76,7 +101,9 @@ class TelegramManager:
         db.reset_daily_stats()
         await update.message.reply_text("✅ تم إعادة ضبط الإحصائيات اليومية.")
 
+    # ─── إرسال الإشارات والتنبيهات ───
     async def send_signal(self, signal: Dict, chat_id: str = None):
+        self._ensure_initialized()
         if chat_id is None:
             chat_id = CFG.TELEGRAM_CHANNEL_ID or str(CFG.TELEGRAM_ADMIN_ID)
         
@@ -104,6 +131,7 @@ class TelegramManager:
             logger.error("Failed to send Telegram signal", extra={"error": str(e)})
 
     async def send_alert(self, message: str, to_admin: bool = True):
+        self._ensure_initialized()
         chat_id = str(CFG.TELEGRAM_ADMIN_ID) if to_admin else CFG.TELEGRAM_CHANNEL_ID
         try:
             await self.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
@@ -111,11 +139,16 @@ class TelegramManager:
             logger.error("Failed to send alert", extra={"error": str(e)})
 
     async def start(self):
+        """بدء تشغيل البوت بعد التحقق من وجود التوكن."""
+        self._ensure_initialized()
         await self.app.initialize()
         await self.app.start()
         logger.info("Telegram bot started")
 
     async def stop(self):
-        await self.app.stop()
+        if self.app:
+            await self.app.stop()
+        self._initialized = False
 
+# ─── كائن عالمي ───
 telegram = TelegramManager()
