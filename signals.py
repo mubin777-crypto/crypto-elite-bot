@@ -1,5 +1,5 @@
 """
-signals.py - محرك توليد الإشارات مع إصلاح حساب المخاطرة ومعالجة الـ NaN.
+signals.py - محرك توليد الإشارات.
 """
 import numpy as np
 import pandas as pd
@@ -159,7 +159,8 @@ class SignalEngine:
         if confidence < CFG.MIN_CONFIDENCE:
             return None
 
-        return {
+        # بناء الإشارة
+        signal = {
             "symbol": symbol,
             "timeframe": "5m",
             "type": signal_type,
@@ -175,6 +176,18 @@ class SignalEngine:
             "volume_ratio": round(vol_ratio, 2),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+
+        # 🔥 تحسين: تحديد نوع الإشارة النصي بناءً على الدرجة
+        if signal["score"] >= 8.0:
+            signal["signal"] = "🟢 **شراء قوي**" if signal_type == "BUY" else "🔴 **بيع قوي**"
+        elif signal["score"] >= 6.0:
+            signal["signal"] = "🟢 **شراء**" if signal_type == "BUY" else "🔴 **بيع**"
+        elif signal["score"] >= 4.0:
+            signal["signal"] = "🟡 **مراقبة**"
+        else:
+            signal["signal"] = "⚪ **حيادي**"
+
+        return signal
 
     def _get_trend_direction(self, df: pd.DataFrame) -> str:
         if len(df) < CFG.SMA_SLOW:
@@ -198,13 +211,12 @@ class SignalEngine:
         near_resistance = abs(close - high_20) / high_20 < 0.01 if high_20 > 0 else False
         return squeeze_3 and vol_spike and near_resistance
 
-    # 🔥 إضافة فحص صارم للـ NaN لحماية البوت من الأخطاء الصامتة
     def _calculate_risk_levels(self, entry: float, atr: float, pivots: Dict[str, float],
                                signal_type: str) -> Tuple[Optional[float], Optional[float], float]:
         if entry <= 0:
             return None, None, 0.0
 
-        buffer = 1.0 - CFG.SL_BUFFER_PERCENT  # 0.997
+        buffer = 1.0 - CFG.SL_BUFFER_PERCENT
 
         if entry < 0.01:
             if signal_type == "BUY":
@@ -220,28 +232,23 @@ class SignalEngine:
 
         if signal_type == "BUY":
             sl_atr = entry - atr_sl
-            # 🔥 فحص الـ NaN ومنع الضرب بالقيم غير الصالحة
             s1_val = pivots.get("s1", sl_atr)
             if pd.isna(s1_val) or s1_val is None or s1_val == 0:
                 sl_support = sl_atr
             else:
                 sl_support = s1_val * buffer if s1_val < entry else sl_atr
-
             sl = max(sl_atr, sl_support) if sl_support < entry else sl_atr
             if sl >= entry:
                 sl = entry - atr_sl
             risk = entry - sl
             tp = entry + (risk * CFG.MIN_RR_RATIO)
-
-        else:  # SELL
+        else:
             sl_atr = entry + atr_sl
-            # 🔥 فحص الـ NaN
             r1_val = pivots.get("r1", sl_atr)
             if pd.isna(r1_val) or r1_val is None or r1_val == 0:
                 sl_resist = sl_atr
             else:
                 sl_resist = r1_val / buffer if r1_val > entry else sl_atr
-
             sl = min(sl_atr, sl_resist) if sl_resist > entry else sl_atr
             if sl <= entry:
                 sl = entry + atr_sl
