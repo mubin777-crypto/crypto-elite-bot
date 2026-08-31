@@ -98,10 +98,8 @@ class Config:
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
 
-# ✅ كائن الإعدادات
 CFG = Config()
 
-# 🔥 تحقق سريع من وجود التوكن عند التحميل (للكشف المبكر)
 if not CFG.TELEGRAM_BOT_TOKEN:
     import logging
     logging.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف في البيئة. سيعمل البوت لكن بدون إرسال إشارات.")
