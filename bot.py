@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي للبوت مع خادم Web مدمج.
+bot.py - الملف الرئيسي للبوت مع خادم Web مدمج وتأكيد قراءة التوكن.
 """
 import asyncio
 import os
@@ -22,10 +22,14 @@ class CryptoSignalBot:
 
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
-        if not CFG.TELEGRAM_BOT_TOKEN:
-            logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف. سيتم تسجيل الإشارات في السجلات فقط.")
+        
+        # 🔥 تأكيد قراءة التوكن من البيئة
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if token:
+            logger.info(f"✅ TELEGRAM_BOT_TOKEN موجود في البيئة (الطول: {len(token)} حرف)")
         else:
-            logger.info("✅ TELEGRAM_BOT_TOKEN موجود.")
+            logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة.")
+        
         await telegram.start()
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
@@ -151,7 +155,6 @@ class CryptoSignalBot:
                 logger.warning("⚠️ Self-ping failed", extra={"error": str(e)})
             await asyncio.sleep(CFG.SELF_PING_INTERVAL)
 
-    # 🔥 دالة _shutdown المتزامنة (غير async) لإشارة SIGINT/SIGTERM
     def _shutdown(self):
         logger.info("🛑 Shutdown signal received")
         self.running = False
@@ -160,7 +163,7 @@ class CryptoSignalBot:
         self.running = True
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._shutdown)  # الآن _shutdown موجودة
+            loop.add_signal_handler(sig, self._shutdown)
 
         try:
             await self.initialize()
