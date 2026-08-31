@@ -3,6 +3,7 @@ bot.py - الملف الرئيسي لتشغيل البوت.
 """
 import asyncio
 import signal
+import sys
 from datetime import datetime, timezone
 from typing import List, Dict
 from config import CFG
@@ -19,6 +20,11 @@ class CryptoSignalBot:
 
     async def initialize(self):
         logger.info("Initializing bot...")
+        # التحقق من وجود توكن التليجرام قبل بدء البوت
+        if not CFG.TELEGRAM_BOT_TOKEN or CFG.TELEGRAM_BOT_TOKEN == "":
+            logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف. لن يعمل البوت بدون توكن.")
+            sys.exit(1)
+        
         await telegram.start()
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         logger.info("Symbols loaded", extra={"count": len(self.symbols)})
@@ -81,7 +87,7 @@ class CryptoSignalBot:
             db.set_last_signal(symbol, signal['type'], signal['entry_price'], signal['type'], signal['type'])
             db.update_daily_stats(0, False)
             
-            # 🔥 إرسال الإشارة عبر التليجرام مع تمييز القوي منها
+            # إرسال الإشارة عبر التليجرام
             await telegram.send_signal(signal)
             
             logger.info("Signal generated", extra={"symbol": symbol, "type": signal["type"]})
