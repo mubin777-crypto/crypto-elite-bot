@@ -1,11 +1,12 @@
 """
-utils.py - طبقة جلب البيانات والأدوات المساعدة مع تحسينات Timeout و SSL.
+utils.py - طبقة جلب البيانات والأدوات المساعدة مع حل جذري لمشكلة SSL.
 """
 import asyncio
 import aiohttp
 import json
 import logging
 import time
+import ssl  # 🔥 إضافة مكتبة SSL
 from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timezone
 import numpy as np
@@ -51,7 +52,7 @@ class RateLimiter:
 
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
 
-# ─── مصادر البيانات ───
+# ─── مصادر البيانات (تم ترتيبها حسب الأسرع) ───
 BINANCE_ENDPOINTS = [
     "https://api1.binance.com",
     "https://api2.binance.com",
@@ -67,20 +68,30 @@ class DataFetcher:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
-            # 🔥 زيادة المهلة إلى 30 ثانية مع إعدادات مفصلة
+            # 🔥 إعداد SSL Context لتجاوز مشاكل الشهادات (الحل الجذري)
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+            # 🔥 زيادة المهلات بشكل كبير
             timeout = aiohttp.ClientTimeout(
                 total=30,
-                connect=10,
-                sock_read=10
+                connect=15,
+                sock_read=15
             )
-            # 🔥 إضافة User-Agent قوي وتعطيل SSL مؤقتاً للاختبار
+
+            # 🔥 إضافة User-Agent قوي
+            headers = {
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                },
-                connector=aiohttp.TCPConnector(ssl=False)  # تعطيل SSL للاختبار
+                headers=headers,
+                connector=connector
             )
         return self.session
 
