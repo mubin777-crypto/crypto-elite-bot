@@ -1,5 +1,5 @@
 """
-signals.py - محرك توليد الإشارات.
+signals.py - محرك توليد الإشارات مع تحسينات الاتجاه وإصلاح SL/TP.
 """
 import numpy as np
 import pandas as pd
@@ -26,12 +26,14 @@ class SignalEngine:
         if not ind_5m:
             return None
 
-        trend_4h = self._get_trend_direction(df_4h)
+        # 🔥 حساب ADX أولاً لنمرره لدالة الاتجاه
+        adx_val = ind_5m["adx"].iloc[-1]
+        trend_4h = self._get_trend_direction(df_4h, adx_val)
+        
         last_idx = len(df_5m) - 1
         prev_idx = last_idx - 1
         close = df_5m["close"].iloc[last_idx]
         rsi_val = ind_5m["rsi"].iloc[last_idx]
-        adx_val = ind_5m["adx"].iloc[last_idx]
         sma20 = ind_5m["sma20"].iloc[last_idx]
         sma50 = ind_5m["sma50"].iloc[last_idx]
         momentum = ind_5m["momentum"].iloc[last_idx]
@@ -45,9 +47,11 @@ class SignalEngine:
         pivots = ind_5m["pivots"]
         atr = calculate_atr(df_5m, CFG.ATR_PERIOD).iloc[last_idx]
 
+        # Cooldown
         if db.get_last_signal_time(symbol, CFG.COOLDOWN_MINUTES):
             return None
 
+        # Daily Loss
         daily_stats = db.get_daily_stats()
         if daily_stats.get("pnl", 0) <= -(CFG.VIRTUAL_CAPITAL * CFG.MAX_DAILY_LOSS_PERCENT / 100):
             logger.warning("Daily loss limit reached", extra={"symbol": symbol})
@@ -56,17 +60,19 @@ class SignalEngine:
         scores = {}
         reasons = []
 
-        # 1. الاتجاه
+        # ─── 1. الاتجاه (محسّن باستخدام ADX) ───
         trend_score = 0
-        if trend_4h == "UP" and close > sma50 and sma20 > sma50:
+        if trend_4h == "UP":
             trend_score = 1.0
-            reasons.append("الاتجاه الرئيسي صاعد (4h)")
-        elif trend_4h == "DOWN" and close < sma50 and sma20 < sma50:
+            reasons.append(f"اتجاه صاعد (ADX {adx_val:.1f})")
+        elif trend_4h == "DOWN":
             trend_score = 1.0
-            reasons.append("الاتجاه الرئيسي هابط (4h)")
+            reasons.append(f"اتجاه هابط (ADX {adx_val:.1f})")
+        else:
+            reasons.append(f"اتجاه جانبي/ضعيف (ADX {adx_val:.1f})")
         scores["trend"] = trend_score
 
-        # 2. الزخم
+        # ─── 2. الزخم ───
         mom_score = 0
         if trend_4h == "UP" and momentum > 0.5:
             mom_score = 1.0
@@ -76,7 +82,7 @@ class SignalEngine:
             reasons.append(f"زخم سلبي ({momentum:.2f}%)")
         scores["momentum"] = mom_score
 
-        # 3. الحجم
+        # ─── 3. الحجم ───
         vol_score = 0
         if vol_ratio >= CFG.VOLUME_SPIKE_RATIO:
             vol_score = 1.0
@@ -85,7 +91,7 @@ class SignalEngine:
             vol_score = 0.5
         scores["volume"] = vol_score
 
-        # 4. التقلب
+        # ─── 4. التقلب ───
         vol_score_bb = 0
         if is_squeeze:
             vol_score_bb = 0.8
@@ -98,7 +104,7 @@ class SignalEngine:
             reasons.append("اختراق الحد السفلي")
         scores["volatility"] = vol_score_bb
 
-        # 5. RSI
+        # ─── 5. RSI ───
         rsi_score = 0
         if trend_4h == "UP" and 30 <= rsi_val <= 50:
             rsi_score = 1.0
@@ -108,7 +114,7 @@ class SignalEngine:
             reasons.append(f"RSI في منطقة البيع ({rsi_val:.1f})")
         scores["rsi"] = rsi_score
 
-        # 6. MACD
+        # ─── 6. MACD ───
         macd_score = 0
         if macd_hist > 0 and macd_hist_prev <= 0 and trend_4h == "UP":
             macd_score = 1.0
@@ -118,7 +124,7 @@ class SignalEngine:
             reasons.append("تقاطع MACD سلبي")
         scores["macd"] = macd_score
 
-        # 7. Pivot
+        # ─── 7. Pivot ───
         pivot_score = 0
         if trend_4h == "UP" and abs(close - pivots["r1"]) / close < 0.005:
             pivot_score = 0.8
@@ -128,9 +134,11 @@ class SignalEngine:
             reasons.append("اقتراب من دعم يومي")
         scores["pivot"] = pivot_score
 
+        # ─── Early Snipe ───
         if adx_val < CFG.ADX_WEAK_TREND and not self._early_snipe_check(df_5m, ind_5m):
             return None
 
+        # ─── النتيجة الإجمالية ───
         total_score = sum(score * self.adaptive.weights.get(factor, 0.1) * 10 for factor, score in scores.items())
         if trend_4h == "SIDEWAYS" and adx_val < 20:
             total_score = min(total_score, CFG.MAX_SCORE_SIDEWAYS)
@@ -142,9 +150,20 @@ class SignalEngine:
         if signal_type == "NEUTRAL":
             return None
 
+        # 🔥 حساب SL/TP مع التحقق من الصحة
         sl, tp, risk = self._calculate_risk_levels(close, atr, pivots, signal_type)
         if sl is None or tp is None:
             return None
+
+        # 🔥 التحقق من صحة SL/TP
+        if signal_type == "BUY":
+            if sl >= close or tp <= close:
+                logger.warning(f"⚠️ SL/TP غير صحيح لـ {symbol}: SL={sl}, TP={tp}, Entry={close}")
+                return None
+        else:  # SELL
+            if sl <= close or tp >= close:
+                logger.warning(f"⚠️ SL/TP غير صحيح لـ {symbol}: SL={sl}, TP={tp}, Entry={close}")
+                return None
 
         rr_ratio = abs(tp - close) / risk if risk > 0 else 0
         if rr_ratio < CFG.MIN_RR_RATIO:
@@ -177,7 +196,7 @@ class SignalEngine:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        # 🔥 تحسين: تحديد نوع الإشارة النصي بناءً على الدرجة
+        # 🔥 تحديد نوع الإشارة النصي
         if signal["score"] >= 8.0:
             signal["signal"] = "🟢 **شراء قوي**" if signal_type == "BUY" else "🔴 **بيع قوي**"
         elif signal["score"] >= 6.0:
@@ -189,17 +208,25 @@ class SignalEngine:
 
         return signal
 
-    def _get_trend_direction(self, df: pd.DataFrame) -> str:
+    def _get_trend_direction(self, df: pd.DataFrame, adx_val: float = None) -> str:
+        """تحديد اتجاه السوق باستخدام SMA و ADX."""
         if len(df) < CFG.SMA_SLOW:
             return "SIDEWAYS"
         sma20 = df["close"].rolling(window=CFG.SMA_FAST).mean().iloc[-1]
         sma50 = df["close"].rolling(window=CFG.SMA_SLOW).mean().iloc[-1]
         close = df["close"].iloc[-1]
-        if close > sma20 > sma50:
-            return "UP"
-        elif close < sma20 < sma50:
-            return "DOWN"
-        return "SIDEWAYS"
+        
+        # إذا كان ADX مرتفعاً (> 25)، نأخذ اتجاه SMA
+        if adx_val is not None and adx_val > CFG.ADX_WEAK_TREND:
+            if close > sma20 > sma50:
+                return "UP"
+            elif close < sma20 < sma50:
+                return "DOWN"
+            else:
+                return "SIDEWAYS"
+        else:
+            # ADX منخفض: سوق جانبي
+            return "SIDEWAYS"
 
     def _early_snipe_check(self, df: pd.DataFrame, ind: Dict) -> bool:
         bb = ind["bb"]
@@ -218,6 +245,7 @@ class SignalEngine:
 
         buffer = 1.0 - CFG.SL_BUFFER_PERCENT
 
+        # 🔥 معالجة العملات منخفضة السعر (أقل من 0.01)
         if entry < 0.01:
             if signal_type == "BUY":
                 sl = entry * 0.97
@@ -225,6 +253,17 @@ class SignalEngine:
             else:
                 sl = entry * 1.03
                 tp = entry * 0.94
+            # 🔥 التأكد من صحة SL/TP
+            if signal_type == "BUY":
+                if sl >= entry:
+                    sl = entry * 0.99
+                if tp <= entry:
+                    tp = entry * 1.02
+            else:
+                if sl <= entry:
+                    sl = entry * 1.01
+                if tp >= entry:
+                    tp = entry * 0.98
             risk = abs(entry - sl)
             return sl, tp, risk
 
