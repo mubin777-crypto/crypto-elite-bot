@@ -34,7 +34,7 @@ class Config:
     OPPOSITE_SIGNAL_COOLDOWN: int = 240
     PRICE_TOLERANCE: float = 0.005
     MIN_RR_RATIO: float = 2.0
-    SL_BUFFER_PERCENT: float = 0.003  # 0.3%
+    SL_BUFFER_PERCENT: float = 0.003
     
     # ─── عتبات المؤشرات ───
     RSI_PERIOD: int = 6
@@ -87,9 +87,9 @@ class Config:
     SCAN_UNLISTED_SYMBOLS: bool = True
     MAX_PREWATCH_TO_SCAN: int = 30
     
-    # 🔥 إعدادات الأداء (حل عنق الزجاجة)
-    MAX_CONCURRENT_REQUESTS: int = 10  # رفع عدد الطلبات المتزامنة لتسريع المسح
-    REQUEST_DELAY: float = 0.05        # تقليل زمن الانتظار بين الطلبات
+    # ─── إعدادات الأداء ───
+    MAX_CONCURRENT_REQUESTS: int = 10
+    REQUEST_DELAY: float = 0.05
     
     # ─── النشر ───
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
@@ -98,4 +98,5 @@ class Config:
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
 
+# ✅ الكائن المُصدَّر هو CFG (وليس config)
 CFG = Config()
