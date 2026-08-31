@@ -1,9 +1,10 @@
 """
 telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات.
-تم تعديله لقراءة التوكن مباشرة من البيئة في كل مرة.
+تم تعديله لقراءة التوكن مباشرة من البيئة مع إعادة محاولة متعددة.
 """
 import asyncio
 import os
+import time
 from typing import Dict, Optional
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Application
@@ -19,25 +20,25 @@ class TelegramManager:
         self._token = None
         self._initialized = False
 
-    def _ensure_initialized(self):
-        """تهيئة تطبيق Telegram مع قراءة التوكن مباشرة من البيئة."""
+    def _ensure_initialized(self, retry: bool = True):
+        """تهيئة تطبيق Telegram مع إعادة محاولة قراءة التوكن."""
         if self.bot is not None:
             return
         
-        # 🔥 قراءة التوكن مباشرة من البيئة (الحل الجذري)
+        # 🔥 قراءة التوكن مباشرة من البيئة (محاولة أولى)
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         
-        if token:
-            self._token = token
-            logger.info("✅ TELEGRAM_BOT_TOKEN تم قراءته من البيئة بنجاح (الطول: {} حرف).".format(len(token)))
-        else:
-            # محاولة ثانية من CFG (احتياطي)
-            self._token = CFG.TELEGRAM_BOT_TOKEN
-            if self._token:
-                logger.info("✅ TELEGRAM_BOT_TOKEN تم قراءته من CFG.")
-            else:
-                logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف في البيئة ولا في CFG.")
-                return
+        # إذا لم يتم العثور على التوكن، حاول قراءته من CFG
+        if not token:
+            token = CFG.TELEGRAM_BOT_TOKEN
+            logger.info("ℹ️ تم قراءة التوكن من CFG.")
+        
+        if not token:
+            logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف في البيئة ولا في CFG.")
+            return
+        
+        self._token = token
+        logger.info(f"✅ TELEGRAM_BOT_TOKEN تم قراءته (الطول: {len(token)} حرف)")
         
         try:
             self.app = ApplicationBuilder().token(self._token).build()
@@ -49,6 +50,11 @@ class TelegramManager:
             logger.error(f"❌ فشل تهيئة تطبيق Telegram: {e}")
             self.bot = None
             self.app = None
+            if retry:
+                # إعادة محاولة بعد 5 ثوانٍ
+                logger.info("⏳ سيتم إعادة محاولة تهيئة التليجرام بعد 5 ثوانٍ...")
+                time.sleep(5)
+                self._ensure_initialized(retry=False)
 
     def _setup_handlers(self):
         if not self.app:
@@ -97,8 +103,8 @@ class TelegramManager:
             await update.message.reply_text("🔭 لا توجد عملات تحت المراقبة حالياً.")
             return
         msg = "🔭 *قائمة المراقبة*\n\n"
-        for symbol in pre_watch[:10]:
-            msg += f"• `{symbol}`\n"
+        for i, symbol in enumerate(pre_watch[:10], 1):
+            msg += f"{i}. `{symbol}`\n"
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     async def cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,9 +137,11 @@ class TelegramManager:
         if not context.args:
             await update.message.reply_text("⚠️ الاستخدام: /adduser USER_ID")
             return
+        added = []
         for user_id in context.args:
             db.add_subscriber(user_id)
-        await update.message.reply_text(f"✅ تمت إضافة المستخدمين: {', '.join(context.args)}")
+            added.append(user_id)
+        await update.message.reply_text(f"✅ تمت إضافة المستخدمين: {', '.join(added)}")
 
     async def cmd_removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
@@ -142,9 +150,11 @@ class TelegramManager:
         if not context.args:
             await update.message.reply_text("⚠️ الاستخدام: /removeuser USER_ID")
             return
+        removed = []
         for user_id in context.args:
             db.remove_subscriber(user_id)
-        await update.message.reply_text(f"✅ تمت إزالة المستخدمين: {', '.join(context.args)}")
+            removed.append(user_id)
+        await update.message.reply_text(f"✅ تمت إزالة المستخدمين: {', '.join(removed)}")
 
     # ─── إرسال الإشارات ───
     async def send_signal(self, signal: Dict, chat_id: str = None):
@@ -191,7 +201,8 @@ class TelegramManager:
             logger.error("❌ Failed to send alert", extra={"error": str(e)})
 
     async def start(self):
-        await asyncio.sleep(0.5)
+        logger.info("⏳ بدء تهيئة تطبيق Telegram...")
+        await asyncio.sleep(1)  # تأخير إضافي لضمان تحميل المتغيرات
         self._ensure_initialized()
         if not self.app:
             logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب نقص التوكن.")
