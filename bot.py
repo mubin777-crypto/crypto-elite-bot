@@ -19,15 +19,20 @@ class CryptoSignalBot:
         self.last_scan: Dict[str, datetime] = {}
 
     async def initialize(self):
-        logger.info("Initializing bot...")
-        # التحقق من وجود توكن التليجرام قبل بدء البوت
-        if not CFG.TELEGRAM_BOT_TOKEN or CFG.TELEGRAM_BOT_TOKEN == "":
-            logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف. لن يعمل البوت بدون توكن.")
-            sys.exit(1)
+        logger.info("🚀 Initializing bot...")
         
+        # 🔥 تحقق من وجود التوكن (تحذير فقط، لا نوقف البوت)
+        if not CFG.TELEGRAM_BOT_TOKEN:
+            logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف. سيتم تسجيل الإشارات في السجلات فقط.")
+        else:
+            logger.info("✅ TELEGRAM_BOT_TOKEN موجود.")
+        
+        # بدء التليجرام (سيتعامل مع عدم وجود توكن)
         await telegram.start()
+        
+        # جلب قائمة العملات
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
-        logger.info("Symbols loaded", extra={"count": len(self.symbols)})
+        logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
     async def scan_market_for_opportunities(self):
         try:
@@ -87,16 +92,16 @@ class CryptoSignalBot:
             db.set_last_signal(symbol, signal['type'], signal['entry_price'], signal['type'], signal['type'])
             db.update_daily_stats(0, False)
             
-            # إرسال الإشارة عبر التليجرام
+            # إرسال الإشارة عبر التليجرام (حتى لو لم يوجد توكن، ستُسجل في السجلات)
             await telegram.send_signal(signal)
             
-            logger.info("Signal generated", extra={"symbol": symbol, "type": signal["type"]})
+            logger.info("✅ Signal generated", extra={"symbol": symbol, "type": signal["type"]})
 
         except Exception as e:
-            logger.error(f"Error scanning {symbol}", extra={"error": str(e)})
+            logger.error(f"❌ Error scanning {symbol}", extra={"error": str(e)})
 
     async def run_scan_cycle(self):
-        logger.info("Starting scan cycle...")
+        logger.info("🔄 Starting scan cycle...")
         
         if int(datetime.now(timezone.utc).minute) % 3 == 0:
             await self.scan_market_for_opportunities()
@@ -128,9 +133,9 @@ class CryptoSignalBot:
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
                     async with session.get(CFG.RENDER_EXTERNAL_URL, timeout=10) as resp:
-                        logger.info("Self-ping OK", extra={"status": resp.status})
+                        logger.info("✅ Self-ping OK", extra={"status": resp.status})
             except Exception as e:
-                logger.warning("Self-ping failed", extra={"error": str(e)})
+                logger.warning("⚠️ Self-ping failed", extra={"error": str(e)})
             await asyncio.sleep(CFG.SELF_PING_INTERVAL)
 
     async def run(self):
@@ -149,23 +154,24 @@ class CryptoSignalBot:
                 if datetime.now(timezone.utc).minute == 0:
                     self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         except Exception as e:
-            logger.critical("Bot crashed", extra={"error": str(e)})
+            logger.critical("💥 Bot crashed", extra={"error": str(e)})
             raise
         finally:
             await self.shutdown()
 
     def _shutdown(self):
-        logger.info("Shutdown signal received")
+        logger.info("🛑 Shutdown signal received")
         self.running = False
 
     async def shutdown(self):
         self.running = False
         await fetcher.close()
         await telegram.stop()
+        logger.info("✅ Bot shut down")
 
 if __name__ == "__main__":
     bot = CryptoSignalBot()
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("🛑 Bot stopped by user")
