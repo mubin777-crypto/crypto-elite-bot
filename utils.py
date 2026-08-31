@@ -1,5 +1,5 @@
 """
-utils.py - طبقة جلب البيانات والأدوات المساعدة مع حلول Binance و Proxies.
+utils.py - طبقة جلب البيانات مع Timeout قصير لتجنب تجميد البوت.
 """
 import asyncio
 import aiohttp
@@ -52,14 +52,14 @@ class RateLimiter:
 
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
 
-# ─── مصادر البيانات ───
+# ─── 🔥 إعادة ترتيب النقاط (الأقل حظراً أولاً) ───
 BINANCE_ENDPOINTS = [
-    "https://data-api.binance.vision",
+    "https://api.binance.us",              # الأقل حظراً على Render
+    "https://data-api.binance.vision",     # بيانات عامة
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
     "https://api3.binance.com",
-    "https://api.binance.us",
 ]
 
 _symbol_filters_cache: Dict[str, Dict] = {}
@@ -74,10 +74,11 @@ class DataFetcher:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
+            # 🔥 تقليل المهلة إلى 3 ثوانٍ لمنع التجميد
             timeout = aiohttp.ClientTimeout(
-                total=30,
-                connect=15,
-                sock_read=15
+                total=3,
+                connect=2,
+                sock_read=2
             )
 
             headers = {
@@ -94,7 +95,6 @@ class DataFetcher:
             )
         return self.session
 
-    # ─── جلب الشموع ───
     async def fetch_klines(self, symbol: str, interval: str = "5m", limit: int = 250) -> pd.DataFrame:
         params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
         for base_url in BINANCE_ENDPOINTS:
@@ -106,7 +106,7 @@ class DataFetcher:
                     limiter.release()
                     if resp.status == 429:
                         logger.warning("Rate limit hit", extra={"symbol": symbol})
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)
                         continue
                     resp.raise_for_status()
                     data = await resp.json()
@@ -115,21 +115,22 @@ class DataFetcher:
                     df = self._parse_klines(data)
                     df = self._clean_data(df)
                     return df
-            except aiohttp.ClientError as e:
-                limiter.release()
-                logger.warning(f"Failover from {base_url}", extra={"error": str(e), "symbol": symbol})
-                await asyncio.sleep(1)
-                continue
             except asyncio.TimeoutError:
                 limiter.release()
-                logger.warning(f"Timeout from {base_url}", extra={"symbol": symbol})
-                await asyncio.sleep(2)
+                logger.debug(f"Timeout from {base_url} for {symbol}")
+                continue
+            except aiohttp.ClientError as e:
+                limiter.release()
+                logger.debug(f"Failover from {base_url}", extra={"error": str(e), "symbol": symbol})
+                await asyncio.sleep(0.5)
                 continue
             except Exception as e:
                 limiter.release()
                 logger.error(f"Error fetching {symbol}", extra={"error": str(e)})
                 raise
-        raise RuntimeError(f"All endpoints failed for {symbol}")
+        # إذا فشلت جميع النقاط، نعيد DataFrame فارغاً (بدلاً من رفع استثناء)
+        logger.warning(f"All endpoints failed for {symbol}, returning empty DataFrame")
+        return pd.DataFrame()
 
     def _parse_klines(self, data: List[List[Any]]) -> pd.DataFrame:
         columns = ["open_time", "open", "high", "low", "close", "volume",
@@ -151,9 +152,8 @@ class DataFetcher:
                 df[col] = df[col].fillna(method="bfill", limit=3)
         return df
 
-    # ─── جلب أفضل العملات ───
+    # ─── جلب أفضل العملات (مع Timeout قصير) ───
     async def fetch_top_symbols(self, limit: int = 50) -> List[str]:
-        """جلب أكثر العملات تداولاً مقابل USDT."""
         for base_url in BINANCE_ENDPOINTS:
             try:
                 await limiter.acquire()
@@ -172,9 +172,12 @@ class DataFetcher:
                     return [item["symbol"] for item in usdt_pairs[:limit]]
             except Exception as e:
                 limiter.release()
-                logger.warning(f"Failover fetching symbols from {base_url}", extra={"error": str(e)})
+                logger.debug(f"Failover fetching symbols from {base_url}", extra={"error": str(e)})
+                await asyncio.sleep(0.5)
                 continue
-        raise RuntimeError("Failed to fetch top symbols")
+        # إذا فشل كل شيء، نعيد قائمة فارغة (سيتم التعامل معها في bot.py)
+        logger.warning("Failed to fetch top symbols, returning empty list")
+        return []
 
     # ─── جلب بيانات 24 ساعة ───
     async def fetch_24hr_tickers(self) -> List[Dict]:
@@ -200,7 +203,8 @@ class DataFetcher:
                     ]
             except Exception as e:
                 limiter.release()
-                logger.warning(f"Failover 24hr from {base_url}", extra={"error": str(e)})
+                logger.debug(f"Failover 24hr from {base_url}", extra={"error": str(e)})
+                await asyncio.sleep(0.5)
                 continue
         return []
 
@@ -232,7 +236,6 @@ class DataFetcher:
                 continue
         return {"tick_size": 0.0001, "step_size": 0.000001, "min_qty": 0.0}
 
-    # ─── تنقية الأسعار والكميات ───
     def adjust_price(self, price: float, tick_size: float) -> float:
         if tick_size <= 0:
             return round(price, 8)
@@ -244,7 +247,6 @@ class DataFetcher:
         adjusted = round(round(qty / step_size) * step_size, 8)
         return max(adjusted, min_qty)
 
-    # ─── إغلاق الجلسة ───
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
