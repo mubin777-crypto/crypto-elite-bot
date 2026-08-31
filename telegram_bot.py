@@ -1,255 +1,121 @@
-import logging
-from telegram import Update
-from telegram.ext import ContextTypes
+"""
+telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات.
+"""
+import asyncio
+from typing import Dict
+from telegram import Update, Bot
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes
+)
+from config import CFG
 from database import db
-from config import config
+from backtest import backtester
+from utils import logger
 
-logger = logging.getLogger(__name__)
-
-class TelegramHandlers:
+class TelegramManager:
     def __init__(self):
-        self.db = db
+        self.app = ApplicationBuilder().token(CFG.TELEGRAM_BOT_TOKEN).build()
+        self.bot: Bot = self.app.bot
+        self._setup_handlers()
 
-    # -------------------- الأوامر الأساسية --------------------
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /start من {user_id}")
-        try:
-            subscribers = await self.db.get_subscribers()
-            pending = await self.db.get_pending()
-            if user_id in subscribers:
-                await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
-                return
-            if user_id in pending:
-                await update.message.reply_text("⏳ طلبك قيد الانتظار.")
-                return
-            await self.db.add_pending(user_id)
-            await update.message.reply_text("✅ تم استلام طلب الاشتراك.")
-            if config.ADMIN_CHAT_ID:
-                await context.bot.send_message(
-                    chat_id=config.ADMIN_CHAT_ID,
-                    text=f"📩 طلب اشتراك جديد: `{user_id}`\n/approve {user_id}",
-                    parse_mode="Markdown"
-                )
-            logger.info(f"✅ تم الرد على /start للمستخدم {user_id}")
-        except Exception as e:
-            logger.error(f"❌ خطأ في /start: {e}")
-            await update.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
+    def _setup_handlers(self):
+        self.app.add_handler(CommandHandler("start", self.cmd_start))
+        self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("prewatch", self.cmd_prewatch))
+        self.app.add_handler(CommandHandler("performance", self.cmd_performance))
+        self.app.add_handler(CommandHandler("signal", self.cmd_signal))
+        self.app.add_handler(CommandHandler("reset_daily", self.cmd_reset_daily))
 
-    async def approve(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /approve من {user_id}")
-        try:
-            if user_id != config.ADMIN_CHAT_ID:
-                await update.message.reply_text("⛔ فقط للمالك.")
-                return
-            if not context.args:
-                await update.message.reply_text("⚠️ استخدم: /approve USER_ID")
-                return
-            target_user = context.args[0].strip()
-            pending = await self.db.get_pending()
-            if target_user in pending:
-                await self.db.remove_pending(target_user)
-                await self.db.add_subscriber(target_user)
-                await update.message.reply_text(f"✅ تمت الموافقة على `{target_user}`.")
-                try:
-                    await context.bot.send_message(chat_id=target_user, text="🎉 تمت الموافقة على اشتراكك!")
-                except:
-                    pass
-                logger.info(f"✅ تمت الموافقة على المستخدم {target_user}")
-            else:
-                await update.message.reply_text("❌ غير موجود في قائمة الانتظار.")
-        except Exception as e:
-            logger.error(f"❌ خطأ في /approve: {e}")
-            await update.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
+    def _is_admin(self, user_id: int) -> bool:
+        return user_id == CFG.TELEGRAM_ADMIN_ID
 
-    async def add_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /add من {user_id}")
-        try:
-            if user_id != config.ADMIN_CHAT_ID:
-                await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
-                return
-            if not context.args:
-                await update.message.reply_text("⚠️ استخدم: /add USER_ID [USER_ID2 ...]")
-                return
-            added = []
-            for arg in context.args:
-                target = arg.strip()
-                if not target.isdigit():
-                    continue
-                await self.db.add_subscriber(target)
-                added.append(target)
-                try:
-                    await context.bot.send_message(
-                        chat_id=target,
-                        text="🎉 *تمت إضافتك إلى البوت المحسن!* ستستلم إشارات التداول تلقائياً.",
-                        parse_mode="Markdown"
-                    )
-                except:
-                    pass
-            if added:
-                await update.message.reply_text(f"✅ تمت إضافة المستخدمين: `{', '.join(added)}`", parse_mode="Markdown")
-            else:
-                await update.message.reply_text("❌ لم يتم إضافة أي مستخدم (تأكد من الأرقام).")
-            logger.info(f"✅ أضاف المالك المستخدمين: {added}")
-        except Exception as e:
-            logger.error(f"❌ خطأ في /add: {e}")
-            await update.message.reply_text("⚠️ حدث خطأ أثناء إضافة المستخدمين.")
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        welcome = (
+            "🤖 *بوت إشارات العملات الرقمية*\n\n"
+            "الأوامر المتاحة:\n"
+            "/status — حالة النظام\n"
+            "/prewatch — قائمة المراقبة\n"
+            "/performance — تقرير الأداء\n"
+            "/signal SYMBOL — آخر إشارة لعملة\n"
+            "/reset_daily — إعادة ضبط الإحصائيات (للمشرف فقط)"
+        )
+        await update.message.reply_text(welcome, parse_mode="Markdown")
 
-    async def adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self.add_user(update, context)
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        daily = db.get_daily_stats()
+        status_msg = (
+            "📡 *حالة النظام*\n"
+            f"• الإشارات اليوم: {daily['total_signals']}\n"
+            f"• الأرباح: {daily['wins']} | الخسائر: {daily['losses']}\n"
+            f"• صافي PnL: ${daily['pnl']:.2f}\n"
+            f"• رأس المال: ${daily['capital']:.2f}"
+        )
+        await update.message.reply_text(status_msg, parse_mode="Markdown")
 
-    async def removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /removeuser من {user_id}")
-        try:
-            if user_id != config.ADMIN_CHAT_ID:
-                await update.message.reply_text("⛔ هذا الأمر متاح فقط للمالك.")
-                return
-            if not context.args:
-                await update.message.reply_text("⚠️ استخدم: /removeuser USER_ID")
-                return
-            target = context.args[0].strip()
-            if not target.isdigit():
-                await update.message.reply_text("❌ المعرف يجب أن يكون أرقاماً.")
-                return
-            await self.db.remove_subscriber(target)
-            await update.message.reply_text(f"✅ تمت إزالة المستخدم `{target}`.")
-            logger.info(f"✅ تمت إزالة المستخدم {target}")
-        except Exception as e:
-            logger.error(f"❌ خطأ في /removeuser: {e}")
-            await update.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
+    async def cmd_prewatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "👁️ *قائمة المراقبة:*\nيتم تحديثها تلقائياً بناءً على انضغاط البولينجر.",
+            parse_mode="Markdown"
+        )
 
-    # -------------------- أوامر الحالة والأداء (مع سجلات للتأكد من الاستدعاء) --------------------
-    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /status من {user_id}")
-        try:
-            subscribers = await self.db.get_subscribers()
-            pending = await self.db.get_pending()
-            pre_watch = await self.db.get_pre_watch()
-            
-            msg = (
-                f"📊 *حالة البوت المحسن*\n"
-                f"👥 المشتركين: {len(subscribers)}\n"
-                f"⏳ في الانتظار: {len(pending)}\n"
-                f"🔭 تحت المراقبة: {len(pre_watch)}\n"
-                f"💧 الحد الأدنى للسيولة: ${config.MIN_VOLUME_USD:,}\n"
-                f"📊 عتبة الإشارة: {config.SIGNAL_SCORE_THRESHOLD}/10\n"
-                f"⏱️ فترة التبريد: {config.COOLDOWN_MINUTES} دقيقة\n"
-                f"📡 البيانات: ccxt → Binance.com → Binance.US → Coinbase\n"
-                f"🧪 المحاكاة: {'مفعلة' if config.PAPER_TRADING else 'معطلة'}"
-            )
-            
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            logger.info(f"✅ تم إرسال الرد على /status للمستخدم {user_id}")
-            
-        except Exception as e:
-            logger.error(f"❌ خطأ في /status: {e}")
-            await update.message.reply_text("⚠️ حدث خطأ أثناء جلب حالة البوت.")
+    async def cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        report = backtester.generate_weekly_report(backtester._calculate_metrics())
+        await update.message.reply_text(report, parse_mode="Markdown")
 
-    async def performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /performance من {user_id}")
-        try:
-            perf = await self.db.get_performance()
-            if not perf:
-                await update.message.reply_text("📊 لا توجد بيانات أداء كافية حتى الآن.")
-                return
-            msg = (
-                f"📈 *أداء البوت*\n\n"
-                f"📊 إجمالي الصفقات: {perf[2]}\n"
-                f"✅ الصفقات الرابحة: {perf[3]}\n"
-                f"❌ الصفقات الخاسرة: {perf[4]}\n"
-                f"📈 نسبة الربح: {perf[5]*100:.1f}%\n"
-                f"💰 متوسط الربح: {perf[7]:.2f}%\n"
-                f"📉 متوسط الخسارة: {perf[8]:.2f}%\n"
-                f"📊 معامل الربح: {perf[6]:.2f}\n"
-                f"📈 العائد المتوقع: {perf[9]:.2f}%\n"
-                f"📈 العائد الكلي: {perf[13]:.2f}%\n"
-                f"📉 أقصى انخفاض: {perf[10]*100:.1f}%\n"
-                f"📊 نسبة شارب: {perf[11]:.2f}\n"
-                f"📉 خسائر متتالية: {perf[12]}"
-            )
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            logger.info(f"✅ تم إرسال الرد على /performance للمستخدم {user_id}")
-        except Exception as e:
-            logger.error(f"❌ خطأ في /performance: {e}")
-            await update.message.reply_text("⚠️ حدث خطأ أثناء جلب بيانات الأداء.")
-
-    async def prewatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /prewatch من {user_id}")
-        try:
-            pre_watch = await self.db.get_pre_watch(limit=20)
-            if not pre_watch:
-                await update.message.reply_text("🔭 لا توجد عملات تحت المراقبة حالياً.")
-                return
-            msg = "🔭 *قائمة المراقبة الاستباقية*\n\n"
-            for i, item in enumerate(pre_watch, 1):
-                symbol = item['symbol']
-                score = item['score']
-                change = item['change_24h']
-                volume = item['volume_24h'] / 1_000_000
-                reason = item['reason'][:50] + "..." if len(item['reason']) > 50 else item['reason']
-                emoji = "📈" if change > 0 else "📉"
-                msg += (
-                    f"{i}. {emoji} *{symbol}*\n"
-                    f"   النقاط: {score:.0f}% | التغير: {change:+.1f}%\n"
-                    f"   الحجم: ${volume:.1f}M | السبب: {reason}\n\n"
-                )
-            msg += "🔄 *تحديث كل 5 دقائق* - هذه العملات قد تنفجر قريباً"
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            logger.info(f"✅ تم إرسال الرد على /prewatch للمستخدم {user_id}")
-        except Exception as e:
-            logger.error(f"❌ خطأ في /prewatch: {e}")
-            await update.message.reply_text("⚠️ حدث خطأ أثناء جلب قائمة المراقبة.")
-
-    async def signal_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = str(update.effective_user.id)
-        logger.info(f"📩 أمر /signal من {user_id}")
+    async def cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
-            await update.message.reply_text("⚠️ /signal SYMBOL")
+            await update.message.reply_text("⚠️ الاستخدام: /signal BTCUSDT")
             return
-        sym = context.args[0].upper()
-        try:
-            from utils import fetch_klines, fetch_24hr_stats
-            from signals import SignalEngine
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                data_5m = await fetch_klines(session, sym, '5m', 100)
-                data_1h = await fetch_klines(session, sym, '1h', 30)
-                data_4h = await fetch_klines(session, sym, '4h', 20)
-                stats = await fetch_24hr_stats(session, sym)
-                if not data_5m or not data_1h or not data_4h:
-                    await update.message.reply_text(f"❌ لا توجد بيانات كافية لـ {sym}")
-                    return
-                engine = SignalEngine(sym, data_5m, data_1h, data_4h, stats)
-                result = await engine.evaluate()
-                action = result.get('action', 'NEUTRAL')
-                if action == 'NEUTRAL':
-                    stop_loss = take_profit = pos_size = 0
-                else:
-                    stop_loss, take_profit, pos_size = engine.calculate_risk(result['price'], action)
-                msg = (
-                    f"📡 *تحليل فوري لـ {sym}*\n"
-                    f"🔹 النقاط: {result['score']}/10\n"
-                    f"🔹 الإشارة: {result['signal']}\n"
-                    f"💰 السعر: `{result['price']:.4f}`\n"
-                    f"📊 RSI(6): `{result['rsi']}`\n"
-                    f"📊 ADX: `{result['adx']}`\n"
-                    f"📈 تغير ساعة: `{result['change_1h']}%`\n"
-                    f"📊 الحجم النسبي: `{result['volume_ratio']}x`\n"
-                    f"📝 الأسباب: {', '.join(result['reasons'])}\n"
-                    f"🛡️ وقف الخسارة: `{stop_loss:.4f}`\n"
-                    f"🎯 جني الأرباح: `{take_profit:.4f}`\n"
-                    f"📊 حجم الصفقة: `{pos_size*100:.2f}%`"
-                )
-                await update.message.reply_text(msg, parse_mode="Markdown")
-                logger.info(f"✅ تم إرسال الرد على /signal {sym} للمستخدم {user_id}")
-        except Exception as e:
-            logger.error(f"❌ خطأ في /signal {sym}: {e}")
-            await update.message.reply_text(f"⚠️ حدث خطأ أثناء تحليل {sym}.")
+        symbol = context.args[0].upper()
+        await update.message.reply_text(f"🔍 البحث عن آخر إشارة لـ {symbol}...")
 
-handlers = TelegramHandlers()
+    async def cmd_reset_daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ صلاحية المشرف مطلوبة.")
+            return
+        db.reset_daily_stats()
+        await update.message.reply_text("✅ تم إعادة ضبط الإحصائيات اليومية.")
+
+    async def send_signal(self, signal: Dict, chat_id: str = None):
+        if chat_id is None:
+            chat_id = CFG.TELEGRAM_CHANNEL_ID or str(CFG.TELEGRAM_ADMIN_ID)
+        
+        emoji = "🟢" if signal["type"] == "BUY" else "🔴"
+        signal_display = signal.get("signal", signal["type"])
+        
+        reasons_text = " | ".join(signal.get("reasons", [])[:3])
+        message = (
+            f"{emoji} *{signal_display} — {signal['symbol']}*\n\n"
+            f"💰 سعر الدخول: `{signal['entry_price']}`\n"
+            f"🛑 وقف الخسارة: `{signal['stop_loss']}`\n"
+            f"🎯 جني الأرباح: `{signal['take_profit']}`\n"
+            f"📊 حجم الصفقة: `{signal['position_size']}`\n"
+            f"🎚️ درجة الثقة: `{signal['confidence']}%`\n"
+            f"⭐ النقاط: `{signal['score']}/10`\n"
+            f"📈 ADX: `{signal['adx']}` | RSI: `{signal['rsi']}`\n"
+            f"📦 حجم: `{signal['volume_ratio']}x`\n\n"
+            f"📝 الأسباب: _{reasons_text}_\n"
+            f"⏱ `{signal['timestamp']}`"
+        )
+        try:
+            await self.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
+            logger.info("Signal sent via Telegram", extra={"symbol": signal["symbol"]})
+        except Exception as e:
+            logger.error("Failed to send Telegram signal", extra={"error": str(e)})
+
+    async def send_alert(self, message: str, to_admin: bool = True):
+        chat_id = str(CFG.TELEGRAM_ADMIN_ID) if to_admin else CFG.TELEGRAM_CHANNEL_ID
+        try:
+            await self.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
+        except Exception as e:
+            logger.error("Failed to send alert", extra={"error": str(e)})
+
+    async def start(self):
+        await self.app.initialize()
+        await self.app.start()
+        logger.info("Telegram bot started")
+
+    async def stop(self):
+        await self.app.stop()
+
+telegram = TelegramManager()
