@@ -91,7 +91,9 @@ class Config:
     # ─── إعدادات Pre-watch ───
     SCAN_UNLISTED_SYMBOLS: bool = True
     MAX_PREWATCH_TO_SCAN: int = 30
-    
+    MAX_CONCURRENT_REQUESTS: int = 10
+    REQUEST_DELAY: float = 0.05
+    REQUEST_TIMEOUT: int = 3  # 🔥 مهلة الطلب بالثواني
     # ─── إعدادات الأداء ───
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_DELAY: float = 0.05
