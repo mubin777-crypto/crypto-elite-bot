@@ -99,8 +99,6 @@ class Config:
     # ─── النشر ───
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
     SELF_PING_INTERVAL: int = 300
-    
-    # 🔥 منفذ Render
     PORT: int = int(os.getenv("PORT", "8080"))
     
     LOG_LEVEL: str = "INFO"
