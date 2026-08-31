@@ -1,12 +1,12 @@
 """
-utils.py - طبقة جلب البيانات والأدوات المساعدة مع حل جذري لمشكلة SSL.
+utils.py - طبقة جلب البيانات والأدوات المساعدة مع حلول الحظر والـ SSL.
 """
 import asyncio
 import aiohttp
 import json
 import logging
 import time
-import ssl  # 🔥 إضافة مكتبة SSL
+import ssl
 from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timezone
 import numpy as np
@@ -52,8 +52,10 @@ class RateLimiter:
 
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
 
-# ─── مصادر البيانات (تم ترتيبها حسب الأسرع) ───
+# 🔥 مصادر البيانات المحدثة (حل الحظر الجغرافي)
 BINANCE_ENDPOINTS = [
+    "https://data-api.binance.vision",  # الأفضل للخوادم السحابية
+    "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
     "https://api3.binance.com",
@@ -68,19 +70,17 @@ class DataFetcher:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
-            # 🔥 إعداد SSL Context لتجاوز مشاكل الشهادات (الحل الجذري)
+            # 🔥 إعداد SSL Context لتجاوز مشاكل الشهادات
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
-            # 🔥 زيادة المهلات بشكل كبير
             timeout = aiohttp.ClientTimeout(
                 total=30,
                 connect=15,
                 sock_read=15
             )
 
-            # 🔥 إضافة User-Agent قوي
             headers = {
                 "Accept": "application/json",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
