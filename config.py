@@ -82,7 +82,7 @@ class Config:
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", 
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT",
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
@@ -102,6 +102,7 @@ class Config:
     SELF_PING_INTERVAL: int = 300
     
     # 🔥🔥🔥 إضافة متغير PORT (الحل الجذري لمشكلة Render)
+    # Render يمرر المنفذ تلقائياً عبر متغير البيئة PORT
     PORT: int = int(os.getenv("PORT", "8080"))
     
     LOG_LEVEL: str = "INFO"
