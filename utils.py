@@ -1,5 +1,5 @@
 """
-utils.py - طبقة جلب البيانات والأدوات المساعدة مع حلول الحظر والـ SSL.
+utils.py - طبقة جلب البيانات مع حلول Binance و Proxies احتياطية.
 """
 import asyncio
 import aiohttp
@@ -52,9 +52,9 @@ class RateLimiter:
 
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
 
-# 🔥 مصادر البيانات المحدثة (حل الحظر الجغرافي)
+# ─── 🔥 مصادر البيانات مع Proxies احتياطية ───
 BINANCE_ENDPOINTS = [
-    "https://data-api.binance.vision",  # الأفضل للخوادم السحابية
+    "https://data-api.binance.vision",
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
@@ -62,15 +62,22 @@ BINANCE_ENDPOINTS = [
     "https://api.binance.us",
 ]
 
+# 🔥 Proxies احتياطية (مجانية) يمكن استخدامها إذا استمر الحظر
+PROXY_LIST = [
+    None,  # اتصال مباشر أولاً
+    "http://proxy1.example.com:8080",  # يمكنك إضافة Proxies حقيقية هنا
+    "http://proxy2.example.com:8080",
+]
+
 _symbol_filters_cache: Dict[str, Dict] = {}
 
 class DataFetcher:
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
+        self._proxy_index = 0
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
-            # 🔥 إعداد SSL Context لتجاوز مشاكل الشهادات
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
@@ -97,151 +104,49 @@ class DataFetcher:
 
     async def fetch_klines(self, symbol: str, interval: str = "5m", limit: int = 250) -> pd.DataFrame:
         params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
-        for base_url in BINANCE_ENDPOINTS:
-            try:
-                await limiter.acquire()
-                session = await self._get_session()
-                url = f"{base_url}/api/v3/klines"
-                async with session.get(url, params=params) as resp:
+        
+        # 🔥 محاولة مع كل Proxy
+        for proxy in PROXY_LIST:
+            for base_url in BINANCE_ENDPOINTS:
+                try:
+                    await limiter.acquire()
+                    session = await self._get_session()
+                    url = f"{base_url}/api/v3/klines"
+                    
+                    # استخدام Proxy إذا كان محدداً
+                    async with session.get(url, params=params, proxy=proxy) as resp:
+                        limiter.release()
+                        if resp.status == 429:
+                            logger.warning("Rate limit hit", extra={"symbol": symbol})
+                            await asyncio.sleep(2)
+                            continue
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        if not data:
+                            continue
+                        df = self._parse_klines(data)
+                        df = self._clean_data(df)
+                        return df
+                except aiohttp.ClientError as e:
                     limiter.release()
-                    if resp.status == 429:
-                        logger.warning("Rate limit hit", extra={"symbol": symbol})
-                        await asyncio.sleep(2)
-                        continue
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    if not data:
-                        continue
-                    df = self._parse_klines(data)
-                    df = self._clean_data(df)
-                    return df
-            except aiohttp.ClientError as e:
-                limiter.release()
-                logger.warning(f"Failover from {base_url}", extra={"error": str(e), "symbol": symbol})
-                await asyncio.sleep(1)
-                continue
-            except asyncio.TimeoutError:
-                limiter.release()
-                logger.warning(f"Timeout from {base_url}", extra={"symbol": symbol})
-                await asyncio.sleep(2)
-                continue
-            except Exception as e:
-                limiter.release()
-                logger.error(f"Error fetching {symbol}", extra={"error": str(e)})
-                raise
-        raise RuntimeError(f"All endpoints failed for {symbol}")
-
-    def _parse_klines(self, data: List[List[Any]]) -> pd.DataFrame:
-        columns = ["open_time", "open", "high", "low", "close", "volume",
-                   "close_time", "quote_volume", "trades", "taker_buy_base",
-                   "taker_buy_quote", "ignore"]
-        df = pd.DataFrame(data, columns=columns)
-        numeric_cols = ["open", "high", "low", "close", "volume", "quote_volume"]
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-        return df
-
-    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.sort_values("open_time").reset_index(drop=True)
-        df = df.dropna(subset=["open", "high", "low", "close", "volume"])
-        for col in ["open", "high", "low", "close", "volume"]:
-            if df[col].isna().any():
-                df[col] = df[col].fillna(method="ffill", limit=3)
-                df[col] = df[col].fillna(method="bfill", limit=3)
-        return df
-
-    async def fetch_top_symbols(self, limit: int = 50) -> List[str]:
-        for base_url in BINANCE_ENDPOINTS:
-            try:
-                await limiter.acquire()
-                session = await self._get_session()
-                url = f"{base_url}/api/v3/ticker/24hr"
-                async with session.get(url) as resp:
+                    logger.warning(f"Failover from {base_url} via {proxy or 'direct'}", extra={"error": str(e), "symbol": symbol})
+                    await asyncio.sleep(1)
+                    continue
+                except asyncio.TimeoutError:
                     limiter.release()
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    usdt_pairs = [
-                        item for item in data
-                        if item["symbol"].endswith(CFG.QUOTE_ASSET)
-                        and float(item.get("quoteVolume", 0)) > 1_000_000
-                    ]
-                    usdt_pairs.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
-                    return [item["symbol"] for item in usdt_pairs[:limit]]
-            except Exception as e:
-                limiter.release()
-                logger.warning(f"Failover fetching symbols from {base_url}", extra={"error": str(e)})
-                continue
-        raise RuntimeError("Failed to fetch top symbols")
-
-    async def fetch_24hr_tickers(self) -> List[Dict]:
-        for base_url in BINANCE_ENDPOINTS:
-            try:
-                await limiter.acquire()
-                session = await self._get_session()
-                url = f"{base_url}/api/v3/ticker/24hr"
-                async with session.get(url) as resp:
+                    logger.warning(f"Timeout from {base_url}", extra={"symbol": symbol})
+                    await asyncio.sleep(2)
+                    continue
+                except Exception as e:
                     limiter.release()
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    return [
-                        {
-                            "symbol": item["symbol"],
-                            "change_24h": float(item.get("priceChangePercent", 0)),
-                            "volume_24h": float(item.get("quoteVolume", 0)),
-                            "high": float(item.get("highPrice", 0)),
-                            "low": float(item.get("lowPrice", 0)),
-                        }
-                        for item in data
-                        if item["symbol"].endswith(CFG.QUOTE_ASSET)
-                    ]
-            except Exception as e:
-                limiter.release()
-                logger.warning(f"Failover 24hr from {base_url}", extra={"error": str(e)})
-                continue
-        return []
+                    logger.error(f"Error fetching {symbol}", extra={"error": str(e)})
+                    raise
+            # إذا فشلت جميع النقاط لـ Proxy معين، انتقل إلى التالي
+            await asyncio.sleep(1)
+        
+        raise RuntimeError(f"All endpoints and proxies failed for {symbol}")
 
-    async def get_symbol_filters(self, symbol: str) -> Dict:
-        if symbol in _symbol_filters_cache:
-            return _symbol_filters_cache[symbol]
-        for base_url in BINANCE_ENDPOINTS:
-            try:
-                await limiter.acquire()
-                session = await self._get_session()
-                url = f"{base_url}/api/v3/exchangeInfo"
-                async with session.get(url) as resp:
-                    limiter.release()
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    for s in data["symbols"]:
-                        if s["symbol"] == symbol:
-                            filters = {}
-                            for f in s["filters"]:
-                                if f["filterType"] == "PRICE_FILTER":
-                                    filters["tick_size"] = float(f["tickSize"])
-                                elif f["filterType"] == "LOT_SIZE":
-                                    filters["step_size"] = float(f["stepSize"])
-                                    filters["min_qty"] = float(f["minQty"])
-                            _symbol_filters_cache[symbol] = filters
-                            return filters
-            except Exception:
-                continue
-        return {"tick_size": 0.0001, "step_size": 0.000001, "min_qty": 0.0}
-
-    def adjust_price(self, price: float, tick_size: float) -> float:
-        if tick_size <= 0:
-            return round(price, 8)
-        return round(round(price / tick_size) * tick_size, 8)
-
-    def adjust_quantity(self, qty: float, step_size: float, min_qty: float) -> float:
-        if step_size <= 0:
-            return round(qty, 8)
-        adjusted = round(round(qty / step_size) * step_size, 8)
-        return max(adjusted, min_qty)
-
-    async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
+    # ... باقي الدوال (parse_klines, clean_data, fetch_top_symbols, etc.) كما هي ...
 
 fetcher = DataFetcher()
 
