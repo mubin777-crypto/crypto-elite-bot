@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي لتشغيل البوت.
+bot.py - الملف الرئيسي لتشغيل البوت مع تحسينات cooldown.
 """
 import asyncio
 import signal
@@ -20,17 +20,11 @@ class CryptoSignalBot:
 
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
-        
-        # 🔥 تحقق من وجود التوكن (تحذير فقط، لا نوقف البوت)
         if not CFG.TELEGRAM_BOT_TOKEN:
             logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف. سيتم تسجيل الإشارات في السجلات فقط.")
         else:
             logger.info("✅ TELEGRAM_BOT_TOKEN موجود.")
-        
-        # بدء التليجرام (سيتعامل مع عدم وجود توكن)
         await telegram.start()
-        
-        # جلب قائمة العملات
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
@@ -40,18 +34,15 @@ class CryptoSignalBot:
             tickers = await fetcher.fetch_24hr_tickers()
             if not tickers:
                 return
-
             for item in tickers:
                 symbol = item["symbol"]
                 change = item["change_24h"]
                 volume = item["volume_24h"]
-
                 if abs(change) > 3.0 or volume > 2_000_000:
                     score = min(100, abs(change) * 8 + (volume / 100_000))
                     reason = f"تغير {change:.1f}% | حجم ${volume/1_000_000:.2f}M"
                     db.add_to_prewatch(symbol, score, change, volume, reason)
                     logger.info(f"🔭 تمت إضافة {symbol} إلى Pre-watch: {reason}")
-
         except Exception as e:
             logger.error(f"خطأ في ماسح الفرص: {e}")
 
@@ -89,11 +80,14 @@ class CryptoSignalBot:
 
             # حفظ الإشارة
             db.save_signal(signal)
+            
+            # 🔥 إرسال الإشارة عبر التليجرام
+            await telegram.send_signal(signal)
+            
+            # 🔥 تحديث الـ cooldown في جميع الحالات (بما في ذلك المراقبة)
+            await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
             db.set_last_signal(symbol, signal['type'], signal['entry_price'], signal['type'], signal['type'])
             db.update_daily_stats(0, False)
-            
-            # إرسال الإشارة عبر التليجرام (حتى لو لم يوجد توكن، ستُسجل في السجلات)
-            await telegram.send_signal(signal)
             
             logger.info("✅ Signal generated", extra={"symbol": symbol, "type": signal["type"]})
 
@@ -102,19 +96,15 @@ class CryptoSignalBot:
 
     async def run_scan_cycle(self):
         logger.info("🔄 Starting scan cycle...")
-        
         if int(datetime.now(timezone.utc).minute) % 3 == 0:
             await self.scan_market_for_opportunities()
-        
         pre_watch_symbols = db.get_active_prewatch(CFG.MAX_PREWATCH_TO_SCAN) if CFG.SCAN_UNLISTED_SYMBOLS else []
         all_symbols = list(set(CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols))
         logger.info(f"🔄 فحص {len(all_symbols)} عملة (Pre-watch: {len(pre_watch_symbols)})...")
-        
         for symbol in all_symbols:
             if not self.running: break
             await self.scan_symbol(symbol)
             await asyncio.sleep(CFG.REQUEST_DELAY)
-            
         db.set_scan_state("symbols", ",".join(all_symbols))
         db.set_scan_state("last_scan", datetime.now(timezone.utc).isoformat())
 
@@ -143,7 +133,6 @@ class CryptoSignalBot:
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._shutdown)
-
         try:
             await self.initialize()
             asyncio.create_task(self.health_check())
