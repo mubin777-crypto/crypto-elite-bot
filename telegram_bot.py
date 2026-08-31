@@ -3,6 +3,8 @@ telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات
 """
 import asyncio
 import logging
+import os
+import time
 from typing import Dict, Optional
 from telegram import Update, Bot
 from telegram.ext import (
@@ -17,22 +19,36 @@ class TelegramManager:
     def __init__(self):
         self.app: Optional[Application] = None
         self.bot: Optional[Bot] = None
-        self._token = CFG.TELEGRAM_BOT_TOKEN
+        self._token = None
         self._initialized = False
 
     def _ensure_initialized(self):
-        """تأكد من إنشاء التطبيق فقط عند الحاجة وبعد التحقق من التوكن."""
+        """تأكد من إنشاء التطبيق فقط عند الحاجة مع إعادة محاولة قراءة التوكن."""
         if self._initialized:
             return
         
-        if not self._token or self._token == "":
-            raise ValueError("❌ TELEGRAM_BOT_TOKEN غير معرّف. يرجى تعيينه في متغيرات البيئة.")
+        # 🔥 محاولة قراءة التوكن مرة أخرى من البيئة (لضمان التحميل)
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if token:
+            self._token = token
+        else:
+            self._token = CFG.TELEGRAM_BOT_TOKEN
         
-        self.app = ApplicationBuilder().token(self._token).build()
-        self.bot = self.app.bot
-        self._setup_handlers()
-        self._initialized = True
-        logger.info("Telegram Application initialized successfully")
+        if not self._token or self._token == "":
+            # إذا لم يوجد التوكن، نعطي تحذيراً ولكن لا نوقف البوت (سيتم إرسال الإشارات إلى السجلات فقط)
+            logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف. سيتم تسجيل الإشارات في السجلات فقط دون إرسالها.")
+            self._initialized = True  # نضعها True لتجنب تكرار التحذير
+            return
+        
+        try:
+            self.app = ApplicationBuilder().token(self._token).build()
+            self.bot = self.app.bot
+            self._setup_handlers()
+            self._initialized = True
+            logger.info("✅ Telegram Application initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ فشل تهيئة تطبيق Telegram: {e}")
+            self._initialized = True  # لمنع التكرار
 
     def _setup_handlers(self):
         if not self.app:
@@ -78,7 +94,6 @@ class TelegramManager:
         )
 
     async def cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # تشغيل الاختبار الخلفي على آخر 7 أيام من الإشارات
         signals = db.get_signals_for_backtest(days=7)
         if not signals:
             await update.message.reply_text("📊 لا توجد إشارات كافية في الأيام السبعة الماضية لإجراء التقرير.")
@@ -104,6 +119,11 @@ class TelegramManager:
     # ─── إرسال الإشارات والتنبيهات ───
     async def send_signal(self, signal: Dict, chat_id: str = None):
         self._ensure_initialized()
+        if not self.bot:
+            logger.warning("⚠️ البوت غير مهيأ لإرسال الإشارات (لا يوجد توكن)، الإشارة مسجلة في السجلات فقط.")
+            logger.info(f"📩 [محاكاة] إشارة: {signal['symbol']} | {signal['type']} | السعر: {signal['entry_price']}")
+            return
+        
         if chat_id is None:
             chat_id = CFG.TELEGRAM_CHANNEL_ID or str(CFG.TELEGRAM_ADMIN_ID)
         
@@ -126,24 +146,32 @@ class TelegramManager:
         )
         try:
             await self.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
-            logger.info("Signal sent via Telegram", extra={"symbol": signal["symbol"]})
+            logger.info("✅ Signal sent via Telegram", extra={"symbol": signal["symbol"]})
         except Exception as e:
-            logger.error("Failed to send Telegram signal", extra={"error": str(e)})
+            logger.error("❌ Failed to send Telegram signal", extra={"error": str(e)})
 
     async def send_alert(self, message: str, to_admin: bool = True):
         self._ensure_initialized()
+        if not self.bot:
+            logger.warning(f"⚠️ لا يمكن إرسال التنبيه (لا يوجد توكن): {message}")
+            return
         chat_id = str(CFG.TELEGRAM_ADMIN_ID) if to_admin else CFG.TELEGRAM_CHANNEL_ID
         try:
             await self.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
         except Exception as e:
-            logger.error("Failed to send alert", extra={"error": str(e)})
+            logger.error("❌ Failed to send alert", extra={"error": str(e)})
 
     async def start(self):
-        """بدء تشغيل البوت بعد التحقق من وجود التوكن."""
+        """بدء تشغيل البوت مع محاولة قراءة التوكن."""
+        # تأخير بسيط لضمان تحميل المتغيرات البيئية
+        await asyncio.sleep(0.5)
         self._ensure_initialized()
+        if not self.app:
+            logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب نقص التوكن.")
+            return
         await self.app.initialize()
         await self.app.start()
-        logger.info("Telegram bot started")
+        logger.info("✅ Telegram bot started")
 
     async def stop(self):
         if self.app:
