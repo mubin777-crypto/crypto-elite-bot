@@ -78,13 +78,10 @@ class CryptoSignalBot:
                         logger.info(f"⏭️ تخطي {symbol}: معاكس")
                         return
 
-            # حفظ الإشارة
             db.save_signal(signal)
-            
-            # 🔥 إرسال الإشارة عبر التليجرام
             await telegram.send_signal(signal)
             
-            # 🔥 تحديث الـ cooldown في جميع الحالات (بما في ذلك المراقبة)
+            # 🔥 تحديث الـ cooldown في جميع الحالات
             await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
             db.set_last_signal(symbol, signal['type'], signal['entry_price'], signal['type'], signal['type'])
             db.update_daily_stats(0, False)
