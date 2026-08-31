@@ -1,11 +1,12 @@
 """
-bot.py - الملف الرئيسي لتشغيل البوت مع تحسينات cooldown.
+bot.py - الملف الرئيسي للبوت مع خادم Web مدمج لـ Render Web Service.
 """
 import asyncio
+import os
 import signal
-import sys
 from datetime import datetime, timezone
 from typing import List, Dict
+from aiohttp import web  # 🔥 مكتبة خادم الـ Web
 from config import CFG
 from utils import fetcher, logger
 from database import db
@@ -17,6 +18,7 @@ class CryptoSignalBot:
         self.running = False
         self.symbols: List[str] = []
         self.last_scan: Dict[str, datetime] = {}
+        self.site = None
 
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
@@ -28,21 +30,47 @@ class CryptoSignalBot:
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
+    # ─── 🔥 خادم HTTP بسيط لاستجابة Render ───
+    async def start_web_server(self):
+        """تشغيل خادم ويب مصغر على المنفذ المطلوب بواسطة Render."""
+        app = web.Application()
+        app.router.add_get("/", self._handle_health_check)
+        app.router.add_get("/health", self._handle_health_check)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = CFG.PORT
+        self.site = web.TCPSite(runner, "0.0.0.0", port)
+        await self.site.start()
+        logger.info(f"🌐 Web Server running on port {port}")
+
+    async def _handle_health_check(self, request):
+        """نقطة الفحص الروتينية (Health Check Endpoint)."""
+        return web.json_response({
+            "status": "online",
+            "bot_running": self.running,
+            "last_scan_time": db.get_scan_state("last_scan"),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+
     async def scan_market_for_opportunities(self):
         try:
             logger.info("🔍 مسح سريع للفرص (دفعة واحدة)...")
             tickers = await fetcher.fetch_24hr_tickers()
             if not tickers:
                 return
+
             for item in tickers:
                 symbol = item["symbol"]
                 change = item["change_24h"]
                 volume = item["volume_24h"]
+
                 if abs(change) > 3.0 or volume > 2_000_000:
                     score = min(100, abs(change) * 8 + (volume / 100_000))
                     reason = f"تغير {change:.1f}% | حجم ${volume/1_000_000:.2f}M"
                     db.add_to_prewatch(symbol, score, change, volume, reason)
                     logger.info(f"🔭 تمت إضافة {symbol} إلى Pre-watch: {reason}")
+
         except Exception as e:
             logger.error(f"خطأ في ماسح الفرص: {e}")
 
@@ -80,12 +108,9 @@ class CryptoSignalBot:
 
             db.save_signal(signal)
             await telegram.send_signal(signal)
-            
-            # 🔥 تحديث الـ cooldown في جميع الحالات
             await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
             db.set_last_signal(symbol, signal['type'], signal['entry_price'], signal['type'], signal['type'])
             db.update_daily_stats(0, False)
-            
             logger.info("✅ Signal generated", extra={"symbol": symbol, "type": signal["type"]})
 
         except Exception as e:
@@ -93,15 +118,19 @@ class CryptoSignalBot:
 
     async def run_scan_cycle(self):
         logger.info("🔄 Starting scan cycle...")
+        
         if int(datetime.now(timezone.utc).minute) % 3 == 0:
             await self.scan_market_for_opportunities()
+        
         pre_watch_symbols = db.get_active_prewatch(CFG.MAX_PREWATCH_TO_SCAN) if CFG.SCAN_UNLISTED_SYMBOLS else []
         all_symbols = list(set(CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols))
         logger.info(f"🔄 فحص {len(all_symbols)} عملة (Pre-watch: {len(pre_watch_symbols)})...")
+        
         for symbol in all_symbols:
             if not self.running: break
             await self.scan_symbol(symbol)
             await asyncio.sleep(CFG.REQUEST_DELAY)
+            
         db.set_scan_state("symbols", ",".join(all_symbols))
         db.set_scan_state("last_scan", datetime.now(timezone.utc).isoformat())
 
@@ -130,10 +159,15 @@ class CryptoSignalBot:
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._shutdown)
+
         try:
             await self.initialize()
+            # 🔥 تشغيل خادم Web في نفس الـ Event Loop
+            await self.start_web_server()
+            
             asyncio.create_task(self.health_check())
             asyncio.create_task(self.self_ping())
+            
             while self.running:
                 await self.run_scan_cycle()
                 await asyncio.sleep(CFG.SCAN_INTERVAL_SECONDS)
@@ -151,6 +185,8 @@ class CryptoSignalBot:
 
     async def shutdown(self):
         self.running = False
+        if self.site:
+            await self.site.stop()
         await fetcher.close()
         await telegram.stop()
         logger.info("✅ Bot shut down")
