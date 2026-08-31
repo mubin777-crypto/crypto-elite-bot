@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي مع حل عنق الزجاجة في زمن الدورة.
+bot.py - الملف الرئيسي لتشغيل البوت.
 """
 import asyncio
 import signal
@@ -24,7 +24,6 @@ class CryptoSignalBot:
         logger.info("Symbols loaded", extra={"count": len(self.symbols)})
 
     async def scan_market_for_opportunities(self):
-        """مسح السوق عبر طلب واحد لـ 24hr."""
         try:
             logger.info("🔍 مسح سريع للفرص (دفعة واحدة)...")
             tickers = await fetcher.fetch_24hr_tickers()
@@ -77,10 +76,14 @@ class CryptoSignalBot:
                         logger.info(f"⏭️ تخطي {symbol}: معاكس")
                         return
 
+            # حفظ الإشارة
             db.save_signal(signal)
-            await telegram.send_signal(signal)
             db.set_last_signal(symbol, signal['type'], signal['entry_price'], signal['type'], signal['type'])
             db.update_daily_stats(0, False)
+            
+            # 🔥 إرسال الإشارة عبر التليجرام مع تمييز القوي منها
+            await telegram.send_signal(signal)
+            
             logger.info("Signal generated", extra={"symbol": symbol, "type": signal["type"]})
 
         except Exception as e:
@@ -96,11 +99,10 @@ class CryptoSignalBot:
         all_symbols = list(set(CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols))
         logger.info(f"🔄 فحص {len(all_symbols)} عملة (Pre-watch: {len(pre_watch_symbols)})...")
         
-        # 🔥 حل عنق الزجاجة: تقليل زمن sleep إلى 0.05 ثانية فقط
         for symbol in all_symbols:
             if not self.running: break
             await self.scan_symbol(symbol)
-            await asyncio.sleep(CFG.REQUEST_DELAY)  # الآن 0.05 بدلاً من 0.3
+            await asyncio.sleep(CFG.REQUEST_DELAY)
             
         db.set_scan_state("symbols", ",".join(all_symbols))
         db.set_scan_state("last_scan", datetime.now(timezone.utc).isoformat())
