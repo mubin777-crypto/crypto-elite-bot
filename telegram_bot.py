@@ -1,6 +1,6 @@
 """
 telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات.
-تم تعديله لقراءة التوكن مباشرة من البيئة.
+تم تعديله لقراءة التوكن مباشرة من البيئة في كل مرة.
 """
 import asyncio
 import os
@@ -29,7 +29,7 @@ class TelegramManager:
         
         if token:
             self._token = token
-            logger.info("✅ TELEGRAM_BOT_TOKEN تم قراءته من البيئة بنجاح.")
+            logger.info("✅ TELEGRAM_BOT_TOKEN تم قراءته من البيئة بنجاح (الطول: {} حرف).".format(len(token)))
         else:
             # محاولة ثانية من CFG (احتياطي)
             self._token = CFG.TELEGRAM_BOT_TOKEN
@@ -198,7 +198,7 @@ class TelegramManager:
             return
         await self.app.initialize()
         await self.app.start()
-        logger.info("✅ Telegram bot started")
+        logger.info("✅ Telegram bot started successfully")
 
     async def stop(self):
         if self.app:
