@@ -76,11 +76,11 @@ class Config:
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "TONUSDT",
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
+        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT"
     ])
     
     # ─── إعدادات Pre-watch ───
@@ -98,5 +98,10 @@ class Config:
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
 
-# ✅ الكائن المُصدَّر هو CFG (وليس config)
+# ✅ كائن الإعدادات
 CFG = Config()
+
+# 🔥 تحقق سريع من وجود التوكن عند التحميل (للكشف المبكر)
+if not CFG.TELEGRAM_BOT_TOKEN:
+    import logging
+    logging.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف في البيئة. سيعمل البوت لكن بدون إرسال إشارات.")
