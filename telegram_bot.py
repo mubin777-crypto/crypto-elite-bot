@@ -19,20 +19,16 @@ class TelegramManager:
         self._initialized = False
 
     def _ensure_initialized(self):
-        """تهيئة التطبيق مع إعادة محاولة قراءة التوكن في كل مرة."""
         if self.bot is not None:
             return
-        
         token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         if token:
             self._token = token
         else:
             self._token = CFG.TELEGRAM_BOT_TOKEN
-        
         if not self._token or self._token == "":
             logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف. سيتم تسجيل الإشارات في السجلات فقط.")
             return
-        
         try:
             self.app = ApplicationBuilder().token(self._token).build()
             self.bot = self.app.bot
@@ -57,7 +53,6 @@ class TelegramManager:
     def _is_admin(self, user_id: int) -> bool:
         return user_id == CFG.TELEGRAM_ADMIN_ID
 
-    # ─── الأوامر (بدون تغيير) ───
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome = (
             "🤖 *بوت إشارات العملات الرقمية*\n\n"
@@ -110,17 +105,14 @@ class TelegramManager:
         db.reset_daily_stats()
         await update.message.reply_text("✅ تم إعادة ضبط الإحصائيات اليومية.")
 
-    # ─── إرسال الإشارات (مع إعادة محاولة التهيئة) ───
     async def send_signal(self, signal: Dict, chat_id: str = None):
         self._ensure_initialized()
         if not self.bot:
             logger.warning("⚠️ البوت غير مهيأ لإرسال الإشارات، الإشارة مسجلة في السجلات.")
             logger.info(f"📩 [محاكاة] إشارة: {signal['symbol']} | {signal['type']} | السعر: {signal['entry_price']}")
             return
-        
         if chat_id is None:
             chat_id = CFG.TELEGRAM_CHANNEL_ID or str(CFG.TELEGRAM_ADMIN_ID)
-        
         emoji = "🟢" if signal["type"] == "BUY" else "🔴"
         signal_display = signal.get("signal", signal["type"])
         reasons_text = " | ".join(signal.get("reasons", [])[:3])
