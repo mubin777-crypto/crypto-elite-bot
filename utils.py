@@ -1,5 +1,5 @@
 """
-utils.py - طبقة جلب البيانات، الأدوات المساعدة، وتنقية البيانات لـ Binance.
+utils.py - طبقة جلب البيانات والأدوات المساعدة.
 """
 import asyncio
 import aiohttp
@@ -31,7 +31,7 @@ handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
 logger.setLevel(getattr(logging, CFG.LOG_LEVEL))
 
-# 🔥 رفع عدد الطلبات المتزامنة من 5 إلى 10 لتسريع الأداء
+# ─── إدارة Rate Limit ───
 class RateLimiter:
     def __init__(self, max_concurrent: int = CFG.MAX_CONCURRENT_REQUESTS, delay_between: float = 0.15):
         self.semaphore = asyncio.Semaphore(max_concurrent)
@@ -146,7 +146,6 @@ class DataFetcher:
         raise RuntimeError("Failed to fetch top symbols")
 
     async def fetch_24hr_tickers(self) -> List[Dict]:
-        """جلب بيانات 24 ساعة لجميع العملات في طلب واحد."""
         for base_url in BINANCE_ENDPOINTS:
             try:
                 await limiter.acquire()
