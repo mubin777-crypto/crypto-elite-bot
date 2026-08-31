@@ -1,5 +1,5 @@
 """
-utils.py - طبقة جلب البيانات والأدوات المساعدة مع تحسين endpoints.
+utils.py - طبقة جلب البيانات والأدوات المساعدة مع تحسينات Timeout و SSL.
 """
 import asyncio
 import aiohttp
@@ -51,12 +51,12 @@ class RateLimiter:
 
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
 
-# ─── مصادر البيانات (تم تعديل الترتيب) ───
+# ─── مصادر البيانات ───
 BINANCE_ENDPOINTS = [
-    "https://api1.binance.com",   # ✅ الأسرع والأكثر استقراراً
-    "https://api2.binance.com",   # احتياطي
-    "https://api3.binance.com",   # احتياطي
-    "https://api.binance.us",     # احتياطي أخير
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api.binance.us",
 ]
 
 _symbol_filters_cache: Dict[str, Dict] = {}
@@ -67,9 +67,20 @@ class DataFetcher:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
+            # 🔥 زيادة المهلة إلى 30 ثانية مع إعدادات مفصلة
+            timeout = aiohttp.ClientTimeout(
+                total=30,
+                connect=10,
+                sock_read=10
+            )
+            # 🔥 إضافة User-Agent قوي وتعطيل SSL مؤقتاً للاختبار
             self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30),
-                headers={"Accept": "application/json"}
+                timeout=timeout,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                },
+                connector=aiohttp.TCPConnector(ssl=False)  # تعطيل SSL للاختبار
             )
         return self.session
 
@@ -97,6 +108,11 @@ class DataFetcher:
                 limiter.release()
                 logger.warning(f"Failover from {base_url}", extra={"error": str(e), "symbol": symbol})
                 await asyncio.sleep(1)
+                continue
+            except asyncio.TimeoutError:
+                limiter.release()
+                logger.warning(f"Timeout from {base_url}", extra={"symbol": symbol})
+                await asyncio.sleep(2)
                 continue
             except Exception as e:
                 limiter.release()
