@@ -26,7 +26,6 @@ class SignalEngine:
         if not ind_5m:
             return None
 
-        # 🔥 حساب ADX أولاً لنمرره لدالة الاتجاه
         adx_val = ind_5m["adx"].iloc[-1]
         trend_4h = self._get_trend_direction(df_4h, adx_val)
         
@@ -47,11 +46,9 @@ class SignalEngine:
         pivots = ind_5m["pivots"]
         atr = calculate_atr(df_5m, CFG.ATR_PERIOD).iloc[last_idx]
 
-        # Cooldown
         if db.get_last_signal_time(symbol, CFG.COOLDOWN_MINUTES):
             return None
 
-        # Daily Loss
         daily_stats = db.get_daily_stats()
         if daily_stats.get("pnl", 0) <= -(CFG.VIRTUAL_CAPITAL * CFG.MAX_DAILY_LOSS_PERCENT / 100):
             logger.warning("Daily loss limit reached", extra={"symbol": symbol})
@@ -150,17 +147,16 @@ class SignalEngine:
         if signal_type == "NEUTRAL":
             return None
 
-        # 🔥 حساب SL/TP مع التحقق من الصحة
         sl, tp, risk = self._calculate_risk_levels(close, atr, pivots, signal_type)
         if sl is None or tp is None:
             return None
 
-        # 🔥 التحقق من صحة SL/TP
+        # التحقق من صحة SL/TP
         if signal_type == "BUY":
             if sl >= close or tp <= close:
                 logger.warning(f"⚠️ SL/TP غير صحيح لـ {symbol}: SL={sl}, TP={tp}, Entry={close}")
                 return None
-        else:  # SELL
+        else:
             if sl <= close or tp >= close:
                 logger.warning(f"⚠️ SL/TP غير صحيح لـ {symbol}: SL={sl}, TP={tp}, Entry={close}")
                 return None
@@ -178,7 +174,6 @@ class SignalEngine:
         if confidence < CFG.MIN_CONFIDENCE:
             return None
 
-        # بناء الإشارة
         signal = {
             "symbol": symbol,
             "timeframe": "5m",
@@ -196,7 +191,6 @@ class SignalEngine:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        # 🔥 تحديد نوع الإشارة النصي
         if signal["score"] >= 8.0:
             signal["signal"] = "🟢 **شراء قوي**" if signal_type == "BUY" else "🔴 **بيع قوي**"
         elif signal["score"] >= 6.0:
@@ -209,14 +203,12 @@ class SignalEngine:
         return signal
 
     def _get_trend_direction(self, df: pd.DataFrame, adx_val: float = None) -> str:
-        """تحديد اتجاه السوق باستخدام SMA و ADX."""
         if len(df) < CFG.SMA_SLOW:
             return "SIDEWAYS"
         sma20 = df["close"].rolling(window=CFG.SMA_FAST).mean().iloc[-1]
         sma50 = df["close"].rolling(window=CFG.SMA_SLOW).mean().iloc[-1]
         close = df["close"].iloc[-1]
         
-        # إذا كان ADX مرتفعاً (> 25)، نأخذ اتجاه SMA
         if adx_val is not None and adx_val > CFG.ADX_WEAK_TREND:
             if close > sma20 > sma50:
                 return "UP"
@@ -225,7 +217,6 @@ class SignalEngine:
             else:
                 return "SIDEWAYS"
         else:
-            # ADX منخفض: سوق جانبي
             return "SIDEWAYS"
 
     def _early_snipe_check(self, df: pd.DataFrame, ind: Dict) -> bool:
@@ -245,7 +236,6 @@ class SignalEngine:
 
         buffer = 1.0 - CFG.SL_BUFFER_PERCENT
 
-        # 🔥 معالجة العملات منخفضة السعر (أقل من 0.01)
         if entry < 0.01:
             if signal_type == "BUY":
                 sl = entry * 0.97
@@ -253,7 +243,6 @@ class SignalEngine:
             else:
                 sl = entry * 1.03
                 tp = entry * 0.94
-            # 🔥 التأكد من صحة SL/TP
             if signal_type == "BUY":
                 if sl >= entry:
                     sl = entry * 0.99
