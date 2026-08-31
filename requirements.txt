@@ -1,16 +1,6 @@
-# Core networking & Async
 aiohttp>=3.8.0
 aiosqlite>=0.19.0
-
-# Data processing & Analysis
 pandas>=1.5.0
 numpy>=1.23.0
-
-# Telegram Bot
 python-telegram-bot>=21.7
-
-# Web server for health checks & self-ping
 Flask>=2.2.0
-
-# (اختياري) يمكن إضافة ccxt في المستقبل للتبديل بين مصادر البيانات
-# ccxt>=4.0.0
