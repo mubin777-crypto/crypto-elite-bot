@@ -1,6 +1,5 @@
 """
 config.py - ملف الإعدادات المركزي للبوت.
-تم تحديثه لإضافة متغير PORT لمنصة Render وتحسينات أخرى.
 """
 import os
 from dataclasses import dataclass, field
@@ -97,21 +96,14 @@ class Config:
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_DELAY: float = 0.05
     
-    # ─── النشر (مهم لـ Render) ───
+    # ─── النشر ───
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
     SELF_PING_INTERVAL: int = 300
     
-    # 🔥🔥🔥 إضافة متغير PORT (الحل الجذري لمشكلة Render)
-    # Render يمرر المنفذ تلقائياً عبر متغير البيئة PORT
+    # 🔥 منفذ Render
     PORT: int = int(os.getenv("PORT", "8080"))
     
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
 
-# ─── كائن الإعدادات العالمي ───
 CFG = Config()
-
-# ─── تحذير إذا كان التوكن مفقوداً ───
-if not CFG.TELEGRAM_BOT_TOKEN:
-    import logging
-    logging.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف في البيئة. سيعمل البوت لكن بدون إرسال إشارات.")
