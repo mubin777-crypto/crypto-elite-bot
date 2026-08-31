@@ -1,5 +1,6 @@
 """
 config.py - ملف الإعدادات المركزي للبوت.
+تم تحديثه لإضافة متغير PORT لمنصة Render وتحسينات أخرى.
 """
 import os
 from dataclasses import dataclass, field
@@ -64,8 +65,13 @@ class Config:
     
     # ─── أوزان المؤشرات ───
     WEIGHTS: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 0.20, "momentum": 0.15, "volume": 0.15,
-        "volatility": 0.15, "rsi": 0.15, "macd": 0.10, "pivot": 0.10,
+        "trend": 0.20,
+        "momentum": 0.15,
+        "volume": 0.15,
+        "volatility": 0.15,
+        "rsi": 0.15,
+        "macd": 0.10,
+        "pivot": 0.10,
     })
     
     # ─── قائمة العملات الأساسية ───
@@ -76,7 +82,7 @@ class Config:
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", 
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
@@ -91,18 +97,20 @@ class Config:
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_DELAY: float = 0.05
     
-    # ─── النشر ───
+    # ─── النشر (مهم لـ Render) ───
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
     SELF_PING_INTERVAL: int = 300
     
-    # 🔥 إضافة متغير PORT لقراءة المنفذ من البيئة
+    # 🔥🔥🔥 إضافة متغير PORT (الحل الجذري لمشكلة Render)
     PORT: int = int(os.getenv("PORT", "8080"))
     
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
 
+# ─── كائن الإعدادات العالمي ───
 CFG = Config()
 
+# ─── تحذير إذا كان التوكن مفقوداً ───
 if not CFG.TELEGRAM_BOT_TOKEN:
     import logging
     logging.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف في البيئة. سيعمل البوت لكن بدون إرسال إشارات.")
