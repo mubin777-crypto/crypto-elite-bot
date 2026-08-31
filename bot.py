@@ -29,8 +29,15 @@ class CryptoSignalBot:
             logger.info(f"✅ TELEGRAM_BOT_TOKEN موجود في البيئة (الطول: {len(token)} حرف)")
         else:
             logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة.")
+            # محاولة قراءة من CFG
+            if CFG.TELEGRAM_BOT_TOKEN:
+                logger.info("ℹ️ تم العثور على التوكن في CFG.")
         
+        # 🔥 بدء التليجرام مع تأخير
+        await asyncio.sleep(1)
         await telegram.start()
+        
+        # جلب قائمة العملات
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
