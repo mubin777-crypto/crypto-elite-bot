@@ -1,12 +1,12 @@
 """
-bot.py - الملف الرئيسي للبوت مع خادم Web مدمج لـ Render Web Service.
+bot.py - الملف الرئيسي للبوت مع خادم Web مدمج وحلول Binance.
 """
 import asyncio
 import os
 import signal
 from datetime import datetime, timezone
 from typing import List, Dict
-from aiohttp import web  # 🔥 مكتبة خادم الـ Web
+from aiohttp import web
 from config import CFG
 from utils import fetcher, logger
 from database import db
@@ -19,6 +19,7 @@ class CryptoSignalBot:
         self.symbols: List[str] = []
         self.last_scan: Dict[str, datetime] = {}
         self.site = None
+        self.web_task = None
 
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
@@ -30,7 +31,7 @@ class CryptoSignalBot:
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
-    # ─── 🔥 خادم HTTP بسيط لاستجابة Render ───
+    # ─── 🔥 خادم HTTP مُفعّل بالكامل ───
     async def start_web_server(self):
         """تشغيل خادم ويب مصغر على المنفذ المطلوب بواسطة Render."""
         app = web.Application()
@@ -39,10 +40,11 @@ class CryptoSignalBot:
         
         runner = web.AppRunner(app)
         await runner.setup()
-        port = CFG.PORT
+        # 🔥 استخدام PORT من البيئة أو 8080 افتراضياً
+        port = int(os.getenv("PORT", CFG.PORT))
         self.site = web.TCPSite(runner, "0.0.0.0", port)
         await self.site.start()
-        logger.info(f"🌐 Web Server running on port {port}")
+        logger.info(f"🌐 Web Server is actively listening on port {port}")
 
     async def _handle_health_check(self, request):
         """نقطة الفحص الروتينية (Health Check Endpoint)."""
@@ -162,7 +164,7 @@ class CryptoSignalBot:
 
         try:
             await self.initialize()
-            # 🔥 تشغيل خادم Web في نفس الـ Event Loop
+            # 🔥🔥🔥 تشغيل خادم الويب فوراً بعد التهيئة (الحل الجذري للمنفذ)
             await self.start_web_server()
             
             asyncio.create_task(self.health_check())
