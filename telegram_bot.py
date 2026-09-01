@@ -1,11 +1,10 @@
 """
-telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات.
+telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات (Webhook Mode).
 """
-import asyncio
 import os
 from typing import Dict, Optional
 from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Application
+from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.error import Conflict
 from config import CFG
 from database import db
@@ -18,8 +17,6 @@ class TelegramManager:
         self.bot: Optional[Bot] = None
         self._token = None
         self._initialized = False
-        self._polling_task = None
-        self._is_polling = False
 
     def _ensure_initialized(self):
         if self.bot is not None:
@@ -39,7 +36,7 @@ class TelegramManager:
                 return
         
         try:
-            self.app = ApplicationBuilder().token(self._token).build()
+            self.app = Application.builder().token(self._token).build()
             self.bot = self.app.bot
             self._setup_handlers()
             self._initialized = True
@@ -64,7 +61,7 @@ class TelegramManager:
     def _is_admin(self, user_id: int) -> bool:
         return user_id == CFG.TELEGRAM_ADMIN_ID
 
-    # ─── الأوامر (كما هي) ───
+    # ─── الأوامر ───
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome = (
             "🤖 *بوت إشارات العملات الرقمية*\n\n"
@@ -193,76 +190,88 @@ class TelegramManager:
         except Exception as e:
             logger.error("❌ Failed to send alert", extra={"error": str(e)})
 
-    # 🔥 بدء Polling بشكل آمن تماماً
-    async def start(self):
-        logger.info("⏳ بدء تهيئة تطبيق Telegram...")
+    # ─── Webhook Mode ───
+    async def start_webhook(self):
+        """بدء البوت في وضع Webhook."""
+        logger.info("⏳ بدء تهيئة Webhook...")
         await asyncio.sleep(0.5)
         self._ensure_initialized()
         if not self.app:
             logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب نقص التوكن.")
             return
         
-        # ✅ التأكد من عدم وجود جلسة سابقة
-        if self._is_polling:
-            logger.warning("⚠️ Polling قيد التشغيل بالفعل، تخطي...")
+        webhook_url = CFG.WEBHOOK_URL
+        if not webhook_url:
+            logger.error("❌ WEBHOOK_URL غير معرّف في البيئة. يرجى تعيينه.")
             return
         
-        # حذف Webhook
+        webhook_secret = CFG.WEBHOOK_SECRET or None
+        
+        # 🔥 تسجيل Webhook مع Telegram
         try:
-            await self.app.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("✅ Webhook deleted successfully")
+            await self.app.bot.set_webhook(
+                url=webhook_url,
+                secret_token=webhook_secret,
+                drop_pending_updates=True
+            )
+            logger.info(f"✅ Webhook registered successfully: {webhook_url}")
         except Exception as e:
-            logger.warning(f"⚠️ Could not delete webhook: {e}")
-
+            logger.error(f"❌ Failed to register webhook: {e}")
+            return
+        
         # بدء التطبيق
         await self.app.initialize()
         await self.app.start()
+        logger.info("✅ Telegram bot started successfully (Webhook mode)")
+
+    async def stop(self):
+        if self.app:
+            try:
+                await self.app.bot.delete_webhook(drop_pending_updates=True)
+                logger.info("✅ Webhook deleted")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not delete webhook: {e}")
+            await self.app.stop()
+        self._initialized = False
+        logger.info("🛑 Telegram bot stopped")
+
+    # ─── بديل: Polling (احتياطي) ───
+    async def start_polling(self):
+        """بدء البوت في وضع Polling (احتياطي)."""
+        logger.info("⏳ بدء تهيئة Polling...")
+        await asyncio.sleep(0.5)
+        self._ensure_initialized()
+        if not self.app:
+            logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب نقص التوكن.")
+            return
         
-        # بدء Polling
+        # حذف Webhook إن وجد
+        try:
+            await self.app.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("✅ Webhook deleted")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not delete webhook: {e}")
+        
+        await self.app.initialize()
+        await self.app.start()
+        
         try:
             if self.app.updater:
                 await self.app.updater.start_polling(
                     drop_pending_updates=True,
-                    allowed_updates=["message", "callback_query"],
-                    timeout=30,
-                    read_timeout=30,
-                    write_timeout=30,
-                    pool_timeout=30
+                    allowed_updates=["message", "callback_query"]
                 )
-                self._is_polling = True
                 logger.info("✅ Telegram polling started successfully")
             else:
                 logger.warning("⚠️ No updater found, polling not started")
         except Conflict as e:
-            logger.error(f"❌ Conflict error: {e}")
-            logger.info("⏳ محاولة إعادة التشغيل بعد 5 ثوانٍ...")
-            await asyncio.sleep(5)
-            try:
-                if self.app.updater:
-                    await self.app.updater.start_polling(
-                        drop_pending_updates=True,
-                        allowed_updates=["message", "callback_query"],
-                        timeout=30,
-                        read_timeout=30,
-                        write_timeout=30,
-                        pool_timeout=30
-                    )
-                    self._is_polling = True
-                    logger.info("✅ Telegram polling started successfully after retry")
-            except Exception as retry_e:
-                logger.error(f"❌ Retry failed: {retry_e}")
+            logger.error(f"❌ Conflict error: {e}. Make sure only one bot instance is running.")
         except Exception as e:
             logger.error(f"❌ Unexpected error: {e}")
         
-        logger.info("✅ Telegram bot started successfully")
+        logger.info("✅ Telegram bot started successfully (Polling mode)")
 
-    async def stop(self):
-        self._is_polling = False
-        if self.app:
-            if self.app.updater and self.app.updater.running:
-                await self.app.updater.stop()
-            await self.app.stop()
-        self._initialized = False
-        logger.info("🛑 Telegram bot stopped")
+# استيراد asyncio في الأعلى
+import asyncio
 
 telegram = TelegramManager()
