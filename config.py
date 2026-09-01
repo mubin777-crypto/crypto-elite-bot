@@ -1,5 +1,5 @@
 """
-config.py - ملف الإعدادات المركزي.
+config.py - ملف الإعدادات المركزي مع إضافات الفلترة الصارمة للسيولة والحظر.
 """
 import os
 from dataclasses import dataclass, field
@@ -10,7 +10,6 @@ class Config:
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
     BINANCE_SECRET_KEY: str = os.getenv("BINANCE_SECRET_KEY", "")
     
-    # دعم التوكن و ID من بيئة التشغيل أو التعيين المباشر للتجربة
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "8947724831:AAEyG4SynRJflgZe10XUpbzkhssn84ar1Qg"
     TELEGRAM_ADMIN_ID: int = int(os.getenv("CHAT_ID") or os.getenv("TELEGRAM_ADMIN_ID") or "5245111094")
     TELEGRAM_CHANNEL_ID: str = os.getenv("CHAT_ID") or os.getenv("TELEGRAM_CHANNEL_ID") or "5245111094"
@@ -66,6 +65,13 @@ class Config:
         "pivot": 0.10,
     })
     
+    # قائمة حظر العملات غير المستقرة أو الميتة أو المشطوبة
+    EXCLUDED_SYMBOLS: List[str] = field(default_factory=lambda: [
+        "PONDUSDT", "LOOMUSDT", "STMXUSDT", "JAMUSDT", "DUSDT", "DATAUSDT", 
+        "A2ZUSDT", "BALUSDT", "CLVUSDT", "REEFUSDT", "SRMUSDT", "GALUSDT",
+        "STGUSDT", "MXCUSDT", "PROMUSDT", "SPXUSDT", "USDUCUSDT"
+    ])
+
     CORE_UNIVERSE: List[str] = field(default_factory=lambda: [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
         "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -73,7 +79,7 @@ class Config:
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT",
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
@@ -81,7 +87,7 @@ class Config:
     ])
     
     SCAN_UNLISTED_SYMBOLS: bool = True
-    MAX_PREWATCH_TO_SCAN: int = 30
+    MAX_PREWATCH_TO_SCAN: int = 15  # تخفيض الحد لمنع رفع استهلاك الذكاء والذاكرة
     
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_DELAY: float = 0.05
