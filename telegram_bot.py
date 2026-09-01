@@ -22,18 +22,15 @@ class TelegramManager:
         if self.bot is not None:
             return
         
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        # البحث عن المتغير بحسب التسميات المختلفة لتأمين القراءة
+        token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or CFG.TELEGRAM_BOT_TOKEN
+        
         if token:
             self._token = token
-            logger.info(f"✅ TELEGRAM_BOT_TOKEN تم قراءته من البيئة (الطول: {len(token)} حرف)")
+            logger.info(f"✅ TELEGRAM_TOKEN تم تحميله بنجاح (الطول: {len(token)} حرف)")
         else:
-            token = CFG.TELEGRAM_BOT_TOKEN
-            if token:
-                self._token = token
-                logger.info(f"✅ TELEGRAM_BOT_TOKEN تم قراءته من CFG (الطول: {len(token)} حرف)")
-            else:
-                logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف في البيئة ولا في CFG.")
-                return
+            logger.error("❌ TELEGRAM_TOKEN غير معرّف في البيئة ولا في CFG.")
+            return
         
         try:
             self.app = ApplicationBuilder().token(self._token).build()
@@ -148,8 +145,7 @@ class TelegramManager:
     async def send_signal(self, signal: Dict, chat_id: str = None):
         self._ensure_initialized()
         if not self.bot:
-            logger.warning("⚠️ البوت غير مهيأ لإرسال الإشارات، الإشارة مسجلة في السجلات.")
-            logger.info(f"📩 [محاكاة] إشارة: {signal['symbol']} | {signal['type']} | السعر: {signal['entry_price']}")
+            logger.warning("⚠️ البوت غير مهيأ لإرسال الإشارات.")
             return
         
         if chat_id is None:
@@ -180,7 +176,6 @@ class TelegramManager:
     async def send_alert(self, message: str, to_admin: bool = True):
         self._ensure_initialized()
         if not self.bot:
-            logger.warning(f"⚠️ لا يمكن إرسال التنبيه: {message}")
             return
         chat_id = str(CFG.TELEGRAM_ADMIN_ID) if to_admin else CFG.TELEGRAM_CHANNEL_ID
         try:
