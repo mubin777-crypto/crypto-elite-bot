@@ -1,5 +1,5 @@
 """
-utils.py - طبقة جلب البيانات مع إصلاحات إدارة الجلسات.
+utils.py - طبقة جلب البيانات المعدلة بالكامل لحل مشكلة الحظر والجلب على Render.
 """
 import asyncio
 import aiohttp
@@ -34,7 +34,7 @@ logger.setLevel(getattr(logging, CFG.LOG_LEVEL))
 
 # ─── إدارة Rate Limit ───
 class RateLimiter:
-    def __init__(self, max_concurrent: int = CFG.MAX_CONCURRENT_REQUESTS, delay_between: float = 0.15):
+    def __init__(self, max_concurrent: int = CFG.MAX_CONCURRENT_REQUESTS, delay_between: float = 0.2):
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.delay = delay_between
         self._last_request = 0.0
@@ -50,16 +50,14 @@ class RateLimiter:
     def release(self):
         self.semaphore.release()
 
-limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
+limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.2)
 
-# ─── نقاط النهاية ───
+# ─── نقاط النهاية (مرتبة حسب الأولوية والاستقرار على السحابة) ───
 BINANCE_ENDPOINTS = [
-    "https://api.binance.us",
-    "https://data-api.binance.vision",
-    "https://api.binance.com",
-    "https://api1.binance.com",
-    "https://api2.binance.com",
-    "https://api3.binance.com",
+    "https://fapi.binance.com",           # Futures API (أقل قيوداً على سيرفرات Render)
+    "https://data-api.binance.vision",    # Public Market Data Archive
+    "https://api.binance.us",             # US Endpoint
+    "https://api.binance.com",            # Spot Main API
 ]
 
 _symbol_filters_cache: Dict[str, Dict] = {}
@@ -68,7 +66,6 @@ class DataFetcher:
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
 
-    # 🔥 إصلاح إدارة الجلسات (منع التسريب)
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             # إغلاق الجلسة القديمة إن وجدت
@@ -81,16 +78,16 @@ class DataFetcher:
 
             timeout = aiohttp.ClientTimeout(
                 total=CFG.REQUEST_TIMEOUT,
-                connect=3,
-                sock_read=3
+                connect=4,
+                sock_read=4
             )
 
             headers = {
                 "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             }
 
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            connector = aiohttp.TCPConnector(ssl=ssl_context, limit=20)
 
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
@@ -101,38 +98,52 @@ class DataFetcher:
 
     async def fetch_klines(self, symbol: str, interval: str = "5m", limit: int = 250) -> pd.DataFrame:
         params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
+        last_error = ""
+
         for base_url in BINANCE_ENDPOINTS:
             try:
                 await limiter.acquire()
                 session = await self._get_session()
-                url = f"{base_url}/api/v3/klines"
+                
+                # توجيه المسار حسب نقطة النهاية (Spot vs Futures)
+                endpoint_path = "/fapi/v1/klines" if "fapi" in base_url else "/api/v3/klines"
+                url = f"{base_url}{endpoint_path}"
+
                 async with session.get(url, params=params) as resp:
                     limiter.release()
-                    if resp.status == 429:
-                        logger.warning("Rate limit hit", extra={"symbol": symbol})
+                    if resp.status in (403, 451):
+                        last_error = f"Geo-blocked/Forbidden ({resp.status}) from {base_url}"
+                        continue
+                    elif resp.status == 429:
+                        last_error = f"Rate limit 429 from {base_url}"
                         await asyncio.sleep(1)
                         continue
+                    
                     resp.raise_for_status()
                     data = await resp.json()
-                    if not data:
+                    
+                    if not data or not isinstance(data, list):
                         continue
+                        
                     df = self._parse_klines(data)
                     df = self._clean_data(df)
                     return df
+
             except asyncio.TimeoutError:
                 limiter.release()
-                logger.debug(f"Timeout from {base_url} for {symbol}")
+                last_error = f"Timeout from {base_url}"
                 continue
             except aiohttp.ClientError as e:
                 limiter.release()
-                logger.debug(f"Failover from {base_url}", extra={"error": str(e), "symbol": symbol})
-                await asyncio.sleep(0.5)
+                last_error = f"ClientError from {base_url}: {str(e)}"
+                await asyncio.sleep(0.2)
                 continue
             except Exception as e:
                 limiter.release()
-                logger.error(f"Error fetching {symbol}", extra={"error": str(e)})
-                raise
-        logger.warning(f"All endpoints failed for {symbol}, returning empty DataFrame")
+                last_error = f"Unexpected error from {base_url}: {str(e)}"
+                continue
+
+        logger.error(f"Failed fetching {symbol}. Last error: {last_error}")
         return pd.DataFrame()
 
     def _parse_klines(self, data: List[List[Any]]) -> pd.DataFrame:
@@ -146,7 +157,6 @@ class DataFetcher:
         df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
         return df
 
-    # 🔥 إصلاح: استخدام ffill بدلاً من method="ffill" (تجنب التحذيرات)
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values("open_time").reset_index(drop=True)
         df = df.dropna(subset=["open", "high", "low", "close", "volume"])
@@ -161,10 +171,13 @@ class DataFetcher:
             try:
                 await limiter.acquire()
                 session = await self._get_session()
-                url = f"{base_url}/api/v3/ticker/24hr"
+                endpoint_path = "/fapi/v1/ticker/24hr" if "fapi" in base_url else "/api/v3/ticker/24hr"
+                url = f"{base_url}{endpoint_path}"
+                
                 async with session.get(url) as resp:
                     limiter.release()
-                    resp.raise_for_status()
+                    if resp.status != 200:
+                        continue
                     data = await resp.json()
                     usdt_pairs = [
                         item for item in data
@@ -173,12 +186,9 @@ class DataFetcher:
                     ]
                     usdt_pairs.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
                     return [item["symbol"] for item in usdt_pairs[:limit]]
-            except Exception as e:
+            except Exception:
                 limiter.release()
-                logger.debug(f"Failover fetching symbols from {base_url}", extra={"error": str(e)})
-                await asyncio.sleep(0.5)
                 continue
-        logger.warning("Failed to fetch top symbols, returning empty list")
         return []
 
     async def fetch_24hr_tickers(self) -> List[Dict]:
@@ -186,10 +196,13 @@ class DataFetcher:
             try:
                 await limiter.acquire()
                 session = await self._get_session()
-                url = f"{base_url}/api/v3/ticker/24hr"
+                endpoint_path = "/fapi/v1/ticker/24hr" if "fapi" in base_url else "/api/v3/ticker/24hr"
+                url = f"{base_url}{endpoint_path}"
+                
                 async with session.get(url) as resp:
                     limiter.release()
-                    resp.raise_for_status()
+                    if resp.status != 200:
+                        continue
                     data = await resp.json()
                     result = [
                         {
@@ -203,10 +216,8 @@ class DataFetcher:
                         if item["symbol"].endswith(CFG.QUOTE_ASSET)
                     ]
                     return result
-            except Exception as e:
+            except Exception:
                 limiter.release()
-                logger.debug(f"Failover 24hr from {base_url}", extra={"error": str(e)})
-                await asyncio.sleep(0.5)
                 continue
         return []
 
@@ -217,10 +228,13 @@ class DataFetcher:
             try:
                 await limiter.acquire()
                 session = await self._get_session()
-                url = f"{base_url}/api/v3/exchangeInfo"
+                endpoint_path = "/fapi/v1/exchangeInfo" if "fapi" in base_url else "/api/v3/exchangeInfo"
+                url = f"{base_url}{endpoint_path}"
+                
                 async with session.get(url) as resp:
                     limiter.release()
-                    resp.raise_for_status()
+                    if resp.status != 200:
+                        continue
                     data = await resp.json()
                     for s in data["symbols"]:
                         if s["symbol"] == symbol:
