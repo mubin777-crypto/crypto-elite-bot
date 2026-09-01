@@ -1,5 +1,5 @@
 """
-config.py - ملف الإعدادات المركزي للبوت.
+config.py - ملف الإعدادات المركزي.
 """
 import os
 from dataclasses import dataclass, field
@@ -7,16 +7,13 @@ from typing import List, Dict
 
 @dataclass
 class Config:
-    # ─── مفاتيح API ───
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
     BINANCE_SECRET_KEY: str = os.getenv("BINANCE_SECRET_KEY", "")
     
-    # ─── Telegram ───
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_ADMIN_ID: int = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
     TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
     
-    # ─── باقي الإعدادات كما هي ───
     QUOTE_ASSET: str = "USDT"
     TOP_N_COINS: int = 50
     TIMEFRAMES: List[str] = field(default_factory=lambda: ["5m", "1h", "4h"])
@@ -75,7 +72,7 @@ class Config:
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT",
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
@@ -96,5 +93,3 @@ class Config:
     LOG_FORMAT: str = "json"
 
 CFG = Config()
-
-# 🔥 يمكن تحديث CFG.TELEGRAM_BOT_TOKEN ديناميكياً من bot.py
