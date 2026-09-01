@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي مع فصل مهام التليجرام عن المسح.
+bot.py - الملف الرئيسي مع تركيز على قراءة التوكن.
 """
 import asyncio
 import os
@@ -23,17 +23,16 @@ class CryptoSignalBot:
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
         
-        # 🔥 تأكيد قراءة التوكن من البيئة
+        # 🔥 قراءة التوكن مباشرة من os.environ
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if token:
             logger.info(f"✅ TELEGRAM_BOT_TOKEN موجود في البيئة (الطول: {len(token)} حرف)")
+            # تحديث CFG بالتوكن
+            CFG.TELEGRAM_BOT_TOKEN = token
         else:
             logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة.")
             if CFG.TELEGRAM_BOT_TOKEN:
                 logger.info("ℹ️ تم العثور على التوكن في CFG.")
-        
-        # 🔥 تأخير لضمان تحميل المتغيرات
-        await asyncio.sleep(1)
         
         # بدء التليجرام
         await telegram.start()
@@ -184,16 +183,8 @@ class CryptoSignalBot:
             await self.initialize()
             await self.start_web_server()
             
-            # 🔥 تشغيل مهام الخلفية (لا تمنع Event Loop)
             asyncio.create_task(self.health_check())
             asyncio.create_task(self.self_ping())
-            
-            # 🔥 بدء تشغيل التليجرام (إذا لم يكن قد بدأ)
-            if telegram.app and telegram.app.running:
-                logger.info("✅ Telegram bot is already running")
-            else:
-                # تشغيل polling في مهمة منفصلة
-                asyncio.create_task(self._run_telegram())
             
             while self.running:
                 try:
@@ -202,7 +193,6 @@ class CryptoSignalBot:
                     logger.error(f"❌ خطأ في دورة المسح: {e}")
                 await asyncio.sleep(CFG.SCAN_INTERVAL_SECONDS)
                 
-                # تحديث قائمة العملات كل ساعة
                 if datetime.now(timezone.utc).minute == 0:
                     try:
                         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
@@ -216,15 +206,6 @@ class CryptoSignalBot:
             raise
         finally:
             await self.shutdown()
-
-    async def _run_telegram(self):
-        """تشغيل التليجرام في مهمة منفصلة."""
-        try:
-            if telegram.app:
-                await telegram.app.start()
-                logger.info("✅ Telegram bot started successfully")
-        except Exception as e:
-            logger.error(f"❌ فشل تشغيل التليجرام: {e}")
 
     async def shutdown(self):
         self.running = False
