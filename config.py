@@ -16,17 +16,15 @@ class Config:
     TELEGRAM_ADMIN_ID: int = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
     TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
     
-    # ─── إعدادات السوق ───
+    # ─── باقي الإعدادات كما هي ───
     QUOTE_ASSET: str = "USDT"
     TOP_N_COINS: int = 50
     TIMEFRAMES: List[str] = field(default_factory=lambda: ["5m", "1h", "4h"])
     SCAN_INTERVAL_SECONDS: int = 60
     
-    # ─── إعدادات قاعدة البيانات ───
     DB_PATH: str = "crypto_signals.db"
     MAX_CANDLES_PER_SYMBOL: int = 250
     
-    # ─── إعدادات المخاطر ───
     VIRTUAL_CAPITAL: float = 10_000.0
     RISK_PER_TRADE_PERCENT: float = 1.0
     MAX_DAILY_LOSS_PERCENT: float = 3.0
@@ -36,7 +34,6 @@ class Config:
     MIN_RR_RATIO: float = 2.0
     SL_BUFFER_PERCENT: float = 0.003
     
-    # ─── عتبات المؤشرات ───
     RSI_PERIOD: int = 6
     RSI_OVERSOLD: float = 30.0
     RSI_OVERBOUGHT: float = 70.0
@@ -57,12 +54,10 @@ class Config:
     ATR_PERIOD: int = 14
     ATR_SL_MULTIPLIER: float = 1.5
     
-    # ─── عتبات الإشارة ───
     MIN_CONFIDENCE: float = 75.0
     MIN_SCORE: float = 7.0
     MAX_SCORE_SIDEWAYS: float = 6.0
     
-    # ─── أوزان المؤشرات ───
     WEIGHTS: Dict[str, float] = field(default_factory=lambda: {
         "trend": 0.20,
         "momentum": 0.15,
@@ -73,7 +68,6 @@ class Config:
         "pivot": 0.10,
     })
     
-    # ─── قائمة العملات الأساسية ───
     CORE_UNIVERSE: List[str] = field(default_factory=lambda: [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
         "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
@@ -81,24 +75,19 @@ class Config:
         "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
         "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
         "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT",
+        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "CROUSDT",
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
         "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT", "TONUSDT"
     ])
     
-    # ─── إعدادات Pre-watch ───
     SCAN_UNLISTED_SYMBOLS: bool = True
     MAX_PREWATCH_TO_SCAN: int = 30
-    MAX_CONCURRENT_REQUESTS: int = 10
-    REQUEST_DELAY: float = 0.05
-    REQUEST_TIMEOUT: int = 3  # 🔥 مهلة الطلب بالثواني
-    # ─── إعدادات الأداء ───
+    
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_DELAY: float = 0.05
     
-    # ─── النشر ───
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
     SELF_PING_INTERVAL: int = 300
     PORT: int = int(os.getenv("PORT", "8080"))
@@ -107,3 +96,5 @@ class Config:
     LOG_FORMAT: str = "json"
 
 CFG = Config()
+
+# 🔥 يمكن تحديث CFG.TELEGRAM_BOT_TOKEN ديناميكياً من bot.py
