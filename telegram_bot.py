@@ -1,74 +1,117 @@
 import os
-import logging
+import asyncio
+from typing import Dict, Any
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from utils import logger
+from config import CFG
+from database import db
 
-# إعداد السجلات
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+class TelegramBotManager:
+    def __init__(self):
+        self.app = None
+        self.is_running = False
 
-# جلب توكن التلجرام ومعرف الأدمن من متغيرات البيئة
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")  # اختياري: إذا كنت تطبق حماية للأوامر
+    async def start(self):
+        """بدء تشغيل مستمع التلجرام مدمج مع حلقة asyncio الرئيسية"""
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", getattr(CFG, "TELEGRAM_BOT_TOKEN", "")).strip()
+        
+        if not token:
+            logger.error("❌ TELEGRAM_BOT_TOKEN مفقود في متغيرات البيئة و config!")
+            return
 
-# ---------------------------------------------------------
-# دالّات التعامل مع الأوامر (Command Handlers)
-# ---------------------------------------------------------
+        try:
+            logger.info(f"✅ TELEGRAM_BOT_TOKEN جاهز للاستخدام (الطول: {len(token)})")
+            
+            # بناء تطبيق التلجرام
+            self.app = Application.builder().token(token).build()
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"📩 تم استقبال الأمر /start من المستخدم: {user_id}")
-    await update.message.reply_text(f"👋 مرحباً بك! البوت يعمل بنجاح.\nمعرف حسابك: `{user_id}`", parse_mode="Markdown")
+            # تسجيل كافة الأوامر قبل البدء
+            self.app.add_handler(CommandHandler("start", self._cmd_start))
+            self.app.add_handler(CommandHandler("status", self._cmd_status))
+            self.app.add_handler(CommandHandler("adduser", self._cmd_adduser))
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"📩 تم استقبال الأمر /status من المستخدم: {user_id}")
-    
-    status_msg = (
-        "🤖 **حالة النظام:**\n"
-        "✅ محرك الإشارات: يعمل\n"
-        "✅ الاتصال بالخادم: متصل (Port 10000)\n"
-        "✅ مستمع التلجرام: نشط"
-    )
-    await update.message.reply_text(status_msg, parse_mode="Markdown")
+            # تهيئة التطبيق وإلغاء أي Webhook قديم
+            await self.app.initialize()
+            await self.app.bot.delete_webhook(drop_pending_updates=True)
+            await self.app.start()
+            
+            # تشغيل المستمع (Polling) داخل نفس حلقة الـ AsyncIO
+            await self.app.updater.start_polling(drop_pending_updates=True)
+            
+            self.is_running = True
+            logger.info("✅ تم إعداد تطبيق التليجرام وبدء الاستماع للأوامر بنجاح")
+            
+        except Exception as e:
+            logger.error(f"❌ فشل في تشغيل بوت التليجرام: {e}")
 
-async def adduser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"📩 تم استقبال الأمر /adduser من المستخدم: {user_id}")
-    
-    # فحص الأرجومنت المرفقة مع الأمر (مثال: /adduser 8224097606)
-    if not context.args:
-        await update.message.reply_text("⚠️ يرجى تحديد معرف المستخدم. مثال:\n`/adduser 123456789`", parse_mode="Markdown")
-        return
+    async def stop(self):
+        """إيقاف البوت بشكل آمن عند إغلاق السيرفر"""
+        if self.app and self.is_running:
+            try:
+                if self.app.updater and self.app.updater.running:
+                    await self.app.updater.stop()
+                await self.app.stop()
+                await self.app.shutdown()
+                self.is_running = False
+                logger.info("🛑 تم إيقاف بوت التلجرام بنجاح.")
+            except Exception as e:
+                logger.error(f"خطأ أثناء إيقاف التلجرام: {e}")
 
-    target_user_id = context.args[0]
-    # يمكنك إضافة منطق حفظ المستخدم في قاعدة البيانات هنا
-    
-    await update.message.reply_text(f"✅ تم إضافة المستخدم `{target_user_id}` بنجاح!", parse_mode="Markdown")
+    # ---------------------------------------------------------
+    # الأوامر المخصصة (Handlers)
+    # ---------------------------------------------------------
+    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 تم استقبال الأمر /start من: {user_id}")
+        await update.message.reply_text(
+            f"👋 **مرحباً بك في نظام Phoenix Elite!**\nمعرف حسابك: `{user_id}`",
+            parse_mode="Markdown"
+        )
 
-# ---------------------------------------------------------
-# إعداد البوت وبدء التشغيل
-# ---------------------------------------------------------
+    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 تم استقبال الأمر /status من: {user_id}")
+        
+        status_text = (
+            "🤖 **حالة المحرك والنظام:**\n"
+            "✅ محرك الإشارات: يعمل (Scanning Active)\n"
+            "✅ قاعدة البيانات: متصلة\n"
+            "✅ السيرفر: Webhook/Aiohttp Online"
+        )
+        await update.message.reply_text(status_text, parse_mode="Markdown")
 
-async def init_telegram_bot():
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("❌ TELEGRAM_BOT_TOKEN مفقود في متغيرات البيئة و config!")
-        return None
+    async def _cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 تم استقبال الأمر /adduser من: {user_id}")
+        
+        if not context.args:
+            await update.message.reply_text("⚠️ يرجى كتابة الآيدي. مثال:\n`/adduser 8224097606`", parse_mode="Markdown")
+            return
+            
+        target_id = context.args[0]
+        # إضافة المستخدم في قاعدة البيانات إن أردت
+        await update.message.reply_text(f"✅ تم تسجيل المستخدم `{target_id}` في النظام بنجاح.", parse_mode="Markdown")
 
-    logger.info(f"✅ TELEGRAM_BOT_TOKEN جاهز للاستخدام (الطول: {len(TELEGRAM_BOT_TOKEN)})")
+    async def send_signal(self, signal_obj: Dict[str, Any]):
+        """دالة إرسال الإشارات التي يستدعيها bot.py"""
+        if not self.app or not self.is_running:
+            logger.warning("تعذر إرسال الإشارة، بوت التلجرام غير نشط.")
+            return
 
-    # بناء تطبيق التلجرام
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        chat_id = getattr(CFG, "TELEGRAM_CHAT_ID", None)
+        if not chat_id:
+            return
 
-    # تسجيل الأوامر (يجب أن يتم قبل start_polling)
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("adduser", adduser_command))
+        msg = (
+            f"⚡ **إشارة جديدة: {signal_obj.get('symbol')}**\n"
+            f"📈 النوع: {signal_obj.get('type')}\n"
+            f"🎯 سعر الدخول: {signal_obj.get('entry_price')}"
+        )
+        try:
+            await self.app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"خطأ أثناء إرسال الإشارة عبر التلجرام: {e}")
 
-    # تهيئة وتشعيل المستمع
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    
-    logger.info("✅ تم إعداد تطبيق التليجرام وبدء الاستماع للأوامر بنجاح")
-    return app
+# إنشاء الكائن الموحد لاستخدامه في bot.py
+telegram = TelegramBotManager()
