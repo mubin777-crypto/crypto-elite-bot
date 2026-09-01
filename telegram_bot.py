@@ -1,5 +1,5 @@
 """
-telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات.
+telegram_bot.py - إدارة وتفعيل اتصالات Telegram واستقبال الأوامر.
 """
 import asyncio
 import os
@@ -22,12 +22,10 @@ class TelegramManager:
         if self.bot is not None:
             return
         
-        # البحث عن المتغير بحسب التسميات المختلفة لتأمين القراءة
         token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or CFG.TELEGRAM_BOT_TOKEN
         
         if token:
             self._token = token
-            logger.info(f"✅ TELEGRAM_TOKEN تم تحميله بنجاح (الطول: {len(token)} حرف)")
         else:
             logger.error("❌ TELEGRAM_TOKEN غير معرّف في البيئة ولا في CFG.")
             return
@@ -50,23 +48,19 @@ class TelegramManager:
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("prewatch", self.cmd_prewatch))
         self.app.add_handler(CommandHandler("performance", self.cmd_performance))
-        self.app.add_handler(CommandHandler("signal", self.cmd_signal))
         self.app.add_handler(CommandHandler("reset_daily", self.cmd_reset_daily))
-        self.app.add_handler(CommandHandler("adduser", self.cmd_adduser))
-        self.app.add_handler(CommandHandler("removeuser", self.cmd_removeuser))
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id == CFG.TELEGRAM_ADMIN_ID
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome = (
-            "🤖 *بوت إشارات العملات الرقمية*\n\n"
+            "🤖 *بوت إشارات العملات الرقمية المحترف*\n\n"
             "الأوامر المتاحة:\n"
-            "/status — حالة النظام\n"
-            "/prewatch — قائمة المراقبة\n"
+            "/status — حالة النظام الإحصائية\n"
+            "/prewatch — قائمة المراقبة الذكية\n"
             "/performance — تقرير الأداء\n"
-            "/signal SYMBOL — آخر إشارة لعملة\n"
-            "/reset_daily — إعادة ضبط الإحصائيات (للمشرف فقط)"
+            "/reset_daily — إعادة ضبط الإحصائيات (للمشرف)"
         )
         await update.message.reply_text(welcome, parse_mode="Markdown")
 
@@ -84,11 +78,11 @@ class TelegramManager:
         await update.message.reply_text(status_msg, parse_mode="Markdown")
 
     async def cmd_prewatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        pre_watch = db.get_active_prewatch(20)
+        pre_watch = db.get_active_prewatch(15)
         if not pre_watch:
             await update.message.reply_text("🔭 لا توجد عملات تحت المراقبة حالياً.")
             return
-        msg = "🔭 *قائمة المراقبة*\n\n"
+        msg = "🔭 *قائمة المراقبة الفعالة*\n\n"
         for i, symbol in enumerate(pre_watch[:10], 1):
             msg += f"{i}. `{symbol}`\n"
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -102,13 +96,6 @@ class TelegramManager:
         report = backtester.generate_weekly_report(metrics)
         await update.message.reply_text(report, parse_mode="Markdown")
 
-    async def cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not context.args:
-            await update.message.reply_text("⚠️ الاستخدام: /signal BTCUSDT")
-            return
-        symbol = context.args[0].upper()
-        await update.message.reply_text(f"🔍 البحث عن آخر إشارة لـ {symbol}...")
-
     async def cmd_reset_daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("⛔ صلاحية المشرف مطلوبة.")
@@ -116,36 +103,9 @@ class TelegramManager:
         db.reset_daily_stats()
         await update.message.reply_text("✅ تم إعادة ضبط الإحصائيات اليومية.")
 
-    async def cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._is_admin(update.effective_user.id):
-            await update.message.reply_text("⛔ صلاحية المشرف مطلوبة.")
-            return
-        if not context.args:
-            await update.message.reply_text("⚠️ الاستخدام: /adduser USER_ID")
-            return
-        added = []
-        for user_id in context.args:
-            db.add_subscriber(user_id)
-            added.append(user_id)
-        await update.message.reply_text(f"✅ تمت إضافة المستخدمين: {', '.join(added)}")
-
-    async def cmd_removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._is_admin(update.effective_user.id):
-            await update.message.reply_text("⛔ صلاحية المشرف مطلوبة.")
-            return
-        if not context.args:
-            await update.message.reply_text("⚠️ الاستخدام: /removeuser USER_ID")
-            return
-        removed = []
-        for user_id in context.args:
-            db.remove_subscriber(user_id)
-            removed.append(user_id)
-        await update.message.reply_text(f"✅ تمت إزالة المستخدمين: {', '.join(removed)}")
-
     async def send_signal(self, signal: Dict, chat_id: str = None):
         self._ensure_initialized()
         if not self.bot:
-            logger.warning("⚠️ البوت غير مهيأ لإرسال الإشارات.")
             return
         
         if chat_id is None:
@@ -173,26 +133,13 @@ class TelegramManager:
         except Exception as e:
             logger.error("❌ Failed to send Telegram signal", extra={"error": str(e)})
 
-    async def send_alert(self, message: str, to_admin: bool = True):
-        self._ensure_initialized()
-        if not self.bot:
-            return
-        chat_id = str(CFG.TELEGRAM_ADMIN_ID) if to_admin else CFG.TELEGRAM_CHANNEL_ID
-        try:
-            await self.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
-        except Exception as e:
-            logger.error("❌ Failed to send alert", extra={"error": str(e)})
-
     async def start(self):
-        logger.info("⏳ بدء تهيئة تطبيق Telegram...")
         await asyncio.sleep(0.5)
         self._ensure_initialized()
         if not self.app:
-            logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب عدم توفر التوكن.")
             return
         await self.app.initialize()
         await self.app.start()
-        logger.info("✅ Telegram bot started successfully")
 
     async def stop(self):
         if self.app:
