@@ -1,5 +1,5 @@
 """
-signals.py - محرك توليد الإشارات مع إصلاح ADX.
+signals.py - محرك توليد الإشارات مع ADX مستقل لـ 4h.
 """
 import numpy as np
 import pandas as pd
@@ -18,7 +18,6 @@ class SignalEngine:
         if saved:
             self.adaptive.weights = saved
 
-    # 🔥 إصلاح: حساب ADX من إطار 4 ساعات مباشرة
     def analyze(self, symbol: str, df_5m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> Optional[Dict]:
         if len(df_5m) < CFG.SMA_SLOW + 10:
             return None
