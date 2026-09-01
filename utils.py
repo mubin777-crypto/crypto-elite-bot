@@ -52,10 +52,10 @@ class RateLimiter:
 
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.2)
 
-# ─── نقاط النهاية (مرتبة حسب الأولوية والاستقرار على السحابة) ───
+# ─── نقاط النهاية (مرتبة حسب الأولوية والاستقرار) ───
 BINANCE_ENDPOINTS = [
-    "https://fapi.binance.com",           # Futures API (أقل قيوداً على سيرفرات Render)
-    "https://data-api.binance.vision",    # Public Market Data Archive
+    "https://fapi.binance.com",           # Futures API (أقل قيوداً)
+    "https://data-api.binance.vision",    # Public Market Data
     "https://api.binance.us",             # US Endpoint
     "https://api.binance.com",            # Spot Main API
 ]
@@ -68,7 +68,6 @@ class DataFetcher:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
-            # إغلاق الجلسة القديمة إن وجدت
             if self.session is not None and not self.session.closed:
                 await self.session.close()
             
@@ -105,7 +104,6 @@ class DataFetcher:
                 await limiter.acquire()
                 session = await self._get_session()
                 
-                # توجيه المسار حسب نقطة النهاية (Spot vs Futures)
                 endpoint_path = "/fapi/v1/klines" if "fapi" in base_url else "/api/v3/klines"
                 url = f"{base_url}{endpoint_path}"
 
