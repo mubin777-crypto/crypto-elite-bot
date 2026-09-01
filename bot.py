@@ -23,6 +23,7 @@ class CryptoSignalBot:
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
         
+        # 🔥 تأكيد قراءة التوكن من البيئة
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if token:
             logger.info(f"✅ TELEGRAM_BOT_TOKEN موجود في البيئة (الطول: {len(token)} حرف)")
@@ -31,10 +32,13 @@ class CryptoSignalBot:
             if CFG.TELEGRAM_BOT_TOKEN:
                 logger.info("ℹ️ تم العثور على التوكن في CFG.")
         
-        # بدء التليجرام (سيتم تشغيله في الخلفية)
+        # 🔥 تأخير لضمان تحميل المتغيرات
+        await asyncio.sleep(1)
+        
+        # بدء التليجرام
         await telegram.start()
         
-        # جلب قائمة العملات (مع مهلة قصيرة)
+        # جلب قائمة العملات
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         if not self.symbols:
             logger.warning("⚠️ لم يتم جلب أي عملات، سيتم استخدام القائمة الأساسية.")
@@ -184,10 +188,12 @@ class CryptoSignalBot:
             asyncio.create_task(self.health_check())
             asyncio.create_task(self.self_ping())
             
-            # 🔥 بدء تشغيل التليجرام كـ Updater منفصل (إذا لم يكن قد بدأ)
-            if telegram.app and not telegram.app.updater.running:
-                await telegram.app.updater.start_polling()
-                logger.info("✅ Telegram polling started")
+            # 🔥 بدء تشغيل التليجرام (إذا لم يكن قد بدأ)
+            if telegram.app and telegram.app.running:
+                logger.info("✅ Telegram bot is already running")
+            else:
+                # تشغيل polling في مهمة منفصلة
+                asyncio.create_task(self._run_telegram())
             
             while self.running:
                 try:
@@ -210,6 +216,15 @@ class CryptoSignalBot:
             raise
         finally:
             await self.shutdown()
+
+    async def _run_telegram(self):
+        """تشغيل التليجرام في مهمة منفصلة."""
+        try:
+            if telegram.app:
+                await telegram.app.start()
+                logger.info("✅ Telegram bot started successfully")
+        except Exception as e:
+            logger.error(f"❌ فشل تشغيل التليجرام: {e}")
 
     async def shutdown(self):
         self.running = False
