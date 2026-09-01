@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي للمشروع (دمج بين النسختين).
+bot.py - الملف الرئيسي مع خادم Webhook مدمج.
 """
 import asyncio
 import os
@@ -23,7 +23,6 @@ class CryptoSignalBot:
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
         
-        # 🔥 تأكيد قراءة التوكن من البيئة
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if token:
             logger.info(f"✅ TELEGRAM_BOT_TOKEN موجود في البيئة (الطول: {len(token)} حرف)")
@@ -34,8 +33,6 @@ class CryptoSignalBot:
             else:
                 logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة ولا في CFG.")
         
-        await telegram.start()
-        
         # جلب قائمة العملات
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         if not self.symbols:
@@ -43,11 +40,15 @@ class CryptoSignalBot:
             self.symbols = CFG.CORE_UNIVERSE[:50]
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
-    # ─── خادم HTTP (من النسخة الجديدة) ───
+    # ─── خادم HTTP مع نقاط Webhook ───
     async def start_web_server(self):
         app = web.Application()
         app.router.add_get("/", self._handle_health_check)
         app.router.add_get("/health", self._handle_health_check)
+        
+        # 🔥 نقطة Webhook لتلقي تحديثات Telegram
+        app.router.add_post("/webhook", self._handle_webhook)
+        app.router.add_post(f"/webhook/{CFG.WEBHOOK_SECRET}", self._handle_webhook)
         
         runner = web.AppRunner(app)
         await runner.setup()
@@ -62,6 +63,19 @@ class CryptoSignalBot:
             "bot_running": self.running,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
+
+    # 🔥 معالج Webhook
+    async def _handle_webhook(self, request):
+        """استقبال تحديثات Telegram عبر Webhook."""
+        try:
+            data = await request.json()
+            update = Update.de_json(data, telegram.bot)
+            if telegram.app:
+                await telegram.app.process_update(update)
+            return web.json_response({"status": "ok"})
+        except Exception as e:
+            logger.error(f"❌ Webhook error: {e}")
+            return web.json_response({"status": "error"}, status=500)
 
     # ─── ماسح الفرص ───
     async def scan_market_for_opportunities(self):
@@ -104,7 +118,6 @@ class CryptoSignalBot:
             if not signal:
                 return
 
-            # 🔥 نظام منع التكرار والتضارب
             last_signal = db.get_last_signal(symbol)
             if last_signal:
                 price_diff = abs(last_signal['price'] - signal['entry_price']) / signal['entry_price'] if signal['entry_price'] > 0 else 1
@@ -120,7 +133,6 @@ class CryptoSignalBot:
                         logger.info(f"⏭️ تخطي {symbol}: معاكس")
                         return
 
-            # حفظ الإشارة وإرسالها
             db.save_signal(signal)
             await telegram.send_signal(signal)
             await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
@@ -164,12 +176,18 @@ class CryptoSignalBot:
 
     # ─── Self Ping ───
     async def self_ping(self):
-        if not CFG.RENDER_EXTERNAL_URL: return
+        if not CFG.RENDER_EXTERNAL_URL:
+            # إذا لم يكن هناك رابط، نستخدم localhost
+            port = int(os.getenv("PORT", CFG.PORT))
+            url = f"http://127.0.0.1:{port}/health"
+        else:
+            url = CFG.RENDER_EXTERNAL_URL
+        
         while self.running:
             try:
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(CFG.RENDER_EXTERNAL_URL, timeout=10) as resp:
+                    async with session.get(url, timeout=10) as resp:
                         logger.info("✅ Self-ping OK", extra={"status": resp.status})
             except Exception as e:
                 logger.warning("⚠️ Self-ping failed", extra={"error": str(e)})
@@ -185,11 +203,17 @@ class CryptoSignalBot:
         self.running = True
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._shutdown)
+            try:
+                loop.add_signal_handler(sig, self._shutdown)
+            except NotImplementedError:
+                pass
 
         try:
             await self.initialize()
             await self.start_web_server()
+            
+            # 🔥 بدء Webhook بدلاً من Polling
+            await telegram.start_webhook()
             
             asyncio.create_task(self.health_check())
             asyncio.create_task(self.self_ping())
