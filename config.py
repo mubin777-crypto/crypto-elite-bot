@@ -1,6 +1,5 @@
 """
-config.py - إعدادات البوت المتقدمة
-دمج إعدادات النسخة الأصلية (العتبات، المؤشرات) مع إعدادات النشر من النسخة الجديدة.
+config.py - إعدادات البوت المتقدمة مع دعم Webhook.
 """
 import os
 from dataclasses import dataclass, field
@@ -16,6 +15,10 @@ class Config:
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_ADMIN_ID: int = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
     TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
+    
+    # ─── Webhook (جديد) ───
+    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")  # 🔥 رابط الخدمة + /webhook
+    WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")  # اختياري: رمز سري للأمان
     
     # ─── إعدادات السوق ───
     QUOTE_ASSET: str = "USDT"
@@ -81,7 +84,7 @@ class Config:
         "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
         "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
         "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT",
+        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT"
     ])
     
     # ─── إعدادات Pre-watch ───
@@ -91,9 +94,9 @@ class Config:
     # ─── إعدادات الأداء ───
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_DELAY: float = 0.05
-    REQUEST_TIMEOUT: int = 5  # 🔥 مهلة قصيرة لمنع التجميد
+    REQUEST_TIMEOUT: int = 5
     
-    # ─── النشر (مهم لـ Render) ───
+    # ─── النشر ───
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
     SELF_PING_INTERVAL: int = 300
     PORT: int = int(os.getenv("PORT", "8080"))
