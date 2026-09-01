@@ -1,5 +1,5 @@
 """
-telegram_bot.py - معالجة أوامر Telegram (مدمج: هيكل جديد + أوامر متقدمة).
+telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات.
 """
 import asyncio
 import os
@@ -22,13 +22,11 @@ class TelegramManager:
         if self.bot is not None:
             return
         
-        # 🔥 قراءة التوكن مباشرة من البيئة (الحل الجذري)
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if token:
             self._token = token
             logger.info(f"✅ TELEGRAM_BOT_TOKEN تم قراءته من البيئة (الطول: {len(token)} حرف)")
         else:
-            # محاولة من CFG
             token = CFG.TELEGRAM_BOT_TOKEN
             if token:
                 self._token = token
@@ -63,7 +61,6 @@ class TelegramManager:
     def _is_admin(self, user_id: int) -> bool:
         return user_id == CFG.TELEGRAM_ADMIN_ID
 
-    # ─── الأوامر ───
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome = (
             "🤖 *بوت إشارات العملات الرقمية*\n\n"
@@ -148,7 +145,6 @@ class TelegramManager:
             removed.append(user_id)
         await update.message.reply_text(f"✅ تمت إزالة المستخدمين: {', '.join(removed)}")
 
-    # ─── إرسال الإشارات ───
     async def send_signal(self, signal: Dict, chat_id: str = None):
         self._ensure_initialized()
         if not self.bot:
@@ -162,6 +158,8 @@ class TelegramManager:
         emoji = "🟢" if signal["type"] == "BUY" else "🔴"
         signal_display = signal.get("signal", signal["type"])
         reasons_text = " | ".join(signal.get("reasons", [])[:3])
+        
+        # ✅ تصحيح: إغلاق السلسلة النصية بشكل صحيح
         message = (
             f"{emoji} *{signal_display} — {signal['symbol']}*\n\n"
             f"💰 سعر الدخول: `{signal['entry_price']}`\n"
@@ -170,7 +168,7 @@ class TelegramManager:
             f"📊 حجم الصفقة: `{signal['position_size']}`\n"
             f"🎚️ درجة الثقة: `{signal['confidence']}%`\n"
             f"⭐ النقاط: `{signal['score']}/10`\n"
-            f"📈 ADX: `{signal['adx']}` | RSI: `{signal['rsi']}`\n
+            f"📈 ADX: `{signal['adx']}` | RSI: `{signal['rsi']}`\n"
             f"📦 حجم: `{signal['volume_ratio']}x`\n\n"
             f"📝 الأسباب: _{reasons_text}_\n"
             f"⏱ `{signal['timestamp']}`"
