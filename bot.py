@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي للمشروع مع حماية دورة المسح ومعالجة إشارات النظام.
+bot.py - الملف الرئيسي المحسن لاستجابة فورية مع Render ومنع الإغلاق القسري.
 """
 import asyncio
 import os
@@ -51,7 +51,7 @@ class CryptoSignalBot:
             "status": "online",
             "bot_running": self.running,
             "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+        }, status=200)
 
     async def scan_market_for_opportunities(self):
         try:
@@ -65,7 +65,6 @@ class CryptoSignalBot:
                 change = item["change_24h"]
                 volume = item["volume_24h"]
 
-                # فلتر مزدوج (AND): حجم التداول لا يقل عن 1M دولار وتغير منطقي
                 if volume >= 1_000_000 and (3.0 <= abs(change) <= 50.0):
                     score = min(100, abs(change) * 8 + (volume / 500_000))
                     reason = f"تغير {change:.1f}% | حجم ${volume/1_000_000:.2f}M"
@@ -115,25 +114,32 @@ class CryptoSignalBot:
         except Exception as e:
             logger.error(f"❌ Error scanning {symbol}", extra={"error": str(e)})
 
-    async def run_scan_cycle(self):
-        try:
-            if int(datetime.now(timezone.utc).minute) % 3 == 0:
-                await self.scan_market_for_opportunities()
-        except Exception as e:
-            logger.error(f"خطأ في ماسح الفرص: {e}")
-        
-        pre_watch_symbols = db.get_active_prewatch(CFG.MAX_PREWATCH_TO_SCAN) if CFG.SCAN_UNLISTED_SYMBOLS else []
-        all_symbols = list(set([s for s in (CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols) if s not in CFG.EXCLUDED_SYMBOLS]))
-        
-        logger.info(f"🔄 فحص {len(all_symbols)} عملة آمنة (Pre-watch: {len(pre_watch_symbols)})...")
-        
-        for symbol in all_symbols:
-            if not self.running: break
-            await self.scan_symbol(symbol)
-            await asyncio.sleep(CFG.REQUEST_DELAY)
+    async def run_scan_loop(self):
+        """حلقة خلفية مستقلة لإجراء المسح المستمر دون تعطيل خادم الويب."""
+        while self.running:
+            try:
+                if int(datetime.now(timezone.utc).minute) % 3 == 0:
+                    await self.scan_market_for_opportunities()
+
+                pre_watch_symbols = db.get_active_prewatch(CFG.MAX_PREWATCH_TO_SCAN) if CFG.SCAN_UNLISTED_SYMBOLS else []
+                all_symbols = list(set([s for s in (CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols) if s not in CFG.EXCLUDED_SYMBOLS]))
+                
+                logger.info(f"🔄 فحص {len(all_symbols)} عملة آمنة (Pre-watch: {len(pre_watch_symbols)})...")
+                
+                for symbol in all_symbols:
+                    if not self.running: 
+                        break
+                    await self.scan_symbol(symbol)
+                    await asyncio.sleep(CFG.REQUEST_DELAY)
+
+            except Exception as e:
+                logger.error(f"❌ خطأ في دورة المسح: {e}")
+                
+            await asyncio.sleep(CFG.SCAN_INTERVAL_SECONDS)
 
     async def self_ping(self):
-        if not CFG.RENDER_EXTERNAL_URL: return
+        if not CFG.RENDER_EXTERNAL_URL: 
+            return
         while self.running:
             try:
                 import aiohttp
@@ -161,14 +167,13 @@ class CryptoSignalBot:
             await self.initialize()
             await self.start_web_server()
             
+            # تشغيل مهام المسح والـ Self-ping كمهام خلفية غير معطلة للأنشطة الأخرى
+            asyncio.create_task(self.run_scan_loop())
             asyncio.create_task(self.self_ping())
             
+            # أبقِ التطبيق شغالاً طالما البوت قيد التشغيل
             while self.running:
-                try:
-                    await self.run_scan_cycle()
-                except Exception as e:
-                    logger.error(f"❌ خطأ في دورة المسح: {e}")
-                await asyncio.sleep(CFG.SCAN_INTERVAL_SECONDS)
+                await asyncio.sleep(1)
                         
         except Exception as e:
             logger.critical("💥 Bot crashed", extra={"error": str(e)})
