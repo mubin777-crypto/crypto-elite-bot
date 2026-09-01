@@ -1,5 +1,6 @@
 """
-config.py - ملف الإعدادات المركزي للبوت.
+config.py - إعدادات البوت المتقدمة
+دمج إعدادات النسخة الأصلية (العتبات، المؤشرات) مع إعدادات النشر من النسخة الجديدة.
 """
 import os
 from dataclasses import dataclass, field
@@ -64,13 +65,8 @@ class Config:
     
     # ─── أوزان المؤشرات ───
     WEIGHTS: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 0.20,
-        "momentum": 0.15,
-        "volume": 0.15,
-        "volatility": 0.15,
-        "rsi": 0.15,
-        "macd": 0.10,
-        "pivot": 0.10,
+        "trend": 0.20, "momentum": 0.15, "volume": 0.15,
+        "volatility": 0.15, "rsi": 0.15, "macd": 0.10, "pivot": 0.10,
     })
     
     # ─── قائمة العملات الأساسية ───
@@ -95,8 +91,9 @@ class Config:
     # ─── إعدادات الأداء ───
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_DELAY: float = 0.05
+    REQUEST_TIMEOUT: int = 5  # 🔥 مهلة قصيرة لمنع التجميد
     
-    # ─── النشر ───
+    # ─── النشر (مهم لـ Render) ───
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
     SELF_PING_INTERVAL: int = 300
     PORT: int = int(os.getenv("PORT", "8080"))
@@ -105,3 +102,7 @@ class Config:
     LOG_FORMAT: str = "json"
 
 CFG = Config()
+
+if not CFG.TELEGRAM_BOT_TOKEN:
+    import logging
+    logging.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف في البيئة. سيعمل البوت لكن بدون إرسال إشارات.")
