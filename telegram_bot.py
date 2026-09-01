@@ -1,8 +1,10 @@
 """
 telegram_bot.py - معالجة أوامر Telegram وإرسال الإشارات.
+تم تعديله لقراءة التوكن مباشرة من البيئة مع إعادة محاولة.
 """
 import asyncio
 import os
+import time
 from typing import Dict, Optional
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Application
@@ -18,16 +20,22 @@ class TelegramManager:
         self._token = None
         self._initialized = False
 
-    def _ensure_initialized(self):
+    def _ensure_initialized(self, retry: bool = True):
+        """تهيئة تطبيق Telegram مع قراءة التوكن مباشرة من البيئة."""
         if self.bot is not None:
             return
         
+        # 🔥 قراءة التوكن مباشرة من البيئة (الحل الجذري)
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        
+        # إذا لم يتم العثور على التوكن، حاول قراءته من CFG (احتياطي)
         if not token:
             token = CFG.TELEGRAM_BOT_TOKEN
+            if token:
+                logger.info("ℹ️ تم قراءة التوكن من CFG.")
         
         if not token:
-            logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف.")
+            logger.error("❌ TELEGRAM_BOT_TOKEN غير معرّف في البيئة ولا في CFG.")
             return
         
         self._token = token
@@ -36,6 +44,10 @@ class TelegramManager:
         try:
             self.app = ApplicationBuilder().token(self._token).build()
             self.bot = self.app.bot
+            
+            # التحقق من صحة التوكن بمحاولة جلب معلومات البوت
+            asyncio.create_task(self._verify_bot())
+            
             self._setup_handlers()
             self._initialized = True
             logger.info("✅ Telegram Application initialized successfully")
@@ -43,6 +55,19 @@ class TelegramManager:
             logger.error(f"❌ فشل تهيئة تطبيق Telegram: {e}")
             self.bot = None
             self.app = None
+            if retry:
+                logger.info("⏳ سيتم إعادة محاولة تهيئة التليجرام بعد 5 ثوانٍ...")
+                time.sleep(5)
+                self._ensure_initialized(retry=False)
+
+    async def _verify_bot(self):
+        """التحقق من صحة التوكن بمحاولة جلب معلومات البوت."""
+        try:
+            if self.bot:
+                me = await self.bot.get_me()
+                logger.info(f"✅ تم التحقق من التوكن: @{me.username}")
+        except Exception as e:
+            logger.error(f"❌ فشل التحقق من التوكن: {e}")
 
     def _setup_handlers(self):
         if not self.app:
@@ -109,7 +134,6 @@ class TelegramManager:
             await update.message.reply_text("⚠️ الاستخدام: /signal BTCUSDT")
             return
         symbol = context.args[0].upper()
-        # يمكن تحسين هذه الدالة لجلب آخر إشارة من قاعدة البيانات
         await update.message.reply_text(f"🔍 البحث عن آخر إشارة لـ {symbol}...")
 
     async def cmd_reset_daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,7 +214,8 @@ class TelegramManager:
             logger.error("❌ Failed to send alert", extra={"error": str(e)})
 
     async def start(self):
-        await asyncio.sleep(0.5)
+        logger.info("⏳ بدء تهيئة تطبيق Telegram...")
+        await asyncio.sleep(1)  # تأخير لضمان تحميل المتغيرات
         self._ensure_initialized()
         if not self.app:
             logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب نقص التوكن.")
