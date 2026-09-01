@@ -1,6 +1,7 @@
 """
-signals.py - محرك توليد الإشارات.
+signals.py - محرك توليد الإشارات مع إصلاح ADX.
 """
+import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
@@ -17,21 +18,25 @@ class SignalEngine:
         if saved:
             self.adaptive.weights = saved
 
+    # 🔥 إصلاح: حساب ADX من إطار 4 ساعات مباشرة
     def analyze(self, symbol: str, df_5m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> Optional[Dict]:
         if len(df_5m) < CFG.SMA_SLOW + 10:
             return None
 
         ind_5m = self.indicators.compute_all(df_5m)
-        if not ind_5m:
+        ind_4h = self.indicators.compute_all(df_4h)  # 🔥 حساب مستقل لـ 4h
+        if not ind_5m or not ind_4h:
             return None
 
-        adx_val = ind_5m["adx"].iloc[-1]
-        trend_4h = self._get_trend_direction(df_4h, adx_val)
+        adx_4h = ind_4h["adx"].iloc[-1]  # استخدام ADX الخاص بـ 4h
+        trend_4h = self._get_trend_direction(df_4h, adx_4h)
         
         last_idx = len(df_5m) - 1
         prev_idx = last_idx - 1
         close = df_5m["close"].iloc[last_idx]
         rsi_val = ind_5m["rsi"].iloc[last_idx]
+        sma20 = ind_5m["sma20"].iloc[last_idx]
+        sma50 = ind_5m["sma50"].iloc[last_idx]
         momentum = ind_5m["momentum"].iloc[last_idx]
         vol_ratio = ind_5m["volume_ratio"].iloc[last_idx]
         bb = ind_5m["bb"]
@@ -43,9 +48,11 @@ class SignalEngine:
         pivots = ind_5m["pivots"]
         atr = calculate_atr(df_5m, CFG.ATR_PERIOD).iloc[last_idx]
 
+        # Cooldown
         if db.get_last_signal_time(symbol, CFG.COOLDOWN_MINUTES):
             return None
 
+        # Daily Loss
         daily_stats = db.get_daily_stats()
         if daily_stats.get("pnl", 0) <= -(CFG.VIRTUAL_CAPITAL * CFG.MAX_DAILY_LOSS_PERCENT / 100):
             logger.warning("Daily loss limit reached", extra={"symbol": symbol})
@@ -54,16 +61,16 @@ class SignalEngine:
         scores = {}
         reasons = []
 
-        # 1. الاتجاه
+        # 1. الاتجاه (باستخدام ADX 4h)
         trend_score = 0
         if trend_4h == "UP":
             trend_score = 1.0
-            reasons.append(f"اتجاه صاعد (ADX {adx_val:.1f})")
+            reasons.append(f"اتجاه صاعد (ADX {adx_4h:.1f})")
         elif trend_4h == "DOWN":
             trend_score = 1.0
-            reasons.append(f"اتجاه هابط (ADX {adx_val:.1f})")
+            reasons.append(f"اتجاه هابط (ADX {adx_4h:.1f})")
         else:
-            reasons.append(f"اتجاه جانبي/ضعيف (ADX {adx_val:.1f})")
+            reasons.append(f"اتجاه جانبي/ضعيف (ADX {adx_4h:.1f})")
         scores["trend"] = trend_score
 
         # 2. الزخم
@@ -128,11 +135,11 @@ class SignalEngine:
             reasons.append("اقتراب من دعم يومي")
         scores["pivot"] = pivot_score
 
-        if adx_val < CFG.ADX_WEAK_TREND and not self._early_snipe_check(df_5m, ind_5m):
+        if adx_4h < CFG.ADX_WEAK_TREND and not self._early_snipe_check(df_5m, ind_5m):
             return None
 
         total_score = sum(score * self.adaptive.weights.get(factor, 0.1) * 10 for factor, score in scores.items())
-        if trend_4h == "SIDEWAYS" and adx_val < 20:
+        if trend_4h == "SIDEWAYS" and adx_4h < 20:
             total_score = min(total_score, CFG.MAX_SCORE_SIDEWAYS)
 
         if total_score < CFG.MIN_SCORE:
@@ -146,11 +153,14 @@ class SignalEngine:
         if sl is None or tp is None:
             return None
 
+        # التحقق من صحة SL/TP
         if signal_type == "BUY":
             if sl >= close or tp <= close:
+                logger.warning(f"⚠️ SL/TP غير صحيح لـ {symbol}: SL={sl}, TP={tp}, Entry={close}")
                 return None
         else:
             if sl <= close or tp >= close:
+                logger.warning(f"⚠️ SL/TP غير صحيح لـ {symbol}: SL={sl}, TP={tp}, Entry={close}")
                 return None
 
         rr_ratio = abs(tp - close) / risk if risk > 0 else 0
@@ -177,7 +187,7 @@ class SignalEngine:
             "confidence": round(confidence, 1),
             "score": round(total_score, 2),
             "reasons": reasons,
-            "adx": round(adx_val, 2),
+            "adx": round(adx_4h, 2),  # استخدام ADX 4h
             "rsi": round(rsi_val, 2),
             "volume_ratio": round(vol_ratio, 2),
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -227,12 +237,37 @@ class SignalEngine:
             return None, None, 0.0
 
         buffer = 1.0 - CFG.SL_BUFFER_PERCENT
+
+        # معالجة العملات منخفضة السعر
+        if entry < 0.01:
+            if signal_type == "BUY":
+                sl = entry * 0.97
+                tp = entry * 1.06
+            else:
+                sl = entry * 1.03
+                tp = entry * 0.94
+            if signal_type == "BUY":
+                if sl >= entry:
+                    sl = entry * 0.99
+                if tp <= entry:
+                    tp = entry * 1.02
+            else:
+                if sl <= entry:
+                    sl = entry * 1.01
+                if tp >= entry:
+                    tp = entry * 0.98
+            risk = abs(entry - sl)
+            return sl, tp, risk
+
         atr_sl = atr * CFG.ATR_SL_MULTIPLIER
 
         if signal_type == "BUY":
             sl_atr = entry - atr_sl
             s1_val = pivots.get("s1", sl_atr)
-            sl_support = s1_val * buffer if (s1_val and s1_val < entry) else sl_atr
+            if pd.isna(s1_val) or s1_val is None or s1_val == 0:
+                sl_support = sl_atr
+            else:
+                sl_support = s1_val * buffer if s1_val < entry else sl_atr
             sl = max(sl_atr, sl_support) if sl_support < entry else sl_atr
             if sl >= entry:
                 sl = entry - atr_sl
@@ -241,7 +276,10 @@ class SignalEngine:
         else:
             sl_atr = entry + atr_sl
             r1_val = pivots.get("r1", sl_atr)
-            sl_resist = r1_val / buffer if (r1_val and r1_val > entry) else sl_atr
+            if pd.isna(r1_val) or r1_val is None or r1_val == 0:
+                sl_resist = sl_atr
+            else:
+                sl_resist = r1_val / buffer if r1_val > entry else sl_atr
             sl = min(sl_atr, sl_resist) if sl_resist > entry else sl_atr
             if sl <= entry:
                 sl = entry + atr_sl
