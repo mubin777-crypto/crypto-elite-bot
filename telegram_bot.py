@@ -1,11 +1,10 @@
 """
-telegram_bot.py - معالجة استقبال الأوامر وإرسال التوصيات بالتوازي
+telegram_bot.py - إدارة استقبال الأوامر وإرسال الإشارات
 """
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from config import CFG
-from database import db
 
 logger = logging.getLogger("telegram_bot")
 
@@ -14,62 +13,53 @@ class TelegramManager:
         self.app = None
 
     async def start(self):
-        """تهيئة وتكليف البوت بالاستماع للأوامر في الخلفية"""
+        """تهيئة البوت وتشغيل Polling غير معطل للمهام الأخرى"""
         if not CFG.TELEGRAM_BOT_TOKEN:
             logger.warning("⚠️ لم يتم توفير TELEGRAM_BOT_TOKEN")
             return
 
-        # 1. بناء التطبيق
+        # بناء التطبيق
         self.app = Application.builder().token(CFG.TELEGRAM_BOT_TOKEN).build()
 
-        # 2. تسجيل المعالجات (Command Handlers)
+        # إضافة معالجات الأوامر
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
-        self.app.add_handler(CommandHandler("help", self._cmd_help))
 
-        # 3. بدء التشغيل التزامني
+        # بدء التشغيل وفتح الاستماع للأوامر
         await self.app.initialize()
         await self.app.start()
         
-        # 4. تفعيل Polling الاستقبال في الخلفية (Non-blocking)
         if self.app.updater:
             await self.app.updater.start_polling(drop_pending_updates=True)
             logger.info("📡 Telegram Polling started successfully (جاهز لاستقبال الأوامر)")
 
     async def stop(self):
-        """إيقاف البوت بنظافة عند إغلاق الخادم"""
+        """إيقاف البوت بنظافة"""
         if self.app:
             if self.app.updater and self.app.updater.running:
                 await self.app.updater.stop()
             await self.app.stop()
             await self.app.shutdown()
-            logger.info("🛑 Telegram Bot stopped")
-
-    # --- الأوامر المتاحة ---
+            logger.info("🛑 Telegram Bot stopped successfully")
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "👋 أهلاً بك في بوت Crypto Elite!\n"
-            "البوت يعمل حالياً على فحص الأسواق وإرسال التوصيات تلقائياً.\n\n"
-            "الأوامر المتاحة:\n"
-            "/status - فحص حالة البوت والعملات"
+            "👋 أهلاً بك في بوت Crypto Elite!\n\n"
+            "البوت يعمل حالياً على فحص الأسواق وإرسال التوصيات تلقائياً.\n"
+            "استخدم /status لمعرفة حالة البوت."
         )
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        stats = db.get_daily_stats() if hasattr(db, 'get_daily_stats') else {}
         msg = (
-            "📊 **حالة النظام الحالية:**\n\n"
+            "📊 **حالة النظام:**\n\n"
             "✅ البوت: متصل ويعمل\n"
-            "🌐 سيرفر الويب: Port 10000 (Active)\n"
-            "🔍 مسح العملات: شغال تلقائياً"
+            "🌐 Web Server: Port 10000 (Active)\n"
+            "🔍 مسح العملات: شغال في الخلفية"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-    async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("لأي استفسار، استخدم الأمر /status لتفقد حالة النظام.")
-
     async def send_signal(self, signal_data: dict):
-        """دالة إرسال التوصيات إلى القناة/المجموعة"""
+        """إرسال الإشعارات للقناة أو المجموعة"""
         if not self.app or not CFG.TELEGRAM_CHAT_ID:
             return
 
@@ -88,5 +78,4 @@ class TelegramManager:
         except Exception as e:
             logger.error(f"❌ فشل إرسال التوصية عبر تليجرام: {e}")
 
-# كائن عالمي موحد
 telegram = TelegramManager()
