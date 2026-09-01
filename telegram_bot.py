@@ -158,8 +158,6 @@ class TelegramManager:
         emoji = "🟢" if signal["type"] == "BUY" else "🔴"
         signal_display = signal.get("signal", signal["type"])
         reasons_text = " | ".join(signal.get("reasons", [])[:3])
-        
-        # ✅ تصحيح: إغلاق السلسلة النصية بشكل صحيح
         message = (
             f"{emoji} *{signal_display} — {signal['symbol']}*\n\n"
             f"💰 سعر الدخول: `{signal['entry_price']}`\n"
@@ -190,6 +188,7 @@ class TelegramManager:
         except Exception as e:
             logger.error("❌ Failed to send alert", extra={"error": str(e)})
 
+    # 🔥 التعديل الجوهري: بدء Polling بشكل صحيح
     async def start(self):
         logger.info("⏳ بدء تهيئة تطبيق Telegram...")
         await asyncio.sleep(0.5)
@@ -197,12 +196,24 @@ class TelegramManager:
         if not self.app:
             logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب نقص التوكن.")
             return
+        
         await self.app.initialize()
         await self.app.start()
+        
+        # 🔥 بدء الاستماع للأوامر
+        if self.app.updater:
+            await self.app.updater.start_polling()
+            logger.info("✅ Telegram polling started successfully")
+        else:
+            logger.warning("⚠️ No updater found, polling not started")
+        
         logger.info("✅ Telegram bot started successfully")
 
     async def stop(self):
         if self.app:
+            # إيقاف Polling أولاً
+            if self.app.updater and self.app.updater.running:
+                await self.app.updater.stop()
             await self.app.stop()
         self._initialized = False
 
