@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي مع خادم Webhook مدمج.
+bot.py - الملف الرئيسي مع خادم Webhook مدمج وتحسينات المعالج.
 """
 import asyncio
 import os
@@ -7,7 +7,7 @@ import signal
 from datetime import datetime, timezone
 from typing import List, Dict
 from aiohttp import web
-from telegram import Update  # 🔥 تم إضافة هذا الاستيراد
+from telegram import Update
 from config import CFG
 from utils import fetcher, logger
 from database import db
@@ -34,22 +34,19 @@ class CryptoSignalBot:
             else:
                 logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة ولا في CFG.")
         
-        # جلب قائمة العملات
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         if not self.symbols:
             logger.warning("⚠️ لم يتم جلب أي عملات، سيتم استخدام القائمة الأساسية.")
             self.symbols = CFG.CORE_UNIVERSE[:50]
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
-    # ─── خادم HTTP مع نقاط Webhook ───
+    # ─── خادم HTTP ───
     async def start_web_server(self):
         app = web.Application()
         app.router.add_get("/", self._handle_health_check)
         app.router.add_get("/health", self._handle_health_check)
-        
-        # 🔥 نقطة Webhook لتلقي تحديثات Telegram
+        app.router.add_get("/webhook", self._handle_webhook_get)  # اختبار
         app.router.add_post("/webhook", self._handle_webhook)
-        app.router.add_post(f"/webhook/{CFG.WEBHOOK_SECRET}", self._handle_webhook)
         
         runner = web.AppRunner(app)
         await runner.setup()
@@ -65,42 +62,58 @@ class CryptoSignalBot:
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
-    # 🔥 معالج Webhook (مع استيراد Update)
+    async def _handle_webhook_get(self, request):
+        """نقطة اختبار لمعرفة إن كان الخادم يستقبل طلبات GET."""
+        return web.json_response({"status": "ok", "message": "Webhook endpoint is reachable"})
+
+    # 🔥 معالج Webhook المحسّن
     async def _handle_webhook(self, request):
-        """استقبال تحديثات Telegram عبر Webhook."""
+        """استقبال تحديثات Telegram عبر Webhook مع تسجيل تفصيلي."""
         try:
+            # قراءة البيانات
             data = await request.json()
+            logger.info(f"📩 Webhook received: {data.get('update_id', 'unknown')}")
+            
+            # التأكد من وجود البوت
+            if telegram.bot is None:
+                logger.error("❌ Telegram bot not initialized")
+                return web.json_response({"status": "error", "message": "Bot not ready"}, status=500)
+            
+            # معالجة التحديث
             update = Update.de_json(data, telegram.bot)
             if telegram.app:
                 await telegram.app.process_update(update)
-            return web.json_response({"status": "ok"})
+                logger.info("✅ Update processed successfully")
+                return web.json_response({"status": "ok"})
+            else:
+                logger.error("❌ Telegram app not initialized")
+                return web.json_response({"status": "error", "message": "App not ready"}, status=500)
+                
         except Exception as e:
             logger.error(f"❌ Webhook error: {e}")
-            return web.json_response({"status": "error"}, status=500)
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-    # ─── ماسح الفرص ───
+    # ─── بقية الدوال (scan_market_for_opportunities, scan_symbol, run_scan_cycle, health_check, self_ping) ───
+    # (نفس الكود السابق، لا تغيير)
+
     async def scan_market_for_opportunities(self):
         try:
             logger.info("🔍 مسح سريع للفرص (دفعة واحدة)...")
             tickers = await fetcher.fetch_24hr_tickers()
             if not tickers:
                 return
-
             for item in tickers:
                 symbol = item["symbol"]
                 change = item["change_24h"]
                 volume = item["volume_24h"]
-
                 if abs(change) > 3.0 or volume > 2_000_000:
                     score = min(100, abs(change) * 8 + (volume / 100_000))
                     reason = f"تغير {change:.1f}% | حجم ${volume/1_000_000:.2f}M"
                     db.add_to_prewatch(symbol, score, change, volume, reason)
                     logger.info(f"🔭 تمت إضافة {symbol} إلى Pre-watch: {reason}")
-
         except Exception as e:
             logger.error(f"خطأ في ماسح الفرص: {e}")
 
-    # ─── مسح عملة واحدة ───
     async def scan_symbol(self, symbol: str):
         try:
             df_5m = await fetcher.fetch_klines(symbol, "5m", CFG.MAX_CANDLES_PER_SYMBOL)
@@ -109,16 +122,13 @@ class CryptoSignalBot:
             if df_5m.empty or df_1h.empty or df_4h.empty:
                 logger.debug(f"⏭️ تخطي {symbol}: بيانات غير كافية")
                 return
-
             db.save_candles(symbol, "5m", df_5m)
             db.save_candles(symbol, "1h", df_1h)
             db.save_candles(symbol, "4h", df_4h)
             self.last_scan[symbol] = datetime.now(timezone.utc)
-
             signal = engine.analyze(symbol, df_5m, df_1h, df_4h)
             if not signal:
                 return
-
             last_signal = db.get_last_signal(symbol)
             if last_signal:
                 price_diff = abs(last_signal['price'] - signal['entry_price']) / signal['entry_price'] if signal['entry_price'] > 0 else 1
@@ -133,40 +143,32 @@ class CryptoSignalBot:
                     if t_diff < CFG.OPPOSITE_SIGNAL_COOLDOWN:
                         logger.info(f"⏭️ تخطي {symbol}: معاكس")
                         return
-
             db.save_signal(signal)
             await telegram.send_signal(signal)
             await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
             db.set_last_signal(symbol, signal['type'], signal['entry_price'], signal['type'], signal['type'])
             db.update_daily_stats(0, False)
             logger.info("✅ Signal generated", extra={"symbol": symbol, "type": signal["type"]})
-
         except Exception as e:
             logger.error(f"❌ Error scanning {symbol}", extra={"error": str(e)})
 
-    # ─── دورة المسح ───
     async def run_scan_cycle(self):
         logger.info("🔄 Starting scan cycle...")
-        
         try:
             if int(datetime.now(timezone.utc).minute) % 3 == 0:
                 await self.scan_market_for_opportunities()
         except Exception as e:
             logger.error(f"خطأ في ماسح الفرص: {e}")
-        
         pre_watch_symbols = db.get_active_prewatch(CFG.MAX_PREWATCH_TO_SCAN) if CFG.SCAN_UNLISTED_SYMBOLS else []
         all_symbols = list(set(CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols))
         logger.info(f"🔄 فحص {len(all_symbols)} عملة (Pre-watch: {len(pre_watch_symbols)})...")
-        
         for symbol in all_symbols:
             if not self.running: break
             await self.scan_symbol(symbol)
             await asyncio.sleep(CFG.REQUEST_DELAY)
-            
         db.set_scan_state("symbols", ",".join(all_symbols))
         db.set_scan_state("last_scan", datetime.now(timezone.utc).isoformat())
 
-    # ─── فحص الصحة ───
     async def health_check(self):
         while self.running:
             await asyncio.sleep(300)
@@ -175,14 +177,12 @@ class CryptoSignalBot:
                 await telegram.send_alert(f"⚠️ توقف تحديث {len(stale)} عملة.")
                 logger.warning("Stale data", extra={"symbols": stale})
 
-    # ─── Self Ping ───
     async def self_ping(self):
         if not CFG.RENDER_EXTERNAL_URL:
             port = int(os.getenv("PORT", CFG.PORT))
             url = f"http://127.0.0.1:{port}/health"
         else:
             url = CFG.RENDER_EXTERNAL_URL
-        
         while self.running:
             try:
                 import aiohttp
@@ -193,7 +193,6 @@ class CryptoSignalBot:
                 logger.warning("⚠️ Self-ping failed", extra={"error": str(e)})
             await asyncio.sleep(CFG.SELF_PING_INTERVAL)
 
-    # ─── الإيقاف ───
     def _shutdown(self):
         logger.info("🛑 Shutdown signal received")
         self.running = False
@@ -211,9 +210,7 @@ class CryptoSignalBot:
         try:
             await self.initialize()
             await self.start_web_server()
-            
-            # 🔥 بدء Webhook بدلاً من Polling
-            await telegram.start_webhook()
+            await telegram.start_webhook()  # 🔥 بدء Webhook
             
             asyncio.create_task(self.health_check())
             asyncio.create_task(self.self_ping())
@@ -239,7 +236,6 @@ class CryptoSignalBot:
         finally:
             await self.shutdown()
 
-    # ─── الإغلاق النظيف ───
     async def shutdown(self):
         self.running = False
         if self.site:
