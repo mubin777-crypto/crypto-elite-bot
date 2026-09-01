@@ -1,5 +1,5 @@
 """
-utils.py - طبقة جلب البيانات والأدوات المساعدة وحساب الأوزان التكيفية.
+utils.py - طبقة جلب البيانات والأدوات المساعدة.
 """
 import asyncio
 import aiohttp
@@ -28,24 +28,7 @@ logger = logging.getLogger("crypto_bot")
 handler = logging.StreamHandler()
 handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
-logger.setLevel(getattr(logging, CFG.LOG_LEVEL, "INFO"))
-
-class AdaptiveWeights:
-    """إدارة الأوزان الديناميكية للمؤشرات الفنية بناءً على حالة السوق."""
-    def __init__(self, base_weights: Optional[Dict[str, float]] = None):
-        self.weights = base_weights or CFG.WEIGHTS
-
-    def get_adjusted_weights(self, market_state: str = "normal") -> Dict[str, float]:
-        adjusted = self.weights.copy()
-        if market_state == "trending":
-            adjusted["trend"] *= 1.3
-            adjusted["rsi"] *= 0.8
-        elif market_state == "volatile":
-            adjusted["volatility"] *= 1.4
-            adjusted["momentum"] *= 1.2
-        
-        total = sum(adjusted.values())
-        return {k: v / total for k, v in adjusted.items()}
+logger.setLevel(getattr(logging, CFG.LOG_LEVEL))
 
 class RateLimiter:
     def __init__(self, max_concurrent: int = CFG.MAX_CONCURRENT_REQUESTS, delay_between: float = 0.15):
@@ -67,13 +50,15 @@ class RateLimiter:
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
 
 BINANCE_ENDPOINTS = [
-    "https://api.binance.us",
-    "https://data-api.binance.vision",
     "https://api.binance.com",
+    "https://data-api.binance.vision",
     "https://api1.binance.com",
     "https://api2.binance.com",
     "https://api3.binance.com",
+    "https://api.binance.us",
 ]
+
+_symbol_filters_cache: Dict[str, Dict] = {}
 
 class DataFetcher:
     def __init__(self):
@@ -104,6 +89,7 @@ class DataFetcher:
                 async with session.get(url, params=params) as resp:
                     limiter.release()
                     if resp.status == 429:
+                        logger.warning("Rate limit hit", extra={"symbol": symbol})
                         await asyncio.sleep(1)
                         continue
                     resp.raise_for_status()
@@ -111,10 +97,19 @@ class DataFetcher:
                     if not data:
                         continue
                     df = self._parse_klines(data)
-                    return self._clean_data(df)
-            except Exception:
+                    df = self._clean_data(df)
+                    return df
+            except asyncio.TimeoutError:
                 limiter.release()
                 continue
+            except aiohttp.ClientError as e:
+                limiter.release()
+                await asyncio.sleep(0.5)
+                continue
+            except Exception as e:
+                limiter.release()
+                logger.error(f"Error fetching {symbol}", extra={"error": str(e)})
+                return pd.DataFrame()
         return pd.DataFrame()
 
     def _parse_klines(self, data: List[List[Any]]) -> pd.DataFrame:
@@ -131,9 +126,7 @@ class DataFetcher:
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values("open_time").reset_index(drop=True)
         df = df.dropna(subset=["open", "high", "low", "close", "volume"])
-        for col in ["open", "high", "low", "close", "volume"]:
-            if df[col].isna().any():
-                df[col] = df[col].ffill().bfill()
+        df = df.ffill().bfill()
         return df
 
     async def fetch_top_symbols(self, limit: int = 50) -> List[str]:
@@ -149,13 +142,13 @@ class DataFetcher:
                     usdt_pairs = [
                         item for item in data
                         if item["symbol"].endswith(CFG.QUOTE_ASSET)
-                        and item["symbol"] not in CFG.EXCLUDED_SYMBOLS
-                        and float(item.get("quoteVolume", 0)) >= 1_000_000
+                        and float(item.get("quoteVolume", 0)) > 1_000_000
                     ]
                     usdt_pairs.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
                     return [item["symbol"] for item in usdt_pairs[:limit]]
-            except Exception:
+            except Exception as e:
                 limiter.release()
+                await asyncio.sleep(0.5)
                 continue
         return []
 
@@ -179,11 +172,11 @@ class DataFetcher:
                         }
                         for item in data
                         if item["symbol"].endswith(CFG.QUOTE_ASSET)
-                        and item["symbol"] not in CFG.EXCLUDED_SYMBOLS
                     ]
                     return result
-            except Exception:
+            except Exception as e:
                 limiter.release()
+                await asyncio.sleep(0.5)
                 continue
         return []
 
@@ -203,3 +196,22 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.rolling(window=period, min_periods=period).mean()
+
+class AdaptiveWeights:
+    def __init__(self, initial_weights: Dict[str, float]):
+        self.weights = initial_weights.copy()
+        self.performance_history: Dict[str, List[float]] = {k: [] for k in initial_weights}
+
+    def update(self, factor: str, result: float):
+        if factor in self.performance_history:
+            self.performance_history[factor].append(result)
+            self.performance_history[factor] = self.performance_history[factor][-30:]
+
+    def recalculate(self):
+        scores = {}
+        for factor, history in self.performance_history.items():
+            scores[factor] = sum(1 for r in history if r > 0) / len(history) if history else 1.0
+        total = sum(scores.values())
+        if total > 0:
+            self.weights = {k: v / total for k, v in scores.items()}
+            logger.info("Adaptive weights updated", extra={"weights": self.weights})
