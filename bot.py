@@ -23,15 +23,11 @@ class CryptoSignalBot:
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
         
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        token = CFG.TELEGRAM_BOT_TOKEN
         if token:
-            logger.info(f"✅ TELEGRAM_BOT_TOKEN موجود في البيئة (الطول: {len(token)} حرف)")
-            CFG.TELEGRAM_BOT_TOKEN = token
+            logger.info(f"✅ TELEGRAM_TOKEN جاهز للتشغيل (الطول: {len(token)} حرف)")
         else:
-            if CFG.TELEGRAM_BOT_TOKEN:
-                logger.info("ℹ️ تم العثور على التوكن في CFG.")
-            else:
-                logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة ولا في CFG.")
+            logger.warning("⚠️ TELEGRAM_TOKEN غير موجود.")
         
         await telegram.start()
         
