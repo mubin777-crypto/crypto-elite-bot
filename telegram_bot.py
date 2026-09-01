@@ -22,14 +22,11 @@ class TelegramManager:
         if self.bot is not None:
             return
         
-        # 🔥 قراءة التوكن مباشرة من os.environ
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        
         if token:
             self._token = token
             logger.info(f"✅ TELEGRAM_BOT_TOKEN تم قراءته من البيئة (الطول: {len(token)} حرف)")
         else:
-            # محاولة من CFG
             token = CFG.TELEGRAM_BOT_TOKEN
             if token:
                 self._token = token
@@ -64,7 +61,6 @@ class TelegramManager:
     def _is_admin(self, user_id: int) -> bool:
         return user_id == CFG.TELEGRAM_ADMIN_ID
 
-    # ─── الأوامر ───
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome = (
             "🤖 *بوت إشارات العملات الرقمية*\n\n"
@@ -149,7 +145,6 @@ class TelegramManager:
             removed.append(user_id)
         await update.message.reply_text(f"✅ تمت إزالة المستخدمين: {', '.join(removed)}")
 
-    # ─── إرسال الإشارات ───
     async def send_signal(self, signal: Dict, chat_id: str = None):
         self._ensure_initialized()
         if not self.bot:
@@ -185,7 +180,7 @@ class TelegramManager:
     async def send_alert(self, message: str, to_admin: bool = True):
         self._ensure_initialized()
         if not self.bot:
-            logger.warning(f"⚠️ لا يمكن إرسال التنبيه (لا يوجد توكن): {message}")
+            logger.warning(f"⚠️ لا يمكن إرسال التنبيه: {message}")
             return
         chat_id = str(CFG.TELEGRAM_ADMIN_ID) if to_admin else CFG.TELEGRAM_CHANNEL_ID
         try:
@@ -198,7 +193,7 @@ class TelegramManager:
         await asyncio.sleep(0.5)
         self._ensure_initialized()
         if not self.app:
-            logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب نقص التوكن.")
+            logger.warning("⚠️ لا يمكن بدء تطبيق Telegram بسبب عدم توفر التوكن.")
             return
         await self.app.initialize()
         await self.app.start()
