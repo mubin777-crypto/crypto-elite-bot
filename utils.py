@@ -52,7 +52,7 @@ class RateLimiter:
 
 limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.15)
 
-# ─── نقاط النهاية (مع ترتيب مناسب) ───
+# ─── نقاط النهاية ───
 BINANCE_ENDPOINTS = [
     "https://api.binance.us",
     "https://data-api.binance.vision",
@@ -175,7 +175,7 @@ class DataFetcher:
         logger.warning("Failed to fetch top symbols, returning empty list")
         return []
 
-    # 🔥 تصحيح الخطأ النحوي: إغلاق القائمة بشكل صحيح
+    # ✅ تصحيح إغلاق القائمة بشكل صحيح هنا
     async def fetch_24hr_tickers(self) -> List[Dict]:
         for base_url in BINANCE_ENDPOINTS:
             try:
@@ -186,7 +186,6 @@ class DataFetcher:
                     limiter.release()
                     resp.raise_for_status()
                     data = await resp.json()
-                    # ✅ تصحيح: إغلاق القائمة بشكل صحيح
                     result = [
                         {
                             "symbol": item["symbol"],
