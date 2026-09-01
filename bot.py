@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي للمشروع.
+bot.py - الملف الرئيسي للمشروع مع حماية دورة المسح ومعالجة إشارات النظام.
 """
 import asyncio
 import os
@@ -22,20 +22,17 @@ class CryptoSignalBot:
 
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
-        
         token = CFG.TELEGRAM_BOT_TOKEN
         if token:
             logger.info(f"✅ TELEGRAM_TOKEN جاهز للتشغيل (الطول: {len(token)} حرف)")
-        else:
-            logger.warning("⚠️ TELEGRAM_TOKEN غير موجود.")
         
         await telegram.start()
         
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         if not self.symbols:
             logger.warning("⚠️ لم يتم جلب أي عملات، سيتم استخدام القائمة الأساسية.")
-            self.symbols = CFG.CORE_UNIVERSE[:50]
-        logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
+            self.symbols = [s for s in CFG.CORE_UNIVERSE if s not in CFG.EXCLUDED_SYMBOLS][:50]
+        logger.info(f"✅ تم تحميل {len(self.symbols)} عملة آمنة.")
 
     async def start_web_server(self):
         app = web.Application()
@@ -58,7 +55,7 @@ class CryptoSignalBot:
 
     async def scan_market_for_opportunities(self):
         try:
-            logger.info("🔍 مسح سريع للفرص (دفعة واحدة)...")
+            logger.info("🔍 مسح الفرص (تطبيق فلتر السيولة الصارم >= $1M)...")
             tickers = await fetcher.fetch_24hr_tickers()
             if not tickers:
                 return
@@ -68,8 +65,9 @@ class CryptoSignalBot:
                 change = item["change_24h"]
                 volume = item["volume_24h"]
 
-                if abs(change) > 3.0 or volume > 2_000_000:
-                    score = min(100, abs(change) * 8 + (volume / 100_000))
+                # فلتر مزدوج (AND): حجم التداول لا يقل عن 1M دولار وتغير منطقي
+                if volume >= 1_000_000 and (3.0 <= abs(change) <= 50.0):
+                    score = min(100, abs(change) * 8 + (volume / 500_000))
                     reason = f"تغير {change:.1f}% | حجم ${volume/1_000_000:.2f}M"
                     db.add_to_prewatch(symbol, score, change, volume, reason)
                     logger.info(f"🔭 تمت إضافة {symbol} إلى Pre-watch: {reason}")
@@ -83,7 +81,6 @@ class CryptoSignalBot:
             df_1h = await fetcher.fetch_klines(symbol, "1h", 100)
             df_4h = await fetcher.fetch_klines(symbol, "4h", 100)
             if df_5m.empty or df_1h.empty or df_4h.empty:
-                logger.debug(f"⏭️ تخطي {symbol}: بيانات غير كافية")
                 return
 
             db.save_candles(symbol, "5m", df_5m)
@@ -91,38 +88,34 @@ class CryptoSignalBot:
             db.save_candles(symbol, "4h", df_4h)
             self.last_scan[symbol] = datetime.now(timezone.utc)
 
-            signal = engine.analyze(symbol, df_5m, df_1h, df_4h)
-            if not signal:
+            signal_data = engine.analyze(symbol, df_5m, df_1h, df_4h)
+            if not signal_data:
                 return
 
             last_signal = db.get_last_signal(symbol)
             if last_signal:
-                price_diff = abs(last_signal['price'] - signal['entry_price']) / signal['entry_price'] if signal['entry_price'] > 0 else 1
-                is_same = (last_signal['direction'] == signal['type'])
+                price_diff = abs(last_signal['price'] - signal_data['entry_price']) / signal_data['entry_price'] if signal_data['entry_price'] > 0 else 1
+                is_same = (last_signal['direction'] == signal_data['type'])
                 if is_same and price_diff < CFG.PRICE_TOLERANCE:
-                    logger.info(f"⏭️ تخطي {symbol}: مكرر")
                     return
-                is_opp = (last_signal['direction'] == 'BUY' and signal['type'] == 'SELL') or \
-                         (last_signal['direction'] == 'SELL' and signal['type'] == 'BUY')
+                is_opp = (last_signal['direction'] == 'BUY' and signal_data['type'] == 'SELL') or \
+                         (last_signal['direction'] == 'SELL' and signal_data['type'] == 'BUY')
                 if is_opp:
                     t_diff = (datetime.now(timezone.utc) - datetime.fromisoformat(last_signal['timestamp'])).total_seconds() / 60
                     if t_diff < CFG.OPPOSITE_SIGNAL_COOLDOWN:
-                        logger.info(f"⏭️ تخطي {symbol}: معاكس")
                         return
 
-            db.save_signal(signal)
-            await telegram.send_signal(signal)
+            db.save_signal(signal_data)
+            await telegram.send_signal(signal_data)
             await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
-            db.set_last_signal(symbol, signal['type'], signal['entry_price'], signal['type'], signal['type'])
+            db.set_last_signal(symbol, signal_data['type'], signal_data['entry_price'], signal_data['type'], signal_data['type'])
             db.update_daily_stats(0, False)
-            logger.info("✅ Signal generated", extra={"symbol": symbol, "type": signal["type"]})
+            logger.info("✅ Signal generated", extra={"symbol": symbol, "type": signal_data["type"]})
 
         except Exception as e:
             logger.error(f"❌ Error scanning {symbol}", extra={"error": str(e)})
 
     async def run_scan_cycle(self):
-        logger.info("🔄 Starting scan cycle...")
-        
         try:
             if int(datetime.now(timezone.utc).minute) % 3 == 0:
                 await self.scan_market_for_opportunities()
@@ -130,24 +123,14 @@ class CryptoSignalBot:
             logger.error(f"خطأ في ماسح الفرص: {e}")
         
         pre_watch_symbols = db.get_active_prewatch(CFG.MAX_PREWATCH_TO_SCAN) if CFG.SCAN_UNLISTED_SYMBOLS else []
-        all_symbols = list(set(CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols))
-        logger.info(f"🔄 فحص {len(all_symbols)} عملة (Pre-watch: {len(pre_watch_symbols)})...")
+        all_symbols = list(set([s for s in (CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols) if s not in CFG.EXCLUDED_SYMBOLS]))
+        
+        logger.info(f"🔄 فحص {len(all_symbols)} عملة آمنة (Pre-watch: {len(pre_watch_symbols)})...")
         
         for symbol in all_symbols:
             if not self.running: break
             await self.scan_symbol(symbol)
             await asyncio.sleep(CFG.REQUEST_DELAY)
-            
-        db.set_scan_state("symbols", ",".join(all_symbols))
-        db.set_scan_state("last_scan", datetime.now(timezone.utc).isoformat())
-
-    async def health_check(self):
-        while self.running:
-            await asyncio.sleep(300)
-            stale = [s for s, t in self.last_scan.items() if (datetime.now(timezone.utc) - t).total_seconds() > 300]
-            if stale:
-                await telegram.send_alert(f"⚠️ توقف تحديث {len(stale)} عملة.")
-                logger.warning("Stale data", extra={"symbols": stale})
 
     async def self_ping(self):
         if not CFG.RENDER_EXTERNAL_URL: return
@@ -156,9 +139,9 @@ class CryptoSignalBot:
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
                     async with session.get(CFG.RENDER_EXTERNAL_URL, timeout=10) as resp:
-                        logger.info("✅ Self-ping OK", extra={"status": resp.status})
-            except Exception as e:
-                logger.warning("⚠️ Self-ping failed", extra={"error": str(e)})
+                        pass
+            except Exception:
+                pass
             await asyncio.sleep(CFG.SELF_PING_INTERVAL)
 
     def _shutdown(self):
@@ -169,13 +152,15 @@ class CryptoSignalBot:
         self.running = True
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._shutdown)
+            try:
+                loop.add_signal_handler(sig, self._shutdown)
+            except NotImplementedError:
+                pass
 
         try:
             await self.initialize()
             await self.start_web_server()
             
-            asyncio.create_task(self.health_check())
             asyncio.create_task(self.self_ping())
             
             while self.running:
@@ -184,14 +169,6 @@ class CryptoSignalBot:
                 except Exception as e:
                     logger.error(f"❌ خطأ في دورة المسح: {e}")
                 await asyncio.sleep(CFG.SCAN_INTERVAL_SECONDS)
-                
-                if datetime.now(timezone.utc).minute == 0:
-                    try:
-                        self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
-                        if not self.symbols:
-                            self.symbols = CFG.CORE_UNIVERSE[:50]
-                    except Exception as e:
-                        logger.error(f"خطأ في تحديث القائمة: {e}")
                         
         except Exception as e:
             logger.critical("💥 Bot crashed", extra={"error": str(e)})
@@ -205,7 +182,7 @@ class CryptoSignalBot:
             await self.site.stop()
         await fetcher.close()
         await telegram.stop()
-        logger.info("✅ Bot shut down")
+        logger.info("✅ Bot shut down successfully")
 
 if __name__ == "__main__":
     bot = CryptoSignalBot()
