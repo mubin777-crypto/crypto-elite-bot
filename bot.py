@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي المحسن لاستجابة فورية مع Render ومنع الإغلاق القسري.
+bot.py - النسخة المعالجة جذرياً لضمان Port Binding الفوري على Render
 """
 import asyncio
 import os
@@ -18,13 +18,34 @@ class CryptoSignalBot:
         self.running = False
         self.symbols: List[str] = []
         self.last_scan: Dict[str, datetime] = {}
-        self.site = None
+        self.runner = None
 
-    async def initialize(self):
-        logger.info("🚀 Initializing bot...")
+    async def _handle_health_check(self, request):
+        return web.json_response({
+            "status": "online",
+            "bot_running": self.running,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=200)
+
+    async def start_web_server(self):
+        """ربط المنفذ فوراً لمنع Render من إنهاء الحاوية"""
+        app = web.Application()
+        app.router.add_get("/", self._handle_health_check)
+        app.router.add_get("/health", self._handle_health_check)
+        
+        self.runner = web.AppRunner(app)
+        await self.runner.setup()
+        port = int(os.getenv("PORT", "10000"))
+        site = web.TCPSite(self.runner, "0.0.0.0", port)
+        await site.start()
+        logger.info(f"🌐 Web Server successfully bound to port {port}")
+
+    async def initialize_async_services(self):
+        """تهيئة الخدمات الخارجية بعد ضمان فتح المنفذ"""
+        logger.info("🚀 Initializing background services...")
         token = CFG.TELEGRAM_BOT_TOKEN
         if token:
-            logger.info(f"✅ TELEGRAM_TOKEN جاهز للتشغيل (الطول: {len(token)} حرف)")
+            logger.info(f"✅ TELEGRAM_TOKEN جاهز (الطول: {len(token)} حرف)")
         
         await telegram.start()
         
@@ -34,28 +55,8 @@ class CryptoSignalBot:
             self.symbols = [s for s in CFG.CORE_UNIVERSE if s not in CFG.EXCLUDED_SYMBOLS][:50]
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة آمنة.")
 
-    async def start_web_server(self):
-        app = web.Application()
-        app.router.add_get("/", self._handle_health_check)
-        app.router.add_get("/health", self._handle_health_check)
-        
-        runner = web.AppRunner(app)
-        await runner.setup()
-        port = int(os.getenv("PORT", CFG.PORT))
-        self.site = web.TCPSite(runner, "0.0.0.0", port)
-        await self.site.start()
-        logger.info(f"🌐 Web Server running on port {port}")
-
-    async def _handle_health_check(self, request):
-        return web.json_response({
-            "status": "online",
-            "bot_running": self.running,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }, status=200)
-
     async def scan_market_for_opportunities(self):
         try:
-            logger.info("🔍 مسح الفرص (تطبيق فلتر السيولة الصارم >= $1M)...")
             tickers = await fetcher.fetch_24hr_tickers()
             if not tickers:
                 return
@@ -69,7 +70,6 @@ class CryptoSignalBot:
                     score = min(100, abs(change) * 8 + (volume / 500_000))
                     reason = f"تغير {change:.1f}% | حجم ${volume/1_000_000:.2f}M"
                     db.add_to_prewatch(symbol, score, change, volume, reason)
-                    logger.info(f"🔭 تمت إضافة {symbol} إلى Pre-watch: {reason}")
 
         except Exception as e:
             logger.error(f"خطأ في ماسح الفرص: {e}")
@@ -109,13 +109,11 @@ class CryptoSignalBot:
             await db.set_cooldown(symbol, datetime.now(timezone.utc).isoformat())
             db.set_last_signal(symbol, signal_data['type'], signal_data['entry_price'], signal_data['type'], signal_data['type'])
             db.update_daily_stats(0, False)
-            logger.info("✅ Signal generated", extra={"symbol": symbol, "type": signal_data["type"]})
 
         except Exception as e:
             logger.error(f"❌ Error scanning {symbol}", extra={"error": str(e)})
 
     async def run_scan_loop(self):
-        """حلقة خلفية مستقلة لإجراء المسح المستمر دون تعطيل خادم الويب."""
         while self.running:
             try:
                 if int(datetime.now(timezone.utc).minute) % 3 == 0:
@@ -123,8 +121,6 @@ class CryptoSignalBot:
 
                 pre_watch_symbols = db.get_active_prewatch(CFG.MAX_PREWATCH_TO_SCAN) if CFG.SCAN_UNLISTED_SYMBOLS else []
                 all_symbols = list(set([s for s in (CFG.CORE_UNIVERSE + self.symbols + pre_watch_symbols) if s not in CFG.EXCLUDED_SYMBOLS]))
-                
-                logger.info(f"🔄 فحص {len(all_symbols)} عملة آمنة (Pre-watch: {len(pre_watch_symbols)})...")
                 
                 for symbol in all_symbols:
                     if not self.running: 
@@ -136,19 +132,6 @@ class CryptoSignalBot:
                 logger.error(f"❌ خطأ في دورة المسح: {e}")
                 
             await asyncio.sleep(CFG.SCAN_INTERVAL_SECONDS)
-
-    async def self_ping(self):
-        if not CFG.RENDER_EXTERNAL_URL: 
-            return
-        while self.running:
-            try:
-                import aiohttp
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(CFG.RENDER_EXTERNAL_URL, timeout=10) as resp:
-                        pass
-            except Exception:
-                pass
-            await asyncio.sleep(CFG.SELF_PING_INTERVAL)
 
     def _shutdown(self):
         logger.info("🛑 Shutdown signal received")
@@ -164,14 +147,15 @@ class CryptoSignalBot:
                 pass
 
         try:
-            await self.initialize()
+            # Step 1: فتح خادم الويب فوراً لاستجابة Render
             await self.start_web_server()
             
-            # تشغيل مهام المسح والـ Self-ping كمهام خلفية غير معطلة للأنشطة الأخرى
-            asyncio.create_task(self.run_scan_loop())
-            asyncio.create_task(self.self_ping())
+            # Step 2: تهيئة الخدمات في الخلفية
+            await self.initialize_async_services()
             
-            # أبقِ التطبيق شغالاً طالما البوت قيد التشغيل
+            # Step 3: بدء حلقة المسح
+            asyncio.create_task(self.run_scan_loop())
+            
             while self.running:
                 await asyncio.sleep(1)
                         
@@ -183,8 +167,8 @@ class CryptoSignalBot:
 
     async def shutdown(self):
         self.running = False
-        if self.site:
-            await self.site.stop()
+        if self.runner:
+            await self.runner.cleanup()
         await fetcher.close()
         await telegram.stop()
         logger.info("✅ Bot shut down successfully")
