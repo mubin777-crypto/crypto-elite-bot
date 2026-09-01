@@ -1,7 +1,6 @@
 """
-signals.py - محرك توليد الإشارات مع تحسينات الاتجاه وإصلاح SL/TP.
+signals.py - محرك توليد الإشارات.
 """
-import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
@@ -33,8 +32,6 @@ class SignalEngine:
         prev_idx = last_idx - 1
         close = df_5m["close"].iloc[last_idx]
         rsi_val = ind_5m["rsi"].iloc[last_idx]
-        sma20 = ind_5m["sma20"].iloc[last_idx]
-        sma50 = ind_5m["sma50"].iloc[last_idx]
         momentum = ind_5m["momentum"].iloc[last_idx]
         vol_ratio = ind_5m["volume_ratio"].iloc[last_idx]
         bb = ind_5m["bb"]
@@ -57,7 +54,7 @@ class SignalEngine:
         scores = {}
         reasons = []
 
-        # ─── 1. الاتجاه (محسّن باستخدام ADX) ───
+        # 1. الاتجاه
         trend_score = 0
         if trend_4h == "UP":
             trend_score = 1.0
@@ -69,7 +66,7 @@ class SignalEngine:
             reasons.append(f"اتجاه جانبي/ضعيف (ADX {adx_val:.1f})")
         scores["trend"] = trend_score
 
-        # ─── 2. الزخم ───
+        # 2. الزخم
         mom_score = 0
         if trend_4h == "UP" and momentum > 0.5:
             mom_score = 1.0
@@ -79,7 +76,7 @@ class SignalEngine:
             reasons.append(f"زخم سلبي ({momentum:.2f}%)")
         scores["momentum"] = mom_score
 
-        # ─── 3. الحجم ───
+        # 3. الحجم
         vol_score = 0
         if vol_ratio >= CFG.VOLUME_SPIKE_RATIO:
             vol_score = 1.0
@@ -88,7 +85,7 @@ class SignalEngine:
             vol_score = 0.5
         scores["volume"] = vol_score
 
-        # ─── 4. التقلب ───
+        # 4. التقلب
         vol_score_bb = 0
         if is_squeeze:
             vol_score_bb = 0.8
@@ -101,7 +98,7 @@ class SignalEngine:
             reasons.append("اختراق الحد السفلي")
         scores["volatility"] = vol_score_bb
 
-        # ─── 5. RSI ───
+        # 5. RSI
         rsi_score = 0
         if trend_4h == "UP" and 30 <= rsi_val <= 50:
             rsi_score = 1.0
@@ -111,7 +108,7 @@ class SignalEngine:
             reasons.append(f"RSI في منطقة البيع ({rsi_val:.1f})")
         scores["rsi"] = rsi_score
 
-        # ─── 6. MACD ───
+        # 6. MACD
         macd_score = 0
         if macd_hist > 0 and macd_hist_prev <= 0 and trend_4h == "UP":
             macd_score = 1.0
@@ -121,7 +118,7 @@ class SignalEngine:
             reasons.append("تقاطع MACD سلبي")
         scores["macd"] = macd_score
 
-        # ─── 7. Pivot ───
+        # 7. Pivot
         pivot_score = 0
         if trend_4h == "UP" and abs(close - pivots["r1"]) / close < 0.005:
             pivot_score = 0.8
@@ -131,11 +128,9 @@ class SignalEngine:
             reasons.append("اقتراب من دعم يومي")
         scores["pivot"] = pivot_score
 
-        # ─── Early Snipe ───
         if adx_val < CFG.ADX_WEAK_TREND and not self._early_snipe_check(df_5m, ind_5m):
             return None
 
-        # ─── النتيجة الإجمالية ───
         total_score = sum(score * self.adaptive.weights.get(factor, 0.1) * 10 for factor, score in scores.items())
         if trend_4h == "SIDEWAYS" and adx_val < 20:
             total_score = min(total_score, CFG.MAX_SCORE_SIDEWAYS)
@@ -151,14 +146,11 @@ class SignalEngine:
         if sl is None or tp is None:
             return None
 
-        # التحقق من صحة SL/TP
         if signal_type == "BUY":
             if sl >= close or tp <= close:
-                logger.warning(f"⚠️ SL/TP غير صحيح لـ {symbol}: SL={sl}, TP={tp}, Entry={close}")
                 return None
         else:
             if sl <= close or tp >= close:
-                logger.warning(f"⚠️ SL/TP غير صحيح لـ {symbol}: SL={sl}, TP={tp}, Entry={close}")
                 return None
 
         rr_ratio = abs(tp - close) / risk if risk > 0 else 0
@@ -235,36 +227,12 @@ class SignalEngine:
             return None, None, 0.0
 
         buffer = 1.0 - CFG.SL_BUFFER_PERCENT
-
-        if entry < 0.01:
-            if signal_type == "BUY":
-                sl = entry * 0.97
-                tp = entry * 1.06
-            else:
-                sl = entry * 1.03
-                tp = entry * 0.94
-            if signal_type == "BUY":
-                if sl >= entry:
-                    sl = entry * 0.99
-                if tp <= entry:
-                    tp = entry * 1.02
-            else:
-                if sl <= entry:
-                    sl = entry * 1.01
-                if tp >= entry:
-                    tp = entry * 0.98
-            risk = abs(entry - sl)
-            return sl, tp, risk
-
         atr_sl = atr * CFG.ATR_SL_MULTIPLIER
 
         if signal_type == "BUY":
             sl_atr = entry - atr_sl
             s1_val = pivots.get("s1", sl_atr)
-            if pd.isna(s1_val) or s1_val is None or s1_val == 0:
-                sl_support = sl_atr
-            else:
-                sl_support = s1_val * buffer if s1_val < entry else sl_atr
+            sl_support = s1_val * buffer if (s1_val and s1_val < entry) else sl_atr
             sl = max(sl_atr, sl_support) if sl_support < entry else sl_atr
             if sl >= entry:
                 sl = entry - atr_sl
@@ -273,10 +241,7 @@ class SignalEngine:
         else:
             sl_atr = entry + atr_sl
             r1_val = pivots.get("r1", sl_atr)
-            if pd.isna(r1_val) or r1_val is None or r1_val == 0:
-                sl_resist = sl_atr
-            else:
-                sl_resist = r1_val / buffer if r1_val > entry else sl_atr
+            sl_resist = r1_val / buffer if (r1_val and r1_val > entry) else sl_atr
             sl = min(sl_atr, sl_resist) if sl_resist > entry else sl_atr
             if sl <= entry:
                 sl = entry + atr_sl
