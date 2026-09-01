@@ -3,7 +3,7 @@ indicators.py - محرك المؤشرات الفنية.
 """
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple
+from typing import Dict
 from config import CFG
 
 class TechnicalIndicators:
@@ -21,9 +21,7 @@ class TechnicalIndicators:
 
     @staticmethod
     def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
+        high, low, close = df["high"], df["low"], df["close"]
         plus_dm = high.diff()
         minus_dm = -low.diff()
         plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
@@ -68,11 +66,7 @@ class TechnicalIndicators:
         macd_line = ema_fast - ema_slow
         signal_line = macd_line.ewm(span=signal, adjust=False).mean()
         histogram = macd_line - signal_line
-        return {
-            "macd": macd_line,
-            "signal": signal_line,
-            "histogram": histogram,
-        }
+        return {"macd": macd_line, "signal": signal_line, "histogram": histogram}
 
     @staticmethod
     def momentum(df: pd.DataFrame, period: int = 6) -> pd.Series:
@@ -92,9 +86,7 @@ class TechnicalIndicators:
         if len(df) < 2:
             return {"pivot": 0, "r1": 0, "r2": 0, "s1": 0, "s2": 0}
         last = df.iloc[-2]
-        high = last["high"]
-        low = last["low"]
-        close = last["close"]
+        high, low, close = last["high"], last["low"], last["close"]
         pivot = (high + low + close) / 3
         r1 = (2 * pivot) - low
         r2 = pivot + (high - low)
