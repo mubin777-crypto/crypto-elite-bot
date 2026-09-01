@@ -7,6 +7,7 @@ import signal
 from datetime import datetime, timezone
 from typing import List, Dict
 from aiohttp import web
+from telegram import Update  # 🔥 تم إضافة هذا الاستيراد
 from config import CFG
 from utils import fetcher, logger
 from database import db
@@ -64,7 +65,7 @@ class CryptoSignalBot:
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
-    # 🔥 معالج Webhook
+    # 🔥 معالج Webhook (مع استيراد Update)
     async def _handle_webhook(self, request):
         """استقبال تحديثات Telegram عبر Webhook."""
         try:
@@ -177,7 +178,6 @@ class CryptoSignalBot:
     # ─── Self Ping ───
     async def self_ping(self):
         if not CFG.RENDER_EXTERNAL_URL:
-            # إذا لم يكن هناك رابط، نستخدم localhost
             port = int(os.getenv("PORT", CFG.PORT))
             url = f"http://127.0.0.1:{port}/health"
         else:
