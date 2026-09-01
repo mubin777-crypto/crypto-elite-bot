@@ -1,5 +1,5 @@
 """
-utils.py - طبقة جلب البيانات والأدوات المساعدة مع استبعاد قائمة الحظر وضبط الحدود.
+utils.py - طبقة جلب البيانات والأدوات المساعدة وحساب الأوزان التكيفية.
 """
 import asyncio
 import aiohttp
@@ -28,7 +28,24 @@ logger = logging.getLogger("crypto_bot")
 handler = logging.StreamHandler()
 handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
-logger.setLevel(getattr(logging, CFG.LOG_LEVEL))
+logger.setLevel(getattr(logging, CFG.LOG_LEVEL, "INFO"))
+
+class AdaptiveWeights:
+    """إدارة الأوزان الديناميكية للمؤشرات الفنية بناءً على حالة السوق."""
+    def __init__(self, base_weights: Optional[Dict[str, float]] = None):
+        self.weights = base_weights or CFG.WEIGHTS
+
+    def get_adjusted_weights(self, market_state: str = "normal") -> Dict[str, float]:
+        adjusted = self.weights.copy()
+        if market_state == "trending":
+            adjusted["trend"] *= 1.3
+            adjusted["rsi"] *= 0.8
+        elif market_state == "volatile":
+            adjusted["volatility"] *= 1.4
+            adjusted["momentum"] *= 1.2
+        
+        total = sum(adjusted.values())
+        return {k: v / total for k, v in adjusted.items()}
 
 class RateLimiter:
     def __init__(self, max_concurrent: int = CFG.MAX_CONCURRENT_REQUESTS, delay_between: float = 0.15):
@@ -57,8 +74,6 @@ BINANCE_ENDPOINTS = [
     "https://api2.binance.com",
     "https://api3.binance.com",
 ]
-
-_symbol_filters_cache: Dict[str, Dict] = {}
 
 class DataFetcher:
     def __init__(self):
