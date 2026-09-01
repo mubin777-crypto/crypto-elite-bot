@@ -1,5 +1,5 @@
 """
-bot.py - الملف الرئيسي مع تركيز على قراءة التوكن.
+bot.py - الملف الرئيسي للمشروع.
 """
 import asyncio
 import os
@@ -23,28 +23,24 @@ class CryptoSignalBot:
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
         
-        # 🔥 قراءة التوكن مباشرة من os.environ
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if token:
             logger.info(f"✅ TELEGRAM_BOT_TOKEN موجود في البيئة (الطول: {len(token)} حرف)")
-            # تحديث CFG بالتوكن
             CFG.TELEGRAM_BOT_TOKEN = token
         else:
-            logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة.")
             if CFG.TELEGRAM_BOT_TOKEN:
                 logger.info("ℹ️ تم العثور على التوكن في CFG.")
+            else:
+                logger.warning("⚠️ TELEGRAM_BOT_TOKEN غير موجود في البيئة ولا في CFG.")
         
-        # بدء التليجرام
         await telegram.start()
         
-        # جلب قائمة العملات
         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
         if not self.symbols:
             logger.warning("⚠️ لم يتم جلب أي عملات، سيتم استخدام القائمة الأساسية.")
             self.symbols = CFG.CORE_UNIVERSE[:50]
         logger.info(f"✅ تم تحميل {len(self.symbols)} عملة.")
 
-    # ─── خادم HTTP ───
     async def start_web_server(self):
         app = web.Application()
         app.router.add_get("/", self._handle_health_check)
