@@ -1,5 +1,5 @@
 """
-database.py - إدارة قاعدة البيانات SQLite مع إصلاحات المشتركين.
+database.py - إدارة قاعدة البيانات مع دوال المشتركين.
 """
 import sqlite3
 import json
@@ -29,7 +29,7 @@ class Database:
 
     def _init_tables(self):
         with self._connect() as conn:
-            # 🔥 إضافة جدول المشتركين (كان مفقوداً)
+            # 🔥 جدول المشتركين (كان مفقوداً)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS subscribers (
                     user_id TEXT PRIMARY KEY
@@ -135,21 +135,19 @@ class Database:
 
     # 🔥 دوال المشتركين الجديدة
     def add_subscriber(self, user_id: str):
-        """إضافة مشترك جديد."""
         with self._connect() as conn:
             conn.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (user_id,))
 
     def remove_subscriber(self, user_id: str):
-        """إزالة مشترك."""
         with self._connect() as conn:
             conn.execute("DELETE FROM subscribers WHERE user_id = ?", (user_id,))
 
     def get_subscribers(self) -> List[str]:
-        """جلب قائمة المشتركين."""
         with self._connect() as conn:
             rows = conn.execute("SELECT user_id FROM subscribers").fetchall()
             return [row[0] for row in rows]
 
+    # ─── باقي الدوال ───
     def save_candles(self, symbol: str, timeframe: str, df: pd.DataFrame):
         with self._connect() as conn:
             cutoff = datetime.now(timezone.utc) - timedelta(days=7)
@@ -244,7 +242,6 @@ class Database:
             return datetime.fromisoformat(row["created_at"]) if row else None
 
     def set_cooldown(self, symbol: str, timestamp: str):
-        """حفظ وقت آخر إشارة مع تأكيد الكتابة."""
         with self._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)",
