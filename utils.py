@@ -175,7 +175,6 @@ class DataFetcher:
         logger.warning("Failed to fetch top symbols, returning empty list")
         return []
 
-    # ✅ تصحيح إغلاق القائمة بشكل صحيح هنا
     async def fetch_24hr_tickers(self) -> List[Dict]:
         for base_url in BINANCE_ENDPOINTS:
             try:
