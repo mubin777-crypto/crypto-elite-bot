@@ -21,7 +21,7 @@ class CryptoSignalBot:
         self.symbols: List[str] = []
         self.last_scan: Dict[str, datetime] = {}
         self.site = None
-        self._last_alert_sent = datetime.now(timezone.utc)  # للتحكم في تكرار التنبيهات
+        self._last_alert_sent = datetime.now(timezone.utc)
 
     async def initialize(self):
         logger.info("🚀 Initializing bot...")
@@ -47,7 +47,7 @@ class CryptoSignalBot:
         app = web.Application()
         app.router.add_get("/", self._handle_health_check)
         app.router.add_get("/health", self._handle_health_check)
-        app.router.add_get("/webhook", self._handle_webhook_get)  # اختبار
+        app.router.add_get("/webhook", self._handle_webhook_get)
         app.router.add_post("/webhook", self._handle_webhook)
         
         runner = web.AppRunner(app)
@@ -65,15 +65,14 @@ class CryptoSignalBot:
         })
 
     async def _handle_webhook_get(self, request):
-        """نقطة اختبار لمعرفة إن كان الخادم يستقبل طلبات GET."""
         return web.json_response({"status": "ok", "message": "Webhook endpoint is reachable"})
 
-    # 🔥 معالج Webhook المحسّن
+    # 🔥 معالج Webhook المحسّن مع سجلات إضافية
     async def _handle_webhook(self, request):
-        """استقبال تحديثات Telegram عبر Webhook مع تسجيل تفصيلي."""
         try:
             data = await request.json()
-            logger.info(f"📩 Webhook received: {data.get('update_id', 'unknown')}")
+            update_id = data.get('update_id', 'unknown')
+            logger.info(f"📩 Webhook received: {update_id}")
             
             # تسجيل محتوى التحديث للمساعدة في التصحيح
             logger.info(f"📦 Full update: {json.dumps(data, ensure_ascii=False)[:500]}")
@@ -82,13 +81,19 @@ class CryptoSignalBot:
                 logger.error("❌ Telegram bot not initialized")
                 return web.json_response({"status": "error", "message": "Bot not ready"}, status=500)
             
+            # إنشاء كائن التحديث
             update = Update.de_json(data, telegram.bot)
+            
+            # تسجيل معلومات الرسالة
             if update.message:
                 user_id = update.effective_user.id if update.effective_user else "unknown"
                 text = update.message.text if update.message.text else "[no text]"
                 logger.info(f"📩 Message from {user_id}: {text}")
             
+            # معالجة التحديث عبر التطبيق
             if telegram.app:
+                # 🔥 التأكد من أن التطبيق يحتوي على المعالجات
+                logger.info(f"🔍 Processing update with app handlers: {len(telegram.app.handlers) if telegram.app.handlers else 0} handlers")
                 await telegram.app.process_update(update)
                 logger.info("✅ Update processed successfully")
                 return web.json_response({"status": "ok"})
@@ -126,7 +131,6 @@ class CryptoSignalBot:
             df_1h = await fetcher.fetch_klines(symbol, "1h", 100)
             df_4h = await fetcher.fetch_klines(symbol, "4h", 100)
             if df_5m.empty or df_1h.empty or df_4h.empty:
-                # لا نسجل خطأ بل نمرر بهدوء
                 return
 
             db.save_candles(symbol, "5m", df_5m)
@@ -160,7 +164,6 @@ class CryptoSignalBot:
             db.update_daily_stats(0, False)
             logger.info("✅ Signal generated", extra={"symbol": symbol, "type": signal["type"]})
         except Exception as e:
-            # نكتفي بتسجيل خطأ بسيط دون إيقاف الدورة
             logger.debug(f"⚠️ خطأ أثناء مسح {symbol}: {e}")
 
     # ─── دورة المسح ───
@@ -184,7 +187,7 @@ class CryptoSignalBot:
         db.set_scan_state("symbols", ",".join(all_symbols))
         db.set_scan_state("last_scan", datetime.now(timezone.utc).isoformat())
 
-    # ─── فحص الصحة (محسّن لتقليل التكرار) ───
+    # ─── فحص الصحة (محسّن) ───
     async def health_check(self):
         while self.running:
             await asyncio.sleep(CFG.HEALTH_CHECK_INTERVAL)
@@ -194,7 +197,6 @@ class CryptoSignalBot:
                 if (now - last_time).total_seconds() > 300:
                     stale_symbols.append(symbol)
             if stale_symbols and len(stale_symbols) >= CFG.MIN_STALE_SYMBOLS_FOR_ALERT:
-                # منع التكرار الزائد: نرسل تحذيراً واحداً كل 10 دقائق
                 if (now - self._last_alert_sent).total_seconds() > 600:
                     limited = stale_symbols[:CFG.MAX_STALE_SYMBOLS_TO_REPORT]
                     msg = f"⚠️ توقف تحديث {len(stale_symbols)} عملة: {', '.join(limited)}..."
@@ -202,7 +204,6 @@ class CryptoSignalBot:
                     self._last_alert_sent = now
                     logger.warning("Stale data", extra={"symbols": stale_symbols})
             else:
-                # إذا لم تكن هناك عملات متوقفة، نعيد ضبط المؤقت
                 self._last_alert_sent = now
 
     # ─── Self Ping ───
@@ -222,12 +223,10 @@ class CryptoSignalBot:
                 logger.warning("⚠️ Self-ping failed", extra={"error": str(e)})
             await asyncio.sleep(CFG.SELF_PING_INTERVAL)
 
-    # ─── الإيقاف ───
     def _shutdown(self):
         logger.info("🛑 Shutdown signal received")
         self.running = False
 
-    # ─── التشغيل الرئيسي ───
     async def run(self):
         self.running = True
         loop = asyncio.get_event_loop()
@@ -240,9 +239,8 @@ class CryptoSignalBot:
         try:
             await self.initialize()
             await self.start_web_server()
-            await telegram.start_webhook()  # Webhook mode
+            await telegram.start_webhook()
             
-            # تشغيل المهام الخلفية
             asyncio.create_task(self.health_check())
             asyncio.create_task(self.self_ping())
             
@@ -251,10 +249,8 @@ class CryptoSignalBot:
                     await self.run_scan_cycle()
                 except Exception as e:
                     logger.error(f"❌ خطأ في دورة المسح: {e}")
-                # استخدام SCAN_INTERVAL_SECONDS من config
                 await asyncio.sleep(CFG.SCAN_INTERVAL_SECONDS)
                 
-                # تحديث قائمة العملات كل ساعة
                 if datetime.now(timezone.utc).minute == 0:
                     try:
                         self.symbols = await fetcher.fetch_top_symbols(CFG.TOP_N_COINS)
@@ -269,7 +265,6 @@ class CryptoSignalBot:
         finally:
             await self.shutdown()
 
-    # ─── الإغلاق النظيف ───
     async def shutdown(self):
         self.running = False
         if self.site:
