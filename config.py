@@ -1,5 +1,5 @@
 """
-config.py - إعدادات البوت المتقدمة مع دعم Webhook.
+config.py - إعدادات البوت المتقدمة مع تحسينات السرعة والمراقبة.
 """
 import os
 from dataclasses import dataclass, field
@@ -16,15 +16,18 @@ class Config:
     TELEGRAM_ADMIN_ID: int = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
     TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
     
-    # ─── Webhook (جديد) ───
-    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")  # 🔥 رابط الخدمة + /webhook
-    WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")  # اختياري: رمز سري للأمان
+    # ─── Webhook ───
+    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
+    WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
     
-    # ─── إعدادات السوق ───
+    # ─── إعدادات السوق (محسّنة للسرعة) ───
     QUOTE_ASSET: str = "USDT"
     TOP_N_COINS: int = 50
-    TIMEFRAMES: List[str] = field(default_factory=lambda: ["5m", "1h", "4h"])
-    SCAN_INTERVAL_SECONDS: int = 60
+    # 🔥 إضافة إطار 1 دقيقة للإشارات السريعة، مع الاحتفاظ بـ 5m و 1h و 4h للاتجاه
+    TIMEFRAMES: List[str] = field(default_factory=lambda: ["1m", "5m", "1h", "4h"])
+    
+    # 🔥 تقليل زمن المسح من 60 إلى 20 ثانية (سرعة استجابة أفضل)
+    SCAN_INTERVAL_SECONDS: int = 20  # كانت 60
     
     # ─── إعدادات قاعدة البيانات ───
     DB_PATH: str = "crypto_signals.db"
@@ -100,6 +103,11 @@ class Config:
     RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
     SELF_PING_INTERVAL: int = 300
     PORT: int = int(os.getenv("PORT", "8080"))
+    
+    # 🔥 تحسينات المراقبة والتنبيهات
+    HEALTH_CHECK_INTERVAL: int = 600          # فحص الصحة كل 10 دقائق (بدلاً من 5)
+    MAX_STALE_SYMBOLS_TO_REPORT: int = 5      # عرض أول 5 عملات متوقفة فقط
+    MIN_STALE_SYMBOLS_FOR_ALERT: int = 3      # لا ترسل تنبيه إلا إذا توقف 3 عملات على الأقل
     
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
