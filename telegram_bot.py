@@ -58,12 +58,15 @@ class TelegramManager:
         self.app.add_handler(CommandHandler("reset_daily", self.cmd_reset_daily))
         self.app.add_handler(CommandHandler("adduser", self.cmd_adduser))
         self.app.add_handler(CommandHandler("removeuser", self.cmd_removeuser))
+        logger.info("✅ Handlers registered successfully")
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id == CFG.TELEGRAM_ADMIN_ID
 
-    # ─── الأوامر ───
+    # ─── الأوامر مع سجلات للتأكد من استدعائها ───
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 [cmd_start] تم استدعاؤها من: {user_id}")
         welcome = (
             "🤖 *بوت إشارات العملات الرقمية*\n\n"
             "الأوامر المتاحة:\n"
@@ -76,6 +79,8 @@ class TelegramManager:
         await update.message.reply_text(welcome, parse_mode="Markdown")
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 [cmd_status] تم استدعاؤها من: {user_id}")
         daily = db.get_daily_stats()
         pre_watch = db.get_active_prewatch(10)
         status_msg = (
@@ -87,8 +92,11 @@ class TelegramManager:
             f"• عملات تحت المراقبة: {len(pre_watch)}"
         )
         await update.message.reply_text(status_msg, parse_mode="Markdown")
+        logger.info(f"✅ تم إرسال الرد على /status للمستخدم {user_id}")
 
     async def cmd_prewatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 [cmd_prewatch] تم استدعاؤها من: {user_id}")
         pre_watch = db.get_active_prewatch(20)
         if not pre_watch:
             await update.message.reply_text("🔭 لا توجد عملات تحت المراقبة حالياً.")
@@ -99,6 +107,8 @@ class TelegramManager:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     async def cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 [cmd_performance] تم استدعاؤها من: {user_id}")
         signals = db.get_signals_for_backtest(days=7)
         if not signals:
             await update.message.reply_text("📊 لا توجد إشارات كافية في الأيام السبعة الماضية.")
@@ -108,6 +118,8 @@ class TelegramManager:
         await update.message.reply_text(report, parse_mode="Markdown")
 
     async def cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 [cmd_signal] تم استدعاؤها من: {user_id}")
         if not context.args:
             await update.message.reply_text("⚠️ الاستخدام: /signal BTCUSDT")
             return
@@ -115,6 +127,8 @@ class TelegramManager:
         await update.message.reply_text(f"🔍 البحث عن آخر إشارة لـ {symbol}...")
 
     async def cmd_reset_daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 [cmd_reset_daily] تم استدعاؤها من: {user_id}")
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("⛔ صلاحية المشرف مطلوبة.")
             return
@@ -122,6 +136,8 @@ class TelegramManager:
         await update.message.reply_text("✅ تم إعادة ضبط الإحصائيات اليومية.")
 
     async def cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 [cmd_adduser] تم استدعاؤها من: {user_id}")
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("⛔ صلاحية المشرف مطلوبة.")
             return
@@ -129,12 +145,14 @@ class TelegramManager:
             await update.message.reply_text("⚠️ الاستخدام: /adduser USER_ID")
             return
         added = []
-        for user_id in context.args:
-            db.add_subscriber(user_id)
-            added.append(user_id)
+        for user_id_arg in context.args:
+            db.add_subscriber(user_id_arg)
+            added.append(user_id_arg)
         await update.message.reply_text(f"✅ تمت إضافة المستخدمين: {', '.join(added)}")
 
     async def cmd_removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        logger.info(f"📩 [cmd_removeuser] تم استدعاؤها من: {user_id}")
         if not self._is_admin(update.effective_user.id):
             await update.message.reply_text("⛔ صلاحية المشرف مطلوبة.")
             return
@@ -142,9 +160,9 @@ class TelegramManager:
             await update.message.reply_text("⚠️ الاستخدام: /removeuser USER_ID")
             return
         removed = []
-        for user_id in context.args:
-            db.remove_subscriber(user_id)
-            removed.append(user_id)
+        for user_id_arg in context.args:
+            db.remove_subscriber(user_id_arg)
+            removed.append(user_id_arg)
         await update.message.reply_text(f"✅ تمت إزالة المستخدمين: {', '.join(removed)}")
 
     # ─── إرسال الإشارات ───
@@ -191,7 +209,7 @@ class TelegramManager:
         except Exception as e:
             logger.error("❌ Failed to send alert", extra={"error": str(e)})
 
-    # 🔥 بدء Webhook
+    # ─── بدء Webhook ───
     async def start_webhook(self):
         logger.info("⏳ بدء تهيئة Webhook...")
         await asyncio.sleep(0.5)
