@@ -109,10 +109,9 @@ class TradingBot:
         return pnl <= limit
 
     # ========================================================
-    # Scan symbol (modified: exclude stablecoins)
+    # Scan symbol (exclude stablecoins)
     # ========================================================
     async def scan_symbol(self, symbol):
-        # Exclude stablecoins and unwanted symbols
         if symbol in config.EXCLUDED_SYMBOLS:
             return
         if await self.daily_loss_exceeded():
@@ -284,7 +283,7 @@ class TradingBot:
             await asyncio.sleep(wait)
 
     # ========================================================
-    # Start (modified: add admin as subscriber)
+    # Start (add admin as subscriber)
     # ========================================================
     async def start(self):
         config.validate_config()
