@@ -3,7 +3,7 @@
 
 from datetime import datetime, timezone
 import aiosqlite
-import config  # تم التعديل: استيراد config مباشرة بدلاً من CFG
+import config  # ✅ تم التعديل: استخدام import config بدلاً من CFG
 
 class Database:
     def __init__(self, path):
