@@ -23,7 +23,6 @@ class TelegramBot:
     # Helper: safe text for HTML
     # ========================================================
     def safe_text(self, text):
-        """Escape text for safe HTML embedding."""
         return html.escape(str(text))
 
     # ========================================================
