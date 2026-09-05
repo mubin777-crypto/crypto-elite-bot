@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import aiohttp
-import html  # <-- added for escaping
+import html
 import config
 
 logger = logging.getLogger("quant_bot.telegram")
@@ -18,6 +18,13 @@ class TelegramBot:
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self.session = None
         self.webhook_mode = config.TELEGRAM_USE_WEBHOOK
+
+    # ========================================================
+    # Helper: safe text for HTML
+    # ========================================================
+    def safe_text(self, text):
+        """Escape text for safe HTML embedding."""
+        return html.escape(str(text))
 
     # ========================================================
     # Start
@@ -102,7 +109,7 @@ class TelegramBot:
                 logger.warning(f"Broadcast failed for {user_id}: {exc}")
 
     # ========================================================
-    # Admin
+    # Admin check
     # ========================================================
     def is_admin(self, user_id):
         return int(user_id) == int(config.TELEGRAM_ADMIN_ID)
@@ -175,7 +182,7 @@ class TelegramBot:
             await self.send_message(chat_id, "✅ Daily statistics reset.")
 
     # ========================================================
-    # Help
+    # Help text
     # ========================================================
     def help_text(self):
         return (
@@ -197,13 +204,13 @@ class TelegramBot:
         pnl = await self.database.get_daily_pnl()
         prewatch = await self.database.get_prewatch(20)
         subscribers = await self.database.get_subscribers()
-        await self.send_message(chat_id, (
-            "📊 <b>System Status</b>\n\n"
-            f"Signals today: {len(signals)}\n"
-            f"Daily PnL: {pnl:.2f}\n"
-            f"Pre-watch: {len(prewatch)}\n"
-            f"Subscribers: {len(subscribers)}"
-        ))
+        await self.send_message(chat_id,
+            f"📊 <b>System Status</b>\n\n"
+            f"Signals today: {self.safe_text(len(signals))}\n"
+            f"Daily PnL: {self.safe_text(f'{pnl:.2f}')}\n"
+            f"Pre-watch: {self.safe_text(len(prewatch))}\n"
+            f"Subscribers: {self.safe_text(len(subscribers))}"
+        )
 
     # ========================================================
     # Prewatch
@@ -215,7 +222,11 @@ class TelegramBot:
             return
         lines = ["🔭 <b>Pre-watch</b>\n"]
         for item in items:
-            lines.append(f"• <b>{item['symbol']}</b> | {item['price_change']:.2f}% | ${item['quote_volume']:,.0f}")
+            lines.append(
+                f"• <b>{self.safe_text(item['symbol'])}</b> | "
+                f"{self.safe_text(f'{item['price_change']:.2f}')}% | "
+                f"${self.safe_text(f'{item['quote_volume']:,.0f}')}"
+            )
         await self.send_message(chat_id, "\n".join(lines))
 
     # ========================================================
@@ -243,13 +254,13 @@ class TelegramBot:
         else:
             sharpe = 0
         pf_text = "INF" if profit_factor == float("inf") else f"{profit_factor:.2f}"
-        await self.send_message(chat_id, (
-            "📈 <b>Performance</b>\n\n"
-            f"Closed: {len(closed)}\n"
-            f"Win Rate: {win_rate:.2f}%\n"
-            f"Profit Factor: {pf_text}\n"
-            f"Sharpe (R): {sharpe:.2f}"
-        ))
+        await self.send_message(chat_id,
+            f"📈 <b>Performance</b>\n\n"
+            f"Closed: {self.safe_text(len(closed))}\n"
+            f"Win Rate: {self.safe_text(f'{win_rate:.2f}')}%\n"
+            f"Profit Factor: {self.safe_text(pf_text)}\n"
+            f"Sharpe (R): {self.safe_text(f'{sharpe:.2f}')}"
+        )
 
     # ========================================================
     # Instant signal
@@ -257,7 +268,7 @@ class TelegramBot:
     async def signal(self, chat_id, symbol):
         klines = await self.data_fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT)
         if not klines:
-            await self.send_message(chat_id, f"❌ No data for {symbol}.")
+            await self.send_message(chat_id, f"❌ No data for {self.safe_text(symbol)}.")
             return
         from utils import klines_to_dataframe
         df = klines_to_dataframe(klines)
@@ -266,40 +277,35 @@ class TelegramBot:
         df_15m = klines_to_dataframe(klines_15m) if klines_15m else None
         result = self.signal_engine.analyze(symbol, df, config.INITIAL_CAPITAL, df_15m)
         if not result:
-            await self.send_message(chat_id, f"⚪ No qualified signal for {symbol}.")
+            await self.send_message(chat_id, f"⚪ No qualified signal for {self.safe_text(symbol)}.")
             return
         await self.send_message(chat_id, self.format_signal(result))
 
     # ========================================================
-    # Signal formatter (modified: add html.escape)
+    # Signal formatter (fully escaped)
     # ========================================================
     def format_signal(self, signal):
-        # Helper to escape HTML and format numbers safely
-        def clean(text):
-            return html.escape(str(text))
-        
-        # Helper to format numbers with appropriate precision
         def fmt(val):
             if abs(val) < 1e-5:
-                return clean(f"{val:.4e}")
+                return self.safe_text(f"{val:.4e}")
             else:
-                return clean(f"{val:.6f}")
-        
+                return self.safe_text(f"{val:.6f}")
+
         emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
         snipe = "\n🎯 <b>EARLY SNIPE</b>" if signal.get("early_snipe") else ""
-        
+
         return (
-            f"{emoji} <b>{clean(signal['symbol'])}</b>\n\n"
-            f"Direction: <b>{clean(signal['direction'])}</b>\n"
-            f"Score: <b>{clean(signal['score'])}/10</b>\n"
-            f"Strength: {clean(signal['strength'])}%\n\n"
+            f"{emoji} <b>{self.safe_text(signal['symbol'])}</b>\n\n"
+            f"Direction: <b>{self.safe_text(signal['direction'])}</b>\n"
+            f"Score: <b>{self.safe_text(signal['score'])}/10</b>\n"
+            f"Strength: {self.safe_text(signal['strength'])}%\n\n"
             f"Entry: {fmt(signal['entry'])}\n"
             f"SL: {fmt(signal['sl'])}\n"
             f"TP: {fmt(signal['tp'])}\n"
-            f"R/R: {clean(signal['rr'])}\n"
+            f"R/R: {self.safe_text(signal['rr'])}\n"
             f"Position: {fmt(signal['position_size'])}\n\n"
-            f"RSI: {clean(signal['rsi'])}\n"
-            f"ADX: {clean(signal['adx'])}\n"
+            f"RSI: {self.safe_text(signal['rsi'])}\n"
+            f"ADX: {self.safe_text(signal['adx'])}\n"
             f"ATR: {fmt(signal['atr'])}{snipe}\n\n"
             "⚠️ إشارة تحليلية وليست ضماناً للربح."
         )
