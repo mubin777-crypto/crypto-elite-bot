@@ -1,350 +1,265 @@
-"""
-database.py - إدارة قاعدة البيانات مع دوال المشتركين.
-"""
-import sqlite3
-import json
-import pandas as pd
-from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional
-from contextlib import contextmanager
-from config import CFG
+# database.py
+# SQLite State Management
+
+from datetime import datetime, timezone
+import aiosqlite
+import config  # تم التعديل: استيراد config مباشرة بدلاً من CFG
 
 class Database:
-    def __init__(self, db_path: str = CFG.DB_PATH):
-        self.db_path = db_path
-        self._init_tables()
+    def __init__(self, path):
+        self.path = path
+        self.conn = None
 
-    @contextmanager
-    def _connect(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+    # ========================================================
+    # Init
+    # ========================================================
+    async def init(self):
+        self.conn = await aiosqlite.connect(self.path)
+        self.conn.row_factory = aiosqlite.Row
+        await self.conn.execute("PRAGMA journal_mode=WAL")
+        await self.conn.execute("PRAGMA busy_timeout=5000")
+        await self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS subscribers (
+                user_id INTEGER PRIMARY KEY,
+                active INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS cooldown (
+                symbol TEXT PRIMARY KEY,
+                direction TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                score REAL,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                rr REAL,
+                quantity REAL,
+                status TEXT DEFAULT 'OPEN',
+                result REAL DEFAULT 0,
+                result_r REAL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                closed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS pre_watch (
+                symbol TEXT PRIMARY KEY,
+                reason TEXT,
+                price_change REAL,
+                quote_volume REAL,
+                added_at TEXT NOT NULL,
+                last_seen TEXT
+            );
+            CREATE TABLE IF NOT EXISTS adaptive_weights (
+                factor TEXT PRIMARY KEY,
+                weight REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                date TEXT PRIMARY KEY,
+                capital REAL NOT NULL,
+                pnl REAL DEFAULT 0,
+                signals INTEGER DEFAULT 0
+            );
+        """)
+        await self.conn.commit()
+        # إنشاء الأوزان الأولية
+        for factor in config.FACTORS:
+            existing = await self.get_weight(factor)
+            if existing is None:
+                await self.save_weight(factor, 1.0)
 
-    def _init_tables(self):
-        with self._connect() as conn:
-            # 🔥 جدول المشتركين (كان مفقوداً)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS subscribers (
-                    user_id TEXT PRIMARY KEY
-                )
-            """)
-            # جدول الشموع
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS candles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    open_time TIMESTAMP NOT NULL,
-                    open REAL,
-                    high REAL,
-                    low REAL,
-                    close REAL,
-                    volume REAL,
-                    UNIQUE(symbol, timeframe, open_time)
-                )
-            """)
-            # جدول الإشارات
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS signals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    signal_type TEXT NOT NULL,
-                    entry_price REAL,
-                    stop_loss REAL,
-                    take_profit REAL,
-                    position_size REAL,
-                    confidence REAL,
-                    score REAL,
-                    reasons TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    status TEXT DEFAULT 'PENDING'
-                )
-            """)
-            # جدول آخر إشارة
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS last_signal (
-                    symbol TEXT PRIMARY KEY,
-                    signal_type TEXT,
-                    price REAL,
-                    action TEXT,
-                    direction TEXT,
-                    timestamp TEXT
-                )
-            """)
-            # جدول التبريد
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS signal_cooldown (
-                    symbol TEXT PRIMARY KEY,
-                    last_signal_time TEXT
-                )
-            """)
-            # جدول الإحصائيات اليومية
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS daily_stats (
-                    date TEXT PRIMARY KEY,
-                    total_signals INTEGER DEFAULT 0,
-                    wins INTEGER DEFAULT 0,
-                    losses INTEGER DEFAULT 0,
-                    pnl REAL DEFAULT 0.0,
-                    capital REAL DEFAULT 0.0
-                )
-            """)
-            # جدول حالة المسح
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS scan_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            # جدول الأوزان التكيفية
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS adaptive_weights (
-                    factor TEXT PRIMARY KEY,
-                    weight REAL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            # جدول المراقبة الاستباقية
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS pre_watch (
-                    symbol TEXT PRIMARY KEY,
-                    score REAL DEFAULT 0.0,
-                    change_24h REAL DEFAULT 0.0,
-                    volume_24h REAL DEFAULT 0.0,
-                    status TEXT DEFAULT 'ACTIVE',
-                    reason TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            # الفهارس
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON candles(symbol, timeframe, open_time DESC)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol, created_at DESC)
-            """)
+    # ========================================================
+    # Close
+    # ========================================================
+    async def close(self):
+        if self.conn:
+            await self.conn.close()
+            self.conn = None
 
-    # 🔥 دوال المشتركين الجديدة
-    def add_subscriber(self, user_id: str):
-        with self._connect() as conn:
-            conn.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (user_id,))
-
-    def remove_subscriber(self, user_id: str):
-        with self._connect() as conn:
-            conn.execute("DELETE FROM subscribers WHERE user_id = ?", (user_id,))
-
-    def get_subscribers(self) -> List[str]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT user_id FROM subscribers").fetchall()
-            return [row[0] for row in rows]
-
-    # ─── باقي الدوال ───
-    def save_candles(self, symbol: str, timeframe: str, df: pd.DataFrame):
-        with self._connect() as conn:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-            conn.execute(
-                "DELETE FROM candles WHERE symbol=? AND timeframe=? AND open_time < ?",
-                (symbol, timeframe, cutoff)
-            )
-            records = []
-            for _, row in df.iterrows():
-                records.append((
-                    symbol,
-                    timeframe,
-                    row["open_time"].to_pydatetime() if hasattr(row["open_time"], "to_pydatetime") else row["open_time"],
-                    float(row["open"]),
-                    float(row["high"]),
-                    float(row["low"]),
-                    float(row["close"]),
-                    float(row["volume"])
-                ))
-            conn.executemany("""
-                INSERT OR REPLACE INTO candles (symbol, timeframe, open_time, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, records)
-
-    def get_candles(self, symbol: str, timeframe: str, limit: int = 250) -> pd.DataFrame:
-        with self._connect() as conn:
-            rows = conn.execute("""
-                SELECT open_time, open, high, low, close, volume
-                FROM candles
-                WHERE symbol=? AND timeframe=?
-                ORDER BY open_time DESC
-                LIMIT ?
-            """, (symbol, timeframe, limit)).fetchall()
-            if not rows:
-                return pd.DataFrame()
-            df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume"])
-            df = df.sort_values("open_time").reset_index(drop=True)
-            return df
-
-    def save_signal(self, signal: Dict) -> int:
-        with self._connect() as conn:
-            cursor = conn.execute("""
-                INSERT INTO signals (symbol, timeframe, signal_type, entry_price, stop_loss, take_profit,
-                                     position_size, confidence, score, reasons)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                signal["symbol"],
-                signal["timeframe"],
-                signal["type"],
-                signal["entry_price"],
-                signal["stop_loss"],
-                signal["take_profit"],
-                signal["position_size"],
-                signal["confidence"],
-                signal["score"],
-                json.dumps(signal.get("reasons", []), ensure_ascii=False)
-            ))
-            return cursor.lastrowid
-
-    def get_last_signal(self, symbol: str) -> Optional[Dict]:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT signal_type, price, action, direction, timestamp FROM last_signal WHERE symbol=?",
-                (symbol,)
-            ).fetchone()
-            if row:
-                return {
-                    "signal_type": row[0],
-                    "price": row[1],
-                    "action": row[2],
-                    "direction": row[3],
-                    "timestamp": row[4]
-                }
-            return None
-
-    def set_last_signal(self, symbol: str, signal_type: str, price: float, action: str, direction: str):
+    # ========================================================
+    # Subscribers
+    # ========================================================
+    async def add_subscriber(self, user_id):
         now = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO last_signal (symbol, signal_type, price, action, direction, timestamp)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (symbol, signal_type, price, action, direction, now)
+        await self.conn.execute(
+            """INSERT INTO subscribers (user_id, active, created_at)
+               VALUES (?, 1, ?) ON CONFLICT(user_id) DO UPDATE SET active = 1""",
+            (int(user_id), now)
+        )
+        await self.conn.commit()
+
+    async def remove_subscriber(self, user_id):
+        await self.conn.execute(
+            """UPDATE subscribers SET active = 0 WHERE user_id = ?""",
+            (int(user_id),)
+        )
+        await self.conn.commit()
+
+    async def get_subscribers(self):
+        cursor = await self.conn.execute(
+            """SELECT user_id FROM subscribers WHERE active = 1 ORDER BY user_id"""
+        )
+        rows = await cursor.fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    # ========================================================
+    # Cooldown
+    # ========================================================
+    async def set_cooldown(self, symbol, direction):
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """INSERT INTO cooldown (symbol, direction, created_at)
+               VALUES (?, ?, ?) ON CONFLICT(symbol) DO UPDATE SET
+               direction = excluded.direction, created_at = excluded.created_at""",
+            (symbol.upper(), direction, now)
+        )
+        await self.conn.commit()
+
+    async def get_cooldown(self, symbol):
+        cursor = await self.conn.execute(
+            """SELECT * FROM cooldown WHERE symbol = ?""",
+            (symbol.upper(),)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    # ========================================================
+    # Signals
+    # ========================================================
+    async def add_signal(self, signal):
+        cursor = await self.conn.execute(
+            """INSERT INTO signals (
+                symbol, direction, score, entry, sl, tp, rr, quantity, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                signal["symbol"],
+                signal["direction"],
+                signal["score"],
+                signal["entry"],
+                signal["sl"],
+                signal["tp"],
+                signal["rr"],
+                signal["position_size"],
+                signal["timestamp"],
             )
+        )
+        await self.conn.commit()
+        return cursor.lastrowid
 
-    def get_last_signal_time(self, symbol: str, minutes: int = 45) -> Optional[datetime]:
-        with self._connect() as conn:
-            row = conn.execute("""
-                SELECT created_at FROM signals
-                WHERE symbol=? AND created_at > datetime('now', '-{} minutes')
-                ORDER BY created_at DESC LIMIT 1
-            """.format(minutes), (symbol,)).fetchone()
-            return datetime.fromisoformat(row["created_at"]) if row else None
+    async def get_signal(self, signal_id):
+        cursor = await self.conn.execute(
+            """SELECT * FROM signals WHERE id = ?""",
+            (signal_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
-    def set_cooldown(self, symbol: str, timestamp: str):
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO signal_cooldown (symbol, last_signal_time) VALUES (?, ?)",
-                (symbol, timestamp)
-            )
-            conn.commit()
+    async def get_open_signals(self):
+        cursor = await self.conn.execute(
+            """SELECT * FROM signals WHERE status = 'OPEN' ORDER BY id ASC"""
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
-    def get_daily_stats(self, date: Optional[str] = None) -> Dict:
-        if date is None:
-            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM daily_stats WHERE date=?", (date,)).fetchone()
-            if row:
-                return dict(row)
-            return {"date": date, "total_signals": 0, "wins": 0, "losses": 0, "pnl": 0.0, "capital": CFG.VIRTUAL_CAPITAL}
+    async def close_signal(self, signal_id, result, result_r):
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """UPDATE signals SET status = 'CLOSED', result = ?, result_r = ?, closed_at = ?
+               WHERE id = ?""",
+            (result, result_r, now, signal_id)
+        )
+        await self.conn.commit()
 
-    def update_daily_stats(self, pnl: float, is_win: bool):
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        with self._connect() as conn:
-            conn.execute("""
-                INSERT INTO daily_stats (date, total_signals, wins, losses, pnl, capital)
-                VALUES (?, 1, ?, ?, ?, ?)
-                ON CONFLICT(date) DO UPDATE SET
-                    total_signals = total_signals + 1,
-                    wins = wins + excluded.wins,
-                    losses = losses + excluded.losses,
-                    pnl = pnl + excluded.pnl,
-                    capital = capital + excluded.pnl
-            """, (
-                date,
-                1 if is_win else 0,
-                0 if is_win else 1,
-                pnl,
-                CFG.VIRTUAL_CAPITAL + pnl
-            ))
+    async def get_daily_signals(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        cursor = await self.conn.execute(
+            """SELECT * FROM signals WHERE substr(created_at, 1, 10) = ? ORDER BY id DESC""",
+            (today,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
-    def reset_daily_stats(self):
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        with self._connect() as conn:
-            conn.execute("DELETE FROM daily_stats WHERE date=?", (date,))
+    # ========================================================
+    # Pre-watch
+    # ========================================================
+    async def add_prewatch(self, symbol, reason, price_change, quote_volume):
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """INSERT INTO pre_watch (symbol, reason, price_change, quote_volume, added_at, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(symbol) DO UPDATE SET
+               reason = excluded.reason, price_change = excluded.price_change,
+               quote_volume = excluded.quote_volume, last_seen = excluded.last_seen""",
+            (symbol.upper(), reason, price_change, quote_volume, now, now)
+        )
+        await self.conn.commit()
 
-    def get_active_prewatch(self, limit: int = 30) -> List[str]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT symbol FROM pre_watch WHERE status = 'ACTIVE' ORDER BY score DESC LIMIT ?",
-                (limit,)
-            ).fetchall()
-            return [r["symbol"] for r in rows]
+    async def get_prewatch(self, limit=20):
+        cursor = await self.conn.execute(
+            """SELECT * FROM pre_watch ORDER BY ABS(price_change) DESC, quote_volume DESC LIMIT ?""",
+            (limit,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
-    def add_to_prewatch(self, symbol: str, score: float = 1.0, change_24h: float = 0.0,
-                        volume_24h: float = 0.0, reason: str = ""):
-        with self._connect() as conn:
-            conn.execute("""
-                INSERT INTO pre_watch (symbol, score, change_24h, volume_24h, reason, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'ACTIVE', CURRENT_TIMESTAMP)
-                ON CONFLICT(symbol) DO UPDATE SET
-                    score = excluded.score,
-                    change_24h = excluded.change_24h,
-                    volume_24h = excluded.volume_24h,
-                    reason = excluded.reason,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (symbol, score, change_24h, volume_24h, reason))
+    # ========================================================
+    # Adaptive Weights
+    # ========================================================
+    async def save_weight(self, factor, weight):
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """INSERT INTO adaptive_weights (factor, weight, updated_at)
+               VALUES (?, ?, ?) ON CONFLICT(factor) DO UPDATE SET
+               weight = excluded.weight, updated_at = excluded.updated_at""",
+            (factor, float(weight), now)
+        )
+        await self.conn.commit()
 
-    def get_scan_state(self, key: str) -> Optional[str]:
-        with self._connect() as conn:
-            row = conn.execute("SELECT value FROM scan_state WHERE key=?", (key,)).fetchone()
-            return row["value"] if row else None
+    async def get_weight(self, factor):
+        cursor = await self.conn.execute(
+            """SELECT weight FROM adaptive_weights WHERE factor = ?""",
+            (factor,)
+        )
+        row = await cursor.fetchone()
+        return float(row["weight"]) if row else None
 
-    def set_scan_state(self, key: str, value: str):
-        with self._connect() as conn:
-            conn.execute("""
-                INSERT INTO scan_state (key, value, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
-            """, (key, value))
+    async def get_weights(self):
+        cursor = await self.conn.execute(
+            """SELECT factor, weight FROM adaptive_weights"""
+        )
+        rows = await cursor.fetchall()
+        return {row["factor"]: float(row["weight"]) for row in rows}
 
-    def get_adaptive_weights(self) -> Optional[Dict[str, float]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT factor, weight FROM adaptive_weights").fetchall()
-            if not rows:
-                return None
-            return {r["factor"]: r["weight"] for r in rows}
+    # ========================================================
+    # Daily Stats
+    # ========================================================
+    async def get_daily_pnl(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        cursor = await self.conn.execute(
+            """SELECT pnl FROM daily_stats WHERE date = ?""",
+            (today,)
+        )
+        row = await cursor.fetchone()
+        return float(row["pnl"]) if row else 0.0
 
-    def save_adaptive_weights(self, weights: Dict[str, float]):
-        with self._connect() as conn:
-            for factor, weight in weights.items():
-                conn.execute("""
-                    INSERT INTO adaptive_weights (factor, weight)
-                    VALUES (?, ?)
-                    ON CONFLICT(factor) DO UPDATE SET weight=excluded.weight
-                """, (factor, weight))
+    async def add_daily_pnl(self, capital, pnl):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await self.conn.execute(
+            """INSERT INTO daily_stats (date, capital, pnl, signals)
+               VALUES (?, ?, ?, 1) ON CONFLICT(date) DO UPDATE SET
+               pnl = pnl + excluded.pnl, signals = signals + 1""",
+            (today, capital, pnl)
+        )
+        await self.conn.commit()
 
-    def get_signals_for_backtest(self, days: int = 30) -> List[Dict]:
-        with self._connect() as conn:
-            rows = conn.execute("""
-                SELECT * FROM signals
-                WHERE created_at > datetime('now', '-{} days') AND status = 'PENDING'
-                ORDER BY created_at DESC
-            """.format(days)).fetchall()
-            return [dict(r) for r in rows]
-
-    def update_signal_status(self, signal_id: int, status: str):
-        with self._connect() as conn:
-            conn.execute("UPDATE signals SET status=? WHERE id=?", (status, signal_id))
-
-db = Database()
+    async def reset_daily(self, capital):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await self.conn.execute(
+            """INSERT OR REPLACE INTO daily_stats (date, capital, pnl, signals)
+               VALUES (?, ?, 0, 0)""",
+            (today, capital)
+        )
+        await self.conn.commit()
