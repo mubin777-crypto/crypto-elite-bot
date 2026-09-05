@@ -1,297 +1,197 @@
-"""
-utils.py - طبقة جلب البيانات المعدلة بالكامل لحل مشكلة الحظر والجلب على Render.
-"""
+# utils.py
+# DataFetcher + RateLimiter + AdaptiveWeights
+
 import asyncio
-import aiohttp
 import json
 import logging
 import time
-import ssl
-from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timezone
-import numpy as np
+import aiohttp
 import pandas as pd
-from config import CFG
+import config  # ✅ تم التعديل: استخدام import config بدلاً من from config import CFG
 
-# ─── إعداد التسجيل ───
-class JSONFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        log_obj = {
+# ============================================================
+# JSON Logger
+# ============================================================
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
-            "module": record.module,
+            "logger": record.name,
             "message": record.getMessage(),
         }
-        if hasattr(record, "extra"):
-            log_obj.update(record.extra)
-        return json.dumps(log_obj, ensure_ascii=False)
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
 
-logger = logging.getLogger("crypto_bot")
-handler = logging.StreamHandler()
-handler.setFormatter(JSONFormatter())
-logger.addHandler(handler)
-logger.setLevel(getattr(logging, CFG.LOG_LEVEL))
+def setup_logging():
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    if not root.handlers:
+        root.addHandler(handler)
+    else:
+        root.handlers.clear()
+        root.addHandler(handler)
+    root.setLevel(config.LOG_LEVEL.upper())
+    return logging.getLogger("quant_bot")
 
-# ─── إدارة Rate Limit ───
+logger = setup_logging()
+
+# ============================================================
+# Rate Limiter
+# ============================================================
 class RateLimiter:
-    def __init__(self, max_concurrent: int = CFG.MAX_CONCURRENT_REQUESTS, delay_between: float = 0.2):
-        self.semaphore = asyncio.Semaphore(max_concurrent)
-        self.delay = delay_between
-        self._last_request = 0.0
+    def __init__(self, max_calls=8, period=1.0):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = []
+        self.lock = asyncio.Lock()
 
     async def acquire(self):
-        await self.semaphore.acquire()
-        now = time.monotonic()
-        elapsed = now - self._last_request
-        if elapsed < self.delay:
-            await asyncio.sleep(self.delay - elapsed)
-        self._last_request = time.monotonic()
+        while True:
+            async with self.lock:
+                now = time.monotonic()
+                self.calls = [t for t in self.calls if now - t < self.period]
+                if len(self.calls) < self.max_calls:
+                    self.calls.append(now)
+                    return
+                wait_time = self.period - (now - self.calls[0])
+            await asyncio.sleep(max(0.01, wait_time))
 
-    def release(self):
-        self.semaphore.release()
-
-limiter = RateLimiter(max_concurrent=CFG.MAX_CONCURRENT_REQUESTS, delay_between=0.2)
-
-# ─── نقاط النهاية (مرتبة حسب الأولوية والاستقرار) ───
-BINANCE_ENDPOINTS = [
-    "https://fapi.binance.com",           # Futures API (أقل قيوداً)
-    "https://data-api.binance.vision",    # Public Market Data
-    "https://api.binance.us",             # US Endpoint
-    "https://api.binance.com",            # Spot Main API
-]
-
-_symbol_filters_cache: Dict[str, Dict] = {}
-
+# ============================================================
+# Binance DataFetcher
+# ============================================================
 class DataFetcher:
     def __init__(self):
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.session = None
+        self.limiter = RateLimiter(max_calls=8, period=1.0)
+        self.semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_REQUESTS)
+        self.endpoint_index = 0
 
-    async def _get_session(self) -> aiohttp.ClientSession:
+    async def start(self):
         if self.session is None or self.session.closed:
-            if self.session is not None and not self.session.closed:
-                await self.session.close()
-            
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-
             timeout = aiohttp.ClientTimeout(
-                total=CFG.REQUEST_TIMEOUT,
-                connect=4,
+                total=config.BINANCE_TIMEOUT,
+                connect=3,
                 sock_read=4
             )
-
-            headers = {
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            }
-
-            connector = aiohttp.TCPConnector(ssl=ssl_context, limit=20)
-
+            connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
-                headers=headers,
-                connector=connector
+                connector=connector,
+                headers={"User-Agent": "QuantCryptoSignalSystem/2026"}
             )
         return self.session
-
-    async def fetch_klines(self, symbol: str, interval: str = "5m", limit: int = 250) -> pd.DataFrame:
-        params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
-        last_error = ""
-
-        for base_url in BINANCE_ENDPOINTS:
-            try:
-                await limiter.acquire()
-                session = await self._get_session()
-                
-                endpoint_path = "/fapi/v1/klines" if "fapi" in base_url else "/api/v3/klines"
-                url = f"{base_url}{endpoint_path}"
-
-                async with session.get(url, params=params) as resp:
-                    limiter.release()
-                    if resp.status in (403, 451):
-                        last_error = f"Geo-blocked/Forbidden ({resp.status}) from {base_url}"
-                        continue
-                    elif resp.status == 429:
-                        last_error = f"Rate limit 429 from {base_url}"
-                        await asyncio.sleep(1)
-                        continue
-                    
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    
-                    if not data or not isinstance(data, list):
-                        continue
-                        
-                    df = self._parse_klines(data)
-                    df = self._clean_data(df)
-                    return df
-
-            except asyncio.TimeoutError:
-                limiter.release()
-                last_error = f"Timeout from {base_url}"
-                continue
-            except aiohttp.ClientError as e:
-                limiter.release()
-                last_error = f"ClientError from {base_url}: {str(e)}"
-                await asyncio.sleep(0.2)
-                continue
-            except Exception as e:
-                limiter.release()
-                last_error = f"Unexpected error from {base_url}: {str(e)}"
-                continue
-
-        logger.error(f"Failed fetching {symbol}. Last error: {last_error}")
-        return pd.DataFrame()
-
-    def _parse_klines(self, data: List[List[Any]]) -> pd.DataFrame:
-        columns = ["open_time", "open", "high", "low", "close", "volume",
-                   "close_time", "quote_volume", "trades", "taker_buy_base",
-                   "taker_buy_quote", "ignore"]
-        df = pd.DataFrame(data, columns=columns)
-        numeric_cols = ["open", "high", "low", "close", "volume", "quote_volume"]
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-        return df
-
-    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.sort_values("open_time").reset_index(drop=True)
-        df = df.dropna(subset=["open", "high", "low", "close", "volume"])
-        for col in ["open", "high", "low", "close", "volume"]:
-            if df[col].isna().any():
-                df[col] = df[col].ffill(limit=3)
-                df[col] = df[col].bfill(limit=3)
-        return df
-
-    async def fetch_top_symbols(self, limit: int = 50) -> List[str]:
-        for base_url in BINANCE_ENDPOINTS:
-            try:
-                await limiter.acquire()
-                session = await self._get_session()
-                endpoint_path = "/fapi/v1/ticker/24hr" if "fapi" in base_url else "/api/v3/ticker/24hr"
-                url = f"{base_url}{endpoint_path}"
-                
-                async with session.get(url) as resp:
-                    limiter.release()
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                    usdt_pairs = [
-                        item for item in data
-                        if item["symbol"].endswith(CFG.QUOTE_ASSET)
-                        and float(item.get("quoteVolume", 0)) > 1_000_000
-                    ]
-                    usdt_pairs.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
-                    return [item["symbol"] for item in usdt_pairs[:limit]]
-            except Exception:
-                limiter.release()
-                continue
-        return []
-
-    async def fetch_24hr_tickers(self) -> List[Dict]:
-        for base_url in BINANCE_ENDPOINTS:
-            try:
-                await limiter.acquire()
-                session = await self._get_session()
-                endpoint_path = "/fapi/v1/ticker/24hr" if "fapi" in base_url else "/api/v3/ticker/24hr"
-                url = f"{base_url}{endpoint_path}"
-                
-                async with session.get(url) as resp:
-                    limiter.release()
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                    result = [
-                        {
-                            "symbol": item["symbol"],
-                            "change_24h": float(item.get("priceChangePercent", 0)),
-                            "volume_24h": float(item.get("quoteVolume", 0)),
-                            "high": float(item.get("highPrice", 0)),
-                            "low": float(item.get("lowPrice", 0)),
-                        }
-                        for item in data
-                        if item["symbol"].endswith(CFG.QUOTE_ASSET)
-                    ]
-                    return result
-            except Exception:
-                limiter.release()
-                continue
-        return []
-
-    async def get_symbol_filters(self, symbol: str) -> Dict:
-        if symbol in _symbol_filters_cache:
-            return _symbol_filters_cache[symbol]
-        for base_url in BINANCE_ENDPOINTS:
-            try:
-                await limiter.acquire()
-                session = await self._get_session()
-                endpoint_path = "/fapi/v1/exchangeInfo" if "fapi" in base_url else "/api/v3/exchangeInfo"
-                url = f"{base_url}{endpoint_path}"
-                
-                async with session.get(url) as resp:
-                    limiter.release()
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                    for s in data["symbols"]:
-                        if s["symbol"] == symbol:
-                            filters = {}
-                            for f in s["filters"]:
-                                if f["filterType"] == "PRICE_FILTER":
-                                    filters["tick_size"] = float(f["tickSize"])
-                                elif f["filterType"] == "LOT_SIZE":
-                                    filters["step_size"] = float(f["stepSize"])
-                                    filters["min_qty"] = float(f["minQty"])
-                            _symbol_filters_cache[symbol] = filters
-                            return filters
-            except Exception:
-                continue
-        return {"tick_size": 0.0001, "step_size": 0.000001, "min_qty": 0.0}
-
-    def adjust_price(self, price: float, tick_size: float) -> float:
-        if tick_size <= 0:
-            return round(price, 8)
-        return round(round(price / tick_size) * tick_size, 8)
-
-    def adjust_quantity(self, qty: float, step_size: float, min_qty: float) -> float:
-        if step_size <= 0:
-            return round(qty, 8)
-        adjusted = round(round(qty / step_size) * step_size, 8)
-        return max(adjusted, min_qty)
 
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
+            self.session = None
+            logger.info("Binance session closed")
 
-fetcher = DataFetcher()
+    async def _request(self, endpoint, path, params=None):
+        await self.start()
+        async with self.semaphore:
+            await self.limiter.acquire()
+            await asyncio.sleep(config.REQUEST_DELAY)
+            url = endpoint + path
+            try:
+                async with self.session.get(url, params=params) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        raise RuntimeError(f"HTTP {response.status}: {text[:200]}")
+                    return await response.json()
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"Timeout: {url}")
+            except Exception as exc:
+                raise RuntimeError(f"Request failed: {url} | {exc}")
 
-# ─── دوال مساعدة ───
-def safe_divide(a: float, b: float, default: float = 0.0) -> float:
-    return a / b if b != 0 else default
+    async def request(self, path, params=None):
+        endpoints = list(config.BINANCE_ENDPOINTS)
+        start = self.endpoint_index % len(endpoints)
+        ordered = endpoints[start:] + endpoints[:start]
+        for endpoint in ordered:
+            for attempt in range(config.BINANCE_RETRIES + 1):
+                try:
+                    data = await self._request(endpoint, path, params)
+                    self.endpoint_index = (endpoints.index(endpoint) + 1) % len(endpoints)
+                    return data
+                except Exception as exc:
+                    logger.warning(f"Binance endpoint failed: {endpoint} | attempt={attempt+1} | {exc}")
+                    if attempt < config.BINANCE_RETRIES:
+                        await asyncio.sleep(0.25 * (attempt + 1))
+        logger.error(f"All Binance endpoints failed: {path}")
+        return None
 
-def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high, low, close = df["high"], df["low"], df["close"]
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.rolling(window=period, min_periods=period).mean()
+    async def klines(self, symbol, interval="5m", limit=250):
+        data = await self.request("/api/v3/klines", {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "limit": limit,
+        })
+        return data if isinstance(data, list) else []
 
+    async def ticker_24h(self, symbol=None):
+        params = {}
+        if symbol:
+            params["symbol"] = symbol.upper()
+        data = await self.request("/api/v3/ticker/24hr", params)
+        return data
+
+    async def exchange_info(self):
+        return await self.request("/api/v3/exchangeInfo")
+
+# ============================================================
+# Klines -> DataFrame
+# ============================================================
+def klines_to_dataframe(klines):
+    if not klines:
+        return pd.DataFrame()
+    columns = [
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_volume", "trades", "taker_base",
+        "taker_quote", "ignore",
+    ]
+    df = pd.DataFrame(klines, columns=columns)
+    numeric_columns = ["open", "high", "low", "close", "volume", "quote_volume"]
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+    return df.reset_index(drop=True)
+
+# ============================================================
+# Adaptive Weights
+# ============================================================
 class AdaptiveWeights:
-    def __init__(self, initial_weights: Dict[str, float]):
-        self.weights = initial_weights.copy()
-        self.performance_history: Dict[str, List[float]] = {k: [] for k in initial_weights}
+    def __init__(self, initial=None):
+        self.weights = {factor: 1.0 for factor in config.FACTORS}
+        if initial:
+            for factor, weight in initial.items():
+                if factor in self.weights:
+                    self.weights[factor] = float(max(0.5, min(1.5, weight)))
 
-    def update(self, factor: str, result: float):
-        self.performance_history[factor].append(result)
-        self.performance_history[factor] = self.performance_history[factor][-30:]
+    def update(self, factor, success):
+        if factor not in self.weights:
+            return
+        alpha = 0.05
+        target = 1.10 if success else 0.90
+        old = self.weights[factor]
+        new = old * (1 - alpha) + target * alpha
+        self.weights[factor] = max(0.5, min(1.5, new))
 
-    def recalculate(self):
-        scores = {}
-        for factor, history in self.performance_history.items():
-            scores[factor] = sum(1 for r in history if r > 0) / len(history) if history else 1.0
-        total = sum(scores.values())
-        if total > 0:
-            self.weights = {k: v / total for k, v in scores.items()}
-            logger.info("Adaptive weights updated", extra={"weights": self.weights})
+    def normalize(self):
+        total = sum(self.weights.values())
+        if total <= 0:
+            return dict(self.weights)
+        count = len(self.weights)
+        return {key: value * count / total for key, value in self.weights.items()}
+
+    def get(self, factor, default=1.0):
+        return self.normalize().get(factor, default)
+
+    def to_dict(self):
+        return self.normalize().copy()
