@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import aiohttp
+import html  # <-- added for escaping
 import config
 
 logger = logging.getLogger("quant_bot.telegram")
@@ -65,7 +66,7 @@ class TelegramBot:
             return None
 
     # ========================================================
-    # Send message with retries (modified)
+    # Send message with retries
     # ========================================================
     async def send_message(self, chat_id, text, retries=3):
         for attempt in range(retries):
@@ -78,7 +79,6 @@ class TelegramBot:
                 })
                 if result and result.get("ok"):
                     return result
-                # If not ok, log and retry after delay
                 logger.warning(f"Send attempt {attempt+1} failed for {chat_id}: {result}")
             except Exception as exc:
                 logger.warning(f"Send attempt {attempt+1} exception for {chat_id}: {exc}")
@@ -88,7 +88,7 @@ class TelegramBot:
         return None
 
     # ========================================================
-    # Broadcast with logging (modified)
+    # Broadcast with logging
     # ========================================================
     async def broadcast(self, text):
         subscribers = await self.database.get_subscribers()
@@ -97,7 +97,7 @@ class TelegramBot:
             try:
                 await self.send_message(user_id, text)
                 logger.debug(f"Sent to {user_id}")
-                await asyncio.sleep(0.05)  # avoid hitting rate limits
+                await asyncio.sleep(0.05)
             except Exception as exc:
                 logger.warning(f"Broadcast failed for {user_id}: {exc}")
 
@@ -271,29 +271,35 @@ class TelegramBot:
         await self.send_message(chat_id, self.format_signal(result))
 
     # ========================================================
-    # Signal formatter (modified: shortened numbers)
+    # Signal formatter (modified: add html.escape)
     # ========================================================
     def format_signal(self, signal):
-        emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
-        snipe = "\n🎯 <b>EARLY SNIPE</b>" if signal["early_snipe"] else ""
-        # Use 6 decimals or scientific notation for very small numbers
+        # Helper to escape HTML and format numbers safely
+        def clean(text):
+            return html.escape(str(text))
+        
+        # Helper to format numbers with appropriate precision
         def fmt(val):
             if abs(val) < 1e-5:
-                return f"{val:.4e}"
+                return clean(f"{val:.4e}")
             else:
-                return f"{val:.6f}"
+                return clean(f"{val:.6f}")
+        
+        emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
+        snipe = "\n🎯 <b>EARLY SNIPE</b>" if signal.get("early_snipe") else ""
+        
         return (
-            f"{emoji} <b>{signal['symbol']}</b>\n\n"
-            f"Direction: <b>{signal['direction']}</b>\n"
-            f"Score: <b>{signal['score']}/10</b>\n"
-            f"Strength: {signal['strength']}%\n\n"
+            f"{emoji} <b>{clean(signal['symbol'])}</b>\n\n"
+            f"Direction: <b>{clean(signal['direction'])}</b>\n"
+            f"Score: <b>{clean(signal['score'])}/10</b>\n"
+            f"Strength: {clean(signal['strength'])}%\n\n"
             f"Entry: {fmt(signal['entry'])}\n"
             f"SL: {fmt(signal['sl'])}\n"
             f"TP: {fmt(signal['tp'])}\n"
-            f"R/R: {signal['rr']}\n"
+            f"R/R: {clean(signal['rr'])}\n"
             f"Position: {fmt(signal['position_size'])}\n\n"
-            f"RSI: {signal['rsi']}\n"
-            f"ADX: {signal['adx']}\n"
+            f"RSI: {clean(signal['rsi'])}\n"
+            f"ADX: {clean(signal['adx'])}\n"
             f"ATR: {fmt(signal['atr'])}{snipe}\n\n"
             "⚠️ إشارة تحليلية وليست ضماناً للربح."
         )
