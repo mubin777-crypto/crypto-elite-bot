@@ -1,119 +1,165 @@
-"""
-config.py - إعدادات البوت المتقدمة مع تحسينات السرعة والمراقبة.
-"""
+# config.py
+# Quant Crypto Signal System v2026
+
 import os
-from dataclasses import dataclass, field
-from typing import List, Dict
+from pathlib import Path
 
-@dataclass
-class Config:
-    # ─── مفاتيح API ───
-    BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
-    BINANCE_SECRET_KEY: str = os.getenv("BINANCE_SECRET_KEY", "")
-    
-    # ─── Telegram ───
-    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_ADMIN_ID: int = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
-    TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
-    
-    # ─── Webhook ───
-    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
-    WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
-    
-    # ─── إعدادات السوق (محسّنة للسرعة) ───
-    QUOTE_ASSET: str = "USDT"
-    TOP_N_COINS: int = 50
-    # 🔥 إضافة إطار 1 دقيقة للإشارات السريعة، مع الاحتفاظ بـ 5m و 1h و 4h للاتجاه
-    TIMEFRAMES: List[str] = field(default_factory=lambda: ["1m", "5m", "1h", "4h"])
-    
-    # 🔥 تقليل زمن المسح من 60 إلى 20 ثانية (سرعة استجابة أفضل)
-    SCAN_INTERVAL_SECONDS: int = 20  # كانت 60
-    
-    # ─── إعدادات قاعدة البيانات ───
-    DB_PATH: str = "crypto_signals.db"
-    MAX_CANDLES_PER_SYMBOL: int = 250
-    
-    # ─── إعدادات المخاطر ───
-    VIRTUAL_CAPITAL: float = 10_000.0
-    RISK_PER_TRADE_PERCENT: float = 1.0
-    MAX_DAILY_LOSS_PERCENT: float = 3.0
-    COOLDOWN_MINUTES: int = 45
-    OPPOSITE_SIGNAL_COOLDOWN: int = 240
-    PRICE_TOLERANCE: float = 0.005
-    MIN_RR_RATIO: float = 2.0
-    SL_BUFFER_PERCENT: float = 0.003
-    
-    # ─── عتبات المؤشرات ───
-    RSI_PERIOD: int = 6
-    RSI_OVERSOLD: float = 30.0
-    RSI_OVERBOUGHT: float = 70.0
-    ADX_PERIOD: int = 14
-    ADX_STRONG_TREND: float = 25.0
-    ADX_WEAK_TREND: float = 20.0
-    BB_PERIOD: int = 20
-    BB_STD: float = 2.0
-    BB_SQUEEZE_THRESHOLD: float = 0.05
-    SMA_FAST: int = 20
-    SMA_SLOW: int = 50
-    MACD_FAST: int = 12
-    MACD_SLOW: int = 26
-    MACD_SIGNAL: int = 9
-    MOMENTUM_PERIOD: int = 6
-    VOLUME_AVG_PERIOD: int = 12
-    VOLUME_SPIKE_RATIO: float = 1.5
-    ATR_PERIOD: int = 14
-    ATR_SL_MULTIPLIER: float = 1.5
-    
-    # ─── عتبات الإشارة ───
-    MIN_CONFIDENCE: float = 75.0
-    MIN_SCORE: float = 7.0
-    MAX_SCORE_SIDEWAYS: float = 6.0
-    
-    # ─── أوزان المؤشرات ───
-    WEIGHTS: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 0.20, "momentum": 0.15, "volume": 0.15,
-        "volatility": 0.15, "rsi": 0.15, "macd": 0.10, "pivot": 0.10,
-    })
-    
-    # ─── قائمة العملات الأساسية ───
-    CORE_UNIVERSE: List[str] = field(default_factory=lambda: [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT",
-        "ADAUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT",
-        "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ICPUSDT", "ETCUSDT", "XTZUSDT",
-        "THETAUSDT", "XLMUSDT", "VETUSDT", "TRXUSDT", "EOSUSDT", "AAVEUSDT", "MKRUSDT",
-        "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "FTMUSDT", "ONEUSDT", "OCEANUSDT",
-        "RNDRUSDT", "FETUSDT", "WIFUSDT", "BONKUSDT", "PEPEUSDT", "FLOKIUSDT", "BRETTUSDT",
-        "ALGOUSDT", "ARBUSDT", "APTUSDT", "CAKEUSDT", "COMPUSDT", "TONUSDT",
-        "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT", "GRTUSDT", "HBARUSDT",
-        "IMXUSDT", "INJUSDT", "KAVAUSDT", "KSMUSDT", "LDOUSDT", "MASKUSDT",
-        "NEOUSDT", "QNTUSDT", "RENUSDT", "ROSEUSDT", "RVNUSDT", "SUSHIUSDT",
-        "UMAUSDT", "ZECUSDT", "TIAUSDT", "SEIUSDT", "SUIUSDT"
-    ])
-    
-    # ─── إعدادات Pre-watch ───
-    SCAN_UNLISTED_SYMBOLS: bool = True
-    MAX_PREWATCH_TO_SCAN: int = 30
-    
-    # ─── إعدادات الأداء ───
-    MAX_CONCURRENT_REQUESTS: int = 10
-    REQUEST_DELAY: float = 0.05
-    REQUEST_TIMEOUT: int = 5
-    
-    # ─── النشر ───
-    RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "")
-    SELF_PING_INTERVAL: int = 300
-    PORT: int = int(os.getenv("PORT", "8080"))
-    
-    # 🔥 تحسينات المراقبة والتنبيهات
-    HEALTH_CHECK_INTERVAL: int = 600          # فحص الصحة كل 10 دقائق (بدلاً من 5)
-    MAX_STALE_SYMBOLS_TO_REPORT: int = 5      # عرض أول 5 عملات متوقفة فقط
-    MIN_STALE_SYMBOLS_FOR_ALERT: int = 3      # لا ترسل تنبيه إلا إذا توقف 3 عملات على الأقل
-    
-    LOG_LEVEL: str = "INFO"
-    LOG_FORMAT: str = "json"
+# ============================================================
+# Base
+# ============================================================
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "trading_bot.db"))
 
-CFG = Config()
+# ============================================================
+# Render
+# ============================================================
+PORT = int(os.getenv("PORT", "10000"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+WEBHOOK_PATH = "/webhook"
+HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "600"))
+SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))
 
-if not CFG.TELEGRAM_BOT_TOKEN:
-    import logging
-    logging.warning("⚠️ TELEGRAM_BOT_TOKEN غير معرّف في البيئة. سيعمل البوت لكن بدون إرسال إشارات.")
+# ============================================================
+# Telegram
+# ============================================================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
+TELEGRAM_USE_WEBHOOK = os.getenv("TELEGRAM_USE_WEBHOOK", "true").lower() == "true"
+TELEGRAM_FALLBACK_POLLING = os.getenv("TELEGRAM_FALLBACK_POLLING", "false").lower() == "true"
+
+# ============================================================
+# Binance
+# ============================================================
+BINANCE_ENDPOINTS = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api.binance.us",
+    "https://data-api.binance.vision",
+]
+BINANCE_TIMEOUT = 5
+BINANCE_RETRIES = 2
+MAX_CONCURRENT_REQUESTS = 10
+REQUEST_DELAY = 0.05
+
+# ============================================================
+# Core Universe
+# ============================================================
+CORE_UNIVERSE = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+    "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "MATICUSDT", "UNIUSDT",
+    "ATOMUSDT", "LTCUSDT", "BCHUSDT", "NEARUSDT", "FILUSDT", "ETCUSDT",
+    "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "SUIUSDT", "TIAUSDT",
+    "SEIUSDT", "RNDRUSDT", "FETUSDT", "STXUSDT", "TRXUSDT", "AAVEUSDT",
+    "MKRUSDT", "GRTUSDT", "ALGOUSDT", "FTMUSDT", "SANDUSDT", "MANAUSDT",
+    "AXSUSDT", "THETAUSDT", "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT",
+]
+
+# ============================================================
+# Excluded stablecoins (added)
+# ============================================================
+EXCLUDED_SYMBOLS = ["USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT"]
+
+# ============================================================
+# Timeframes
+# ============================================================
+ANALYSIS_INTERVAL = "5m"
+TREND_INTERVAL = "15m"
+DAILY_INTERVAL = "1d"
+KLINE_LIMIT = 250
+
+# ============================================================
+# Indicators
+# ============================================================
+RSI_PERIOD = 6
+ADX_PERIOD = 14
+ATR_PERIOD = 14
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+BB_PERIOD = 20
+BB_STD = 2.0
+MOMENTUM_PERIOD = 5
+VOLUME_AVG_PERIOD = 20
+
+# ============================================================
+# Signal scoring
+# ============================================================
+MIN_SCORE = float(os.getenv("MIN_SCORE", "6.0"))
+EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "3.8"))
+MIN_ADX = 12.0
+RSI_OVERBOUGHT = 70.0
+RSI_OVERSOLD = 30.0
+ENABLE_RSI_FILTER = True
+
+# ============================================================
+# Early breakout
+# ============================================================
+SQUEEZE_BB_WIDTH = 0.02
+SILENT_VOLUME_MULTIPLIER = 1.8
+RESISTANCE_DISTANCE = 0.015
+
+# ============================================================
+# Risk
+# ============================================================
+INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "10000"))
+RISK_PER_TRADE = 0.01
+MAX_POSITION_PERCENT = 0.50
+ATR_SL_MULTIPLIER = 1.5
+SL_BUFFER_PERCENT = 0.003
+MIN_RR = 2.0
+COOLDOWN_MINUTES = 45
+OPPOSITE_COOLDOWN_HOURS = 4
+DAILY_MAX_LOSS_PERCENT = 0.03
+
+# ============================================================
+# Scanner
+# ============================================================
+PREWATCH_PRICE_CHANGE = 3.0
+PREWATCH_VOLUME_USDT = 2_000_000
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "30"))
+PREWATCH_SCAN_EVERY = 3
+MAX_PREWATCH_TO_SCAN = 30
+
+# ============================================================
+# Signal evaluation
+# ============================================================
+SIGNAL_MAX_HOLD_CANDLES = 1
+SIGNAL_EVALUATION_INTERVAL = 60
+
+# ============================================================
+# Adaptive weights
+# ============================================================
+FACTORS = [
+    "rsi", "adx", "momentum", "volume",
+    "bollinger", "macd", "pivot",
+]
+
+# ============================================================
+# Logging
+# ============================================================
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# ============================================================
+# Validation
+# ============================================================
+def validate_config():
+    errors = []
+    if not TELEGRAM_BOT_TOKEN:
+        errors.append("TELEGRAM_BOT_TOKEN is required")
+    if not TELEGRAM_ADMIN_ID:
+        errors.append("TELEGRAM_ADMIN_ID is required")
+    if TELEGRAM_USE_WEBHOOK and not WEBHOOK_URL:
+        errors.append("WEBHOOK_URL or RENDER_EXTERNAL_URL is required in webhook mode")
+    if not 0 < RISK_PER_TRADE <= 0.05:
+        errors.append("RISK_PER_TRADE must be between 0 and 0.05")
+    if not 0 < MAX_POSITION_PERCENT <= 1:
+        errors.append("MAX_POSITION_PERCENT must be between 0 and 1")
+    if MIN_RR < 2:
+        errors.append("MIN_RR must be at least 2")
+    if BINANCE_TIMEOUT > 5:
+        errors.append("BINANCE_TIMEOUT must not exceed 5 seconds")
+    if errors:
+        raise ValueError(" | ".join(errors))
