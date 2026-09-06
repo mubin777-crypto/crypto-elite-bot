@@ -32,7 +32,8 @@ class TelegramBot:
         self.session = aiohttp.ClientSession(timeout=timeout)
 
         if self.webhook_mode:
-            webhook_url = config.WEBHOOK_URL + config.WEBHOOK_PATH
+            # ✅ بناء webhook_url بشكل صحيح
+            webhook_url = config.WEBHOOK_URL.rstrip("/") + config.WEBHOOK_PATH
             result = await self.api_call("setWebhook", {
                 "url": webhook_url,
                 "drop_pending_updates": False,
