@@ -32,15 +32,15 @@ TELEGRAM_RETRY_BACKOFF_BASE = 1.0
 TELEGRAM_MAX_RETRIES = 5
 
 # ============================================================
-# Binance - الترتيب المعدل لحل مشكلة 451 (الحظر الجغرافي)
+# Binance - تم تعديل الترتيب لحل مشكلة 451
 # ============================================================
 BINANCE_ENDPOINTS = [
-    "https://data-api.binance.vision",   # ✅ الأولوية القصوى (يعمل من أي مكان)
-    "https://api.binance.us",            # ✅ ثانياً (متاح في أمريكا)
+    "https://data-api.binance.vision",   # ✅ الأولوية القصوى - يعمل من أي مكان
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
     "https://api3.binance.com",
+    "https://api.binance.us",
 ]
 BINANCE_TIMEOUT = 5
 BINANCE_RETRIES = 2
