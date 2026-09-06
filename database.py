@@ -280,7 +280,7 @@ class Database:
         return {row["factor"]: float(row["weight"]) for row in rows}
 
     # ============================================================
-    # Daily Stats (محسّن: يدعم inconclusive و timeout)
+    # Daily Stats
     # ============================================================
     async def get_daily_pnl(self):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
