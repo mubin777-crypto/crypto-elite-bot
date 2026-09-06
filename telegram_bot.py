@@ -6,6 +6,8 @@ import logging
 import aiohttp
 import html
 import config
+import time
+from datetime import datetime, timezone
 
 logger = logging.getLogger("quant_bot.telegram")
 
@@ -18,20 +20,16 @@ class TelegramBot:
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self.session = None
         self.webhook_mode = config.TELEGRAM_USE_WEBHOOK
+        self.admin_id = config.TELEGRAM_ADMIN_ID
 
-    # ========================================================
-    # Helper: safe text for HTML
-    # ========================================================
     def safe_text(self, text):
         return html.escape(str(text))
 
-    # ========================================================
-    # Start
-    # ========================================================
     async def start(self):
         if not self.token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
+        self.session = aiohttp.ClientSession(timeout=timeout)
 
         if self.webhook_mode:
             webhook_url = config.WEBHOOK_URL + config.WEBHOOK_PATH
@@ -47,75 +45,106 @@ class TelegramBot:
             await self.api_call("deleteWebhook", {"drop_pending_updates": True})
             logger.info("Telegram polling mode selected")
 
-    # ========================================================
-    # Close
-    # ========================================================
+        # إرسال رسالة تأكيد للأدمن باستخدام HTML
+        if self.admin_id:
+            await self.send_message(self.admin_id, "🤖 <b>Bot started successfully!</b>")
+
     async def close(self):
         if self.session:
             await self.session.close()
             self.session = None
 
-    # ========================================================
-    # Telegram API
-    # ========================================================
-    async def api_call(self, method, payload=None):
+    async def api_call(self, method, payload=None, retries=config.TELEGRAM_MAX_RETRIES):
         if not self.session:
             return None
-        try:
-            async with self.session.post(f"{self.base_url}/{method}", json=payload or {}) as response:
-                data = await response.json()
-                if not data.get("ok"):
-                    logger.error(f"Telegram API error: {data}")
-                return data
-        except Exception as exc:
-            logger.error(f"Telegram API request failed: {exc}")
-            return None
+        backoff = config.TELEGRAM_RETRY_BACKOFF_BASE
+        for attempt in range(retries + 1):
+            try:
+                async with self.session.post(f"{self.base_url}/{method}", json=payload or {}) as response:
+                    data = await response.json()
+                    if not data.get("ok"):
+                        # إذا كان الخطأ 429 (Too Many Requests) نحتاج انتظار retry_after
+                        if response.status == 429:
+                            retry_after = data.get("parameters", {}).get("retry_after", 5)
+                            logger.warning(f"Rate limited. Retry after {retry_after}s")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        logger.error(f"Telegram API error: {data}")
+                    return data
+            except asyncio.TimeoutError:
+                logger.warning(f"Telegram API timeout (attempt {attempt+1})")
+                if attempt < retries:
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+            except Exception as exc:
+                logger.error(f"Telegram API request failed: {exc}")
+                if attempt < retries:
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+        logger.error(f"All retries failed for {method}")
+        return None
 
-    # ========================================================
-    # Send message with retries
-    # ========================================================
-    async def send_message(self, chat_id, text, retries=3):
-        for attempt in range(retries):
+    async def send_message(self, chat_id, text, parse_mode="HTML", retries=config.TELEGRAM_MAX_RETRIES):
+        if not text:
+            logger.warning("Empty message, not sending")
+            return None
+        if len(text) > 4096:
+            text = text[:4000] + "\n... (مقطوع)"
+        backoff = config.TELEGRAM_RETRY_BACKOFF_BASE
+        for attempt in range(retries + 1):
             try:
                 result = await self.api_call("sendMessage", {
                     "chat_id": chat_id,
                     "text": text,
-                    "parse_mode": "HTML",
+                    "parse_mode": parse_mode,
                     "disable_web_page_preview": True,
                 })
                 if result and result.get("ok"):
+                    logger.debug(f"Message sent to {chat_id}")
                     return result
-                logger.warning(f"Send attempt {attempt+1} failed for {chat_id}: {result}")
+                else:
+                    logger.warning(f"Send attempt {attempt+1} failed for {chat_id}: {result}")
             except Exception as exc:
                 logger.warning(f"Send attempt {attempt+1} exception for {chat_id}: {exc}")
-            if attempt < retries - 1:
-                await asyncio.sleep(1)
+            if attempt < retries:
+                await asyncio.sleep(backoff)
+                backoff *= 2
         logger.error(f"All retries failed for chat_id {chat_id}")
         return None
 
-    # ========================================================
-    # Broadcast with logging
-    # ========================================================
     async def broadcast(self, text):
         subscribers = await self.database.get_subscribers()
-        logger.info(f"Broadcasting to {len(subscribers)} subscribers")
+        count = len(subscribers)
+        logger.info(f"📢 Broadcasting to {count} subscribers")
+        if count == 0:
+            logger.warning("⚠️ No active subscribers found! Signal will not be sent.")
+            if self.admin_id:
+                await self.send_message(self.admin_id, "⚠️ No active subscribers. Please add users with /adduser")
+            return
+
+        # نضمن أن الأدمن ضمن القائمة
+        original_subscribers = subscribers.copy()
+        if self.admin_id and self.admin_id not in subscribers:
+            subscribers = [self.admin_id] + subscribers
+            logger.info(f"Added admin to broadcast list (total: {len(subscribers)})")
+
+        success_count = 0
+        failure_count = 0
         for user_id in subscribers:
             try:
-                await self.send_message(user_id, text)
-                logger.debug(f"Sent to {user_id}")
+                result = await self.send_message(user_id, text)
+                if result and result.get("ok"):
+                    success_count += 1
+                else:
+                    failure_count += 1
+                    logger.warning(f"Failed to send to {user_id}")
                 await asyncio.sleep(0.05)
             except Exception as exc:
-                logger.warning(f"Broadcast failed for {user_id}: {exc}")
+                failure_count += 1
+                logger.warning(f"Broadcast exception for {user_id}: {exc}")
 
-    # ========================================================
-    # Admin check
-    # ========================================================
-    def is_admin(self, user_id):
-        return int(user_id) == int(config.TELEGRAM_ADMIN_ID)
+        logger.info(f"✅ Broadcast completed: {success_count}/{len(subscribers)} messages sent (failures: {failure_count})")
 
-    # ========================================================
-    # Update Handler
-    # ========================================================
     async def handle_update(self, update):
         if not isinstance(update, dict):
             return
@@ -139,6 +168,8 @@ class TelegramBot:
             await self.prewatch(chat_id)
         elif command.startswith("/performance"):
             await self.performance(chat_id)
+        elif command.startswith("/subscribers"):
+            await self.subscribers_list(chat_id, user_id)
         elif command.startswith("/signal"):
             parts = text.split()
             if len(parts) != 2:
@@ -155,8 +186,10 @@ class TelegramBot:
                 return
             try:
                 target_id = int(parts[1])
-                await self.database.add_subscriber(target_id)
-                await self.send_message(chat_id, "✅ Subscriber added.")
+                if await self.database.add_subscriber(target_id):
+                    await self.send_message(chat_id, f"✅ Subscriber {target_id} added.")
+                else:
+                    await self.send_message(chat_id, "❌ Failed to add subscriber.")
             except ValueError:
                 await self.send_message(chat_id, "❌ USER_ID must be numeric.")
         elif command.startswith("/removeuser"):
@@ -169,8 +202,10 @@ class TelegramBot:
                 return
             try:
                 target_id = int(parts[1])
-                await self.database.remove_subscriber(target_id)
-                await self.send_message(chat_id, "✅ Subscriber removed.")
+                if await self.database.remove_subscriber(target_id):
+                    await self.send_message(chat_id, f"✅ Subscriber {target_id} removed.")
+                else:
+                    await self.send_message(chat_id, "❌ Failed to remove subscriber.")
             except ValueError:
                 await self.send_message(chat_id, "❌ USER_ID must be numeric.")
         elif command.startswith("/reset_daily"):
@@ -180,40 +215,51 @@ class TelegramBot:
             await self.database.reset_daily(config.INITIAL_CAPITAL)
             await self.send_message(chat_id, "✅ Daily statistics reset.")
 
-    # ========================================================
-    # Help text
-    # ========================================================
+    def is_admin(self, user_id):
+        return int(user_id) == int(self.admin_id)
+
     def help_text(self):
         return (
             "🤖 <b>Quant Crypto Signal System v2026</b>\n\n"
             "/status - حالة النظام\n"
             "/prewatch - قائمة المراقبة\n"
             "/performance - الأداء\n"
+            "/subscribers - قائمة المشتركين (للمشرف)\n"
             "/signal BTCUSDT - تحليل فوري\n"
             "/adduser USER_ID - إضافة مشترك\n"
             "/removeuser USER_ID - حذف مشترك\n"
             "/reset_daily - إعادة الإحصائيات"
         )
 
-    # ========================================================
-    # Status
-    # ========================================================
+    async def subscribers_list(self, chat_id, user_id):
+        if not self.is_admin(user_id):
+            await self.send_message(chat_id, "⛔ Admin only.")
+            return
+        subs = await self.database.get_subscribers()
+        count = len(subs)
+        if count == 0:
+            await self.send_message(chat_id, "📭 No subscribers.")
+            return
+        lines = [f"📋 Subscribers ({count}):"]
+        for uid in subs:
+            lines.append(f"• {uid}")
+        await self.send_message(chat_id, "\n".join(lines))
+
     async def status(self, chat_id):
         signals = await self.database.get_daily_signals()
-        pnl = await self.database.get_daily_pnl()
+        stats = await self.database.get_daily_pnl()
         prewatch = await self.database.get_prewatch(20)
         subscribers = await self.database.get_subscribers()
-        await self.send_message(chat_id,
+        text = (
             f"📊 <b>System Status</b>\n\n"
             f"Signals today: {self.safe_text(len(signals))}\n"
-            f"Daily PnL: {self.safe_text(f'{pnl:.2f}')}\n"
+            f"Daily PnL: {self.safe_text(f'{stats['pnl']:.2f}')}\n"
+            f"W/L/B/I/T: {stats['wins']}/{stats['losses']}/{stats['breakeven']}/{stats['inconclusive']}/{stats['timeout']}\n"
             f"Pre-watch: {self.safe_text(len(prewatch))}\n"
             f"Subscribers: {self.safe_text(len(subscribers))}"
         )
+        await self.send_message(chat_id, text)
 
-    # ========================================================
-    # Prewatch
-    # ========================================================
     async def prewatch(self, chat_id):
         items = await self.database.get_prewatch(10)
         if not items:
@@ -224,22 +270,22 @@ class TelegramBot:
             lines.append(
                 f"• <b>{self.safe_text(item['symbol'])}</b> | "
                 f"{self.safe_text(f'{item['price_change']:.2f}')}% | "
-                f"${self.safe_text(f'{item['quote_volume']:,.0f}')}"
+                f"${self.safe_text(f'{item['quote_volume']:,.0f}')} | "
+                f"Trades: {self.safe_text(item.get('trades', 0))}"
             )
         await self.send_message(chat_id, "\n".join(lines))
 
-    # ========================================================
-    # Performance
-    # ========================================================
     async def performance(self, chat_id):
         signals = await self.database.get_daily_signals()
         closed = [x for x in signals if x["status"] == "CLOSED"]
         if not closed:
             await self.send_message(chat_id, "لا توجد صفقات مغلقة كافية.")
             return
-
         wins = [x for x in closed if float(x["result_r"]) > 0]
         losses = [x for x in closed if float(x["result_r"]) < 0]
+        breakeven = [x for x in closed if float(x["result_r"]) == 0]
+        inconclusive = [x for x in closed if x.get("exit_reason") == "INCONCLUSIVE"]
+        timeouts = [x for x in closed if x.get("exit_reason") == "TIMEOUT"]
         win_rate = len(wins) / len(closed) * 100
         gross_profit = sum(float(x["result_r"]) for x in wins)
         gross_loss = abs(sum(float(x["result_r"]) for x in losses))
@@ -253,17 +299,16 @@ class TelegramBot:
         else:
             sharpe = 0
         pf_text = "INF" if profit_factor == float("inf") else f"{profit_factor:.2f}"
-        await self.send_message(chat_id,
+        text = (
             f"📈 <b>Performance</b>\n\n"
             f"Closed: {self.safe_text(len(closed))}\n"
+            f"Win/Loss/BE/Inc/TO: {len(wins)}/{len(losses)}/{len(breakeven)}/{len(inconclusive)}/{len(timeouts)}\n"
             f"Win Rate: {self.safe_text(f'{win_rate:.2f}')}%\n"
             f"Profit Factor: {self.safe_text(pf_text)}\n"
             f"Sharpe (R): {self.safe_text(f'{sharpe:.2f}')}"
         )
+        await self.send_message(chat_id, text)
 
-    # ========================================================
-    # Instant signal
-    # ========================================================
     async def signal(self, chat_id, symbol):
         klines = await self.data_fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT)
         if not klines:
@@ -271,7 +316,6 @@ class TelegramBot:
             return
         from utils import klines_to_dataframe
         df = klines_to_dataframe(klines)
-        # جلب 15m للترند
         klines_15m = await self.data_fetcher.klines(symbol, config.TREND_INTERVAL, 50)
         df_15m = klines_to_dataframe(klines_15m) if klines_15m else None
         result = self.signal_engine.analyze(symbol, df, config.INITIAL_CAPITAL, df_15m)
@@ -280,9 +324,6 @@ class TelegramBot:
             return
         await self.send_message(chat_id, self.format_signal(result))
 
-    # ========================================================
-    # Signal formatter (fully escaped)
-    # ========================================================
     def format_signal(self, signal):
         def fmt(val):
             if abs(val) < 1e-5:
@@ -292,12 +333,13 @@ class TelegramBot:
 
         emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
         snipe = "\n🎯 <b>EARLY SNIPE</b>" if signal.get("early_snipe") else ""
+        quality_label = f"Quality: {signal.get('quality', 0)}%" if signal.get('quality') else ""
 
         return (
             f"{emoji} <b>{self.safe_text(signal['symbol'])}</b>\n\n"
             f"Direction: <b>{self.safe_text(signal['direction'])}</b>\n"
             f"Score: <b>{self.safe_text(signal['score'])}/10</b>\n"
-            f"Strength: {self.safe_text(signal['strength'])}%\n\n"
+            f"{quality_label}\n\n"
             f"Entry: {fmt(signal['entry'])}\n"
             f"SL: {fmt(signal['sl'])}\n"
             f"TP: {fmt(signal['tp'])}\n"
@@ -306,5 +348,6 @@ class TelegramBot:
             f"RSI: {self.safe_text(signal['rsi'])}\n"
             f"ADX: {self.safe_text(signal['adx'])}\n"
             f"ATR: {fmt(signal['atr'])}{snipe}\n\n"
-            "⚠️ إشارة تحليلية وليست ضماناً للربح."
+            "⚠️ إشارة تحليلية وليست ضماناً للربح.\n"
+            "📊 Quality تعبر عن قوة الإشارة وليست احتمالية ربح."
         )
