@@ -94,7 +94,7 @@ class DataFetcher:
 
     async def _request(self, endpoint, path, params=None):
         await self.start()
-        async with self.semaphore:   # التحكم الفعلي بعدد الطلبات المتزامنة
+        async with self.semaphore:
             await self.limiter.acquire()
             await asyncio.sleep(config.REQUEST_DELAY)
             url = endpoint + path
@@ -176,12 +176,10 @@ class AdaptiveWeights:
                     self.weights[factor] = float(max(0.5, min(1.5, weight)))
 
     def update(self, factor, success, contribution=None):
-        """تحديث الوزن بناءً على النجاح والمساهمة (0-1)"""
         if factor not in self.weights:
             return
         alpha = 0.05
         if contribution is not None:
-            # نستخدم المساهمة لتعديل الهدف: إذا كانت المساهمة عالية والصفقة ناجحة نكافئ أكثر
             base_target = 1.10 if success else 0.90
             target = 1.0 + (base_target - 1.0) * (0.5 + 0.5 * contribution)
         else:
