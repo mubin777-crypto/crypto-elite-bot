@@ -179,7 +179,7 @@ class SignalEngine:
         if direction is None:
             return None
 
-        # 🔥 RSI filter (double protection)
+        # RSI filter (double protection)
         rsi_value = float(latest["rsi"])
         if config.ENABLE_RSI_FILTER:
             if direction == "BUY" and rsi_value > config.RSI_OVERBOUGHT:
