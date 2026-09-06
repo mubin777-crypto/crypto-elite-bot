@@ -16,7 +16,7 @@ DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "trading_bot.db"))
 PORT = int(os.getenv("PORT", "10000"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-WEBHOOK_PATH = "/webhook"
+WEBHOOK_PATH = "/webhook"   # ✅ مسار صحيح (بدون تكرار)
 HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "600"))
 SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))
 
@@ -32,10 +32,10 @@ TELEGRAM_RETRY_BACKOFF_BASE = 1.0
 TELEGRAM_MAX_RETRIES = 5
 
 # ============================================================
-# Binance - تم تعديل الترتيب لحل مشكلة 451
+# Binance - الأولوية القصوى لـ data-api.binance.vision
 # ============================================================
 BINANCE_ENDPOINTS = [
-    "https://data-api.binance.vision",   # ✅ الأولوية القصوى - يعمل من أي مكان
+    "https://data-api.binance.vision",   # ✅ الأولوية الأولى - يعمل من أي مكان
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
