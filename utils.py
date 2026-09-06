@@ -11,9 +11,8 @@ import aiohttp
 import pandas as pd
 import config
 
-# ============================================================
-# JSON Logger
-# ============================================================
+logger = logging.getLogger("quant_bot.utils")
+
 class JsonFormatter(logging.Formatter):
     def format(self, record):
         payload = {
@@ -40,9 +39,6 @@ def setup_logging():
 
 logger = setup_logging()
 
-# ============================================================
-# Rate Limiter
-# ============================================================
 class RateLimiter:
     def __init__(self, max_calls=8, period=1.0):
         self.max_calls = max_calls
@@ -61,9 +57,6 @@ class RateLimiter:
                 wait_time = self.period - (now - self.calls[0])
             await asyncio.sleep(max(0.01, wait_time))
 
-# ============================================================
-# Binance DataFetcher (مع Semaphore و REQUEST_DELAY الفعلي)
-# ============================================================
 class DataFetcher:
     def __init__(self):
         self.session = None
@@ -110,7 +103,7 @@ class DataFetcher:
                 raise RuntimeError(f"Request failed: {url} | {exc}")
 
     async def request(self, path, params=None):
-        endpoints = list(config.BINANCE_ENDPOINTS)
+        endpoints = list(config.BINANCE_ENDPOINTS)  # ✅ يستخدم القائمة المعدلة
         start = self.endpoint_index % len(endpoints)
         ordered = endpoints[start:] + endpoints[:start]
         for endpoint in ordered:
@@ -144,9 +137,6 @@ class DataFetcher:
     async def exchange_info(self):
         return await self.request("/api/v3/exchangeInfo")
 
-# ============================================================
-# Klines -> DataFrame
-# ============================================================
 def klines_to_dataframe(klines):
     if not klines:
         return pd.DataFrame()
@@ -164,9 +154,6 @@ def klines_to_dataframe(klines):
     df = df.dropna(subset=["open", "high", "low", "close", "volume"])
     return df.reset_index(drop=True)
 
-# ============================================================
-# Adaptive Weights (محسّن: تحديث كل عامل بناءً على مساهمته)
-# ============================================================
 class AdaptiveWeights:
     def __init__(self, initial=None):
         self.weights = {factor: 1.0 for factor in config.FACTORS}
