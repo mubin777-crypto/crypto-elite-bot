@@ -1,4 +1,5 @@
-# telegram_bot.py - النسخة النهائية مع معالجة أوامر كاملة
+# telegram_bot.py
+# Telegram Webhook Interface
 
 import asyncio
 import logging
@@ -205,7 +206,6 @@ class TelegramBot:
             await self.database.reset_daily(config.INITIAL_CAPITAL)
             await self.send_message(chat_id, "✅ Daily statistics reset.")
         else:
-            # أمر غير معروف
             await self.send_message(chat_id, "❓ أمر غير معروف. استخدم /start للمساعدة.")
 
     def is_admin(self, user_id):
