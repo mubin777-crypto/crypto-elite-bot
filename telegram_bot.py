@@ -1,5 +1,4 @@
-# telegram_bot.py
-# Telegram Webhook Interface
+# telegram_bot.py - النسخة النهائية مع معالجة أوامر كاملة
 
 import asyncio
 import logging
@@ -45,7 +44,6 @@ class TelegramBot:
             await self.api_call("deleteWebhook", {"drop_pending_updates": True})
             logger.info("Telegram polling mode selected")
 
-        # إرسال رسالة تأكيد للأدمن باستخدام HTML
         if self.admin_id:
             await self.send_message(self.admin_id, "🤖 <b>Bot started successfully!</b>")
 
@@ -63,7 +61,6 @@ class TelegramBot:
                 async with self.session.post(f"{self.base_url}/{method}", json=payload or {}) as response:
                     data = await response.json()
                     if not data.get("ok"):
-                        # إذا كان الخطأ 429 (Too Many Requests) نحتاج انتظار retry_after
                         if response.status == 429:
                             retry_after = data.get("parameters", {}).get("retry_after", 5)
                             logger.warning(f"Rate limited. Retry after {retry_after}s")
@@ -86,7 +83,6 @@ class TelegramBot:
 
     async def send_message(self, chat_id, text, parse_mode="HTML", retries=config.TELEGRAM_MAX_RETRIES):
         if not text:
-            logger.warning("Empty message, not sending")
             return None
         if len(text) > 4096:
             text = text[:4000] + "\n... (مقطوع)"
@@ -100,16 +96,12 @@ class TelegramBot:
                     "disable_web_page_preview": True,
                 })
                 if result and result.get("ok"):
-                    logger.debug(f"Message sent to {chat_id}")
                     return result
-                else:
-                    logger.warning(f"Send attempt {attempt+1} failed for {chat_id}: {result}")
             except Exception as exc:
                 logger.warning(f"Send attempt {attempt+1} exception for {chat_id}: {exc}")
             if attempt < retries:
                 await asyncio.sleep(backoff)
                 backoff *= 2
-        logger.error(f"All retries failed for chat_id {chat_id}")
         return None
 
     async def broadcast(self, text):
@@ -117,16 +109,13 @@ class TelegramBot:
         count = len(subscribers)
         logger.info(f"📢 Broadcasting to {count} subscribers")
         if count == 0:
-            logger.warning("⚠️ No active subscribers found! Signal will not be sent.")
+            logger.warning("⚠️ No active subscribers found!")
             if self.admin_id:
                 await self.send_message(self.admin_id, "⚠️ No active subscribers. Please add users with /adduser")
             return
 
-        # نضمن أن الأدمن ضمن القائمة
-        original_subscribers = subscribers.copy()
         if self.admin_id and self.admin_id not in subscribers:
             subscribers = [self.admin_id] + subscribers
-            logger.info(f"Added admin to broadcast list (total: {len(subscribers)})")
 
         success_count = 0
         failure_count = 0
@@ -137,13 +126,12 @@ class TelegramBot:
                     success_count += 1
                 else:
                     failure_count += 1
-                    logger.warning(f"Failed to send to {user_id}")
                 await asyncio.sleep(0.05)
             except Exception as exc:
                 failure_count += 1
                 logger.warning(f"Broadcast exception for {user_id}: {exc}")
 
-        logger.info(f"✅ Broadcast completed: {success_count}/{len(subscribers)} messages sent (failures: {failure_count})")
+        logger.info(f"✅ Broadcast: {success_count}/{len(subscribers)} sent, {failure_count} failed")
 
     async def handle_update(self, update):
         if not isinstance(update, dict):
@@ -160,6 +148,8 @@ class TelegramBot:
             return
 
         command = text.split()[0].lower() if text else ""
+        logger.info(f"📩 Command: {command} from {user_id}")
+
         if command.startswith("/start"):
             await self.send_message(chat_id, self.help_text())
         elif command.startswith("/status"):
@@ -214,6 +204,9 @@ class TelegramBot:
                 return
             await self.database.reset_daily(config.INITIAL_CAPITAL)
             await self.send_message(chat_id, "✅ Daily statistics reset.")
+        else:
+            # أمر غير معروف
+            await self.send_message(chat_id, "❓ أمر غير معروف. استخدم /start للمساعدة.")
 
     def is_admin(self, user_id):
         return int(user_id) == int(self.admin_id)
