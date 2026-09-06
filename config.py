@@ -16,7 +16,7 @@ DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "trading_bot.db"))
 PORT = int(os.getenv("PORT", "10000"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-WEBHOOK_PATH = "/webhook"
+WEBHOOK_PATH = "/webhook"  # ✅ مسار صحيح (بدون تكرار)
 HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "600"))
 SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))
 
@@ -108,8 +108,8 @@ MIN_ADX = 12.0
 # ============================================================
 # 🔥 RSI Overbought/Oversold Filters
 # ============================================================
-RSI_OVERBOUGHT = 70.0   # فوقها ممنوع الشراء
-RSI_OVERSOLD = 30.0     # تحتها ممنوع البيع
+RSI_OVERBOUGHT = 70.0
+RSI_OVERSOLD = 30.0
 ENABLE_RSI_FILTER = True
 
 # ============================================================
