@@ -22,16 +22,13 @@ class SignalEngine:
 
         scores = {"BUY": {}, "SELL": {}}
 
-        # ----------------------------------------------------
         # RSI with Overbought/Oversold Penalty
-        # ----------------------------------------------------
         rsi_buy = 1.0 if 45 <= rsi_value <= 65 else 0.0
         rsi_sell = 1.0 if 35 <= rsi_value <= 55 else 0.0
 
-        # 🔥 عقوبة التشبع: RSI > 70 يمنع الشراء، RSI < 30 يمنع البيع
         if config.ENABLE_RSI_FILTER:
             if rsi_value > config.RSI_OVERBOUGHT:
-                rsi_buy = -1.0  # عقوبة قوية
+                rsi_buy = -1.0
             if rsi_value < config.RSI_OVERSOLD:
                 rsi_sell = -1.0
 
@@ -182,7 +179,7 @@ class SignalEngine:
         if direction is None:
             return None
 
-        # 🔥 فلتر RSI الإضافي (طبقة أمان مزدوجة)
+        # 🔥 RSI filter (double protection)
         rsi_value = float(latest["rsi"])
         if config.ENABLE_RSI_FILTER:
             if direction == "BUY" and rsi_value > config.RSI_OVERBOUGHT:
