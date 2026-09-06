@@ -4,11 +4,12 @@
 import asyncio
 import json
 import logging
+import math
 import time
 from datetime import datetime, timezone
 import aiohttp
 import pandas as pd
-import config  # ✅ تم التعديل: استخدام import config بدلاً من from config import CFG
+import config
 
 # ============================================================
 # JSON Logger
@@ -61,7 +62,7 @@ class RateLimiter:
             await asyncio.sleep(max(0.01, wait_time))
 
 # ============================================================
-# Binance DataFetcher
+# Binance DataFetcher (مع Semaphore و REQUEST_DELAY الفعلي)
 # ============================================================
 class DataFetcher:
     def __init__(self):
@@ -93,7 +94,7 @@ class DataFetcher:
 
     async def _request(self, endpoint, path, params=None):
         await self.start()
-        async with self.semaphore:
+        async with self.semaphore:   # التحكم الفعلي بعدد الطلبات المتزامنة
             await self.limiter.acquire()
             await asyncio.sleep(config.REQUEST_DELAY)
             url = endpoint + path
@@ -164,7 +165,7 @@ def klines_to_dataframe(klines):
     return df.reset_index(drop=True)
 
 # ============================================================
-# Adaptive Weights
+# Adaptive Weights (محسّن: تحديث كل عامل بناءً على مساهمته)
 # ============================================================
 class AdaptiveWeights:
     def __init__(self, initial=None):
@@ -174,11 +175,17 @@ class AdaptiveWeights:
                 if factor in self.weights:
                     self.weights[factor] = float(max(0.5, min(1.5, weight)))
 
-    def update(self, factor, success):
+    def update(self, factor, success, contribution=None):
+        """تحديث الوزن بناءً على النجاح والمساهمة (0-1)"""
         if factor not in self.weights:
             return
         alpha = 0.05
-        target = 1.10 if success else 0.90
+        if contribution is not None:
+            # نستخدم المساهمة لتعديل الهدف: إذا كانت المساهمة عالية والصفقة ناجحة نكافئ أكثر
+            base_target = 1.10 if success else 0.90
+            target = 1.0 + (base_target - 1.0) * (0.5 + 0.5 * contribution)
+        else:
+            target = 1.10 if success else 0.90
         old = self.weights[factor]
         new = old * (1 - alpha) + target * alpha
         self.weights[factor] = max(0.5, min(1.5, new))
