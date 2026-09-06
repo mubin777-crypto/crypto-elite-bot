@@ -27,6 +27,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 TELEGRAM_USE_WEBHOOK = os.getenv("TELEGRAM_USE_WEBHOOK", "true").lower() == "true"
 TELEGRAM_FALLBACK_POLLING = os.getenv("TELEGRAM_FALLBACK_POLLING", "false").lower() == "true"
+TELEGRAM_API_TIMEOUT = int(os.getenv("TELEGRAM_API_TIMEOUT", "15"))
+TELEGRAM_RETRY_BACKOFF_BASE = 1.0
+TELEGRAM_MAX_RETRIES = 5
 
 # ============================================================
 # Binance
@@ -41,8 +44,8 @@ BINANCE_ENDPOINTS = [
 ]
 BINANCE_TIMEOUT = 5
 BINANCE_RETRIES = 2
-MAX_CONCURRENT_REQUESTS = 10
-REQUEST_DELAY = 0.05
+MAX_CONCURRENT_REQUESTS = 10   # هذا يُستخدم فعلياً مع Semaphore
+REQUEST_DELAY = 0.05           # يُستخدم فعلياً
 
 # ============================================================
 # Core Universe
@@ -58,9 +61,19 @@ CORE_UNIVERSE = [
 ]
 
 # ============================================================
-# Excluded stablecoins (added)
+# Excluded stablecoins
 # ============================================================
 EXCLUDED_SYMBOLS = ["USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT"]
+
+# ============================================================
+# Pre-watch strict filters
+# ============================================================
+PREWATCH_MIN_VOLUME_USDT = 5_000_000
+PREWATCH_MIN_TRADES = 5000
+PREWATCH_MAX_PRICE = 1000.0
+PREWATCH_MIN_PRICE = 0.00001
+PREWATCH_PRICE_CHANGE = 3.0
+PREWATCH_VOLUME_USDT = 2_000_000
 
 # ============================================================
 # Timeframes
@@ -69,6 +82,7 @@ ANALYSIS_INTERVAL = "5m"
 TREND_INTERVAL = "15m"
 DAILY_INTERVAL = "1d"
 KLINE_LIMIT = 250
+BACKTEST_LIMIT = 5000
 
 # ============================================================
 # Indicators
@@ -88,7 +102,7 @@ VOLUME_AVG_PERIOD = 20
 # Signal scoring
 # ============================================================
 MIN_SCORE = float(os.getenv("MIN_SCORE", "6.0"))
-EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "3.8"))
+EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "5.0"))
 MIN_ADX = 12.0
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
@@ -117,8 +131,6 @@ DAILY_MAX_LOSS_PERCENT = 0.03
 # ============================================================
 # Scanner
 # ============================================================
-PREWATCH_PRICE_CHANGE = 3.0
-PREWATCH_VOLUME_USDT = 2_000_000
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "30"))
 PREWATCH_SCAN_EVERY = 3
 MAX_PREWATCH_TO_SCAN = 30
