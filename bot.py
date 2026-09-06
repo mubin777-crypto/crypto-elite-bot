@@ -113,16 +113,12 @@ class TradingBot:
         if not await self.cooldown_allowed(symbol, result["direction"]):
             return
 
-        # حفظ الإشارة في قاعدة البيانات (تم إنشاؤها)
         signal_id = await self.db.add_signal(result)
         result["signal_id"] = signal_id
 
-        # محاولة الإرسال
         formatted = self.telegram.format_signal(result)
         await self.telegram.broadcast(formatted)
 
-        # بعد الإرسال، نقوم بتفعيل الـ cooldown فقط إذا كان الإرسال ناجحاً (أو على الأقل حاولنا)
-        # ولكننا سنفعل cooldown بغض النظر، لأن الإشارة صدرت بالفعل.
         await self.db.set_cooldown(symbol, result["direction"])
         logger.info(f"Signal generated: {symbol} {result['direction']} score={result['score']} (id={signal_id})")
 
@@ -186,7 +182,6 @@ class TradingBot:
                 logger.exception(f"Health monitor error: {exc}")
 
     async def self_ping(self):
-        # استخدام جلسة واحدة طويلة العمر
         url = config.RENDER_EXTERNAL_URL or f"http://127.0.0.1:{config.PORT}/health"
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -250,7 +245,6 @@ class TradingBot:
                 result_amount = outcome * self.daily_capital * config.RISK_PER_TRADE
                 await self.db.close_signal(signal_row["id"], result_amount, outcome, exit_reason)
 
-                # تصنيف النتيجة
                 if outcome > 0:
                     category = "win"
                 elif outcome < 0:
@@ -264,9 +258,6 @@ class TradingBot:
 
                 await self.db.add_daily_result(self.daily_capital, result_amount, category)
 
-                # تحديث الأوزان التكيفية بناءً على مساهمة العوامل (نحتاج للحصول على المساهمات من الإشارة)
-                # في هذه النسخة سنحصل على factor_contributions من قاعدة البيانات إذا كانت محفوظة.
-                # هنا نفترض أننا لا نحفظها حالياً، لذا نستخدم update عام مع مساهمة 0.5
                 success = outcome > 0
                 for factor in config.FACTORS:
                     self.weights.update(factor, success, contribution=0.5)
