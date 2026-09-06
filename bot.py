@@ -2,7 +2,6 @@
 # Main Application
 
 import asyncio
-import logging
 import signal
 import time
 from datetime import datetime, timezone
@@ -16,9 +15,6 @@ from utils import (
 from signals import SignalEngine
 from telegram_bot import TelegramBot
 
-# ============================================================
-# Trading Bot
-# ============================================================
 class TradingBot:
     def __init__(self):
         self.running = True
@@ -28,20 +24,17 @@ class TradingBot:
         self.engine = SignalEngine(self.weights)
         self.telegram = TelegramBot(self.db, self.engine, self.fetcher)
         self.last_data_update = {}
-        self.last_scan = 0
         self.scan_counter = 0
         self.daily_capital = config.INITIAL_CAPITAL
         self.last_health_alert = 0
         self.tasks = []
+        self.known_symbols = set(config.CORE_UNIVERSE)
 
         self.app = web.Application()
         self.app.router.add_get("/", self.root)
         self.app.router.add_get("/health", self.health)
         self.app.router.add_post(config.WEBHOOK_PATH, self.telegram_webhook)
 
-    # ========================================================
-    # Load weights
-    # ========================================================
     async def load_weights(self):
         saved = await self.db.get_weights()
         if saved:
@@ -50,9 +43,6 @@ class TradingBot:
             self.telegram.signal_engine = self.engine
             logger.info(f"Adaptive weights loaded: {self.weights.to_dict()}")
 
-    # ========================================================
-    # HTTP handlers
-    # ========================================================
     async def root(self, request):
         return web.json_response({
             "status": "online",
@@ -68,6 +58,7 @@ class TradingBot:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "stale_count": len(stale),
             "stale_symbols": stale[:5],
+            "known_symbols": len(self.known_symbols),
         })
 
     async def telegram_webhook(self, request):
@@ -79,9 +70,6 @@ class TradingBot:
             logger.exception(f"Webhook error: {exc}")
             return web.json_response({"ok": False}, status=500)
 
-    # ========================================================
-    # Cooldown
-    # ========================================================
     async def cooldown_allowed(self, symbol, direction):
         record = await self.db.get_cooldown(symbol)
         if not record:
@@ -100,17 +88,11 @@ class TradingBot:
             return elapsed >= same_direction_limit
         return elapsed >= opposite_limit
 
-    # ========================================================
-    # Daily loss
-    # ========================================================
     async def daily_loss_exceeded(self):
-        pnl = await self.db.get_daily_pnl()
+        stats = await self.db.get_daily_pnl()
         limit = -self.daily_capital * config.DAILY_MAX_LOSS_PERCENT
-        return pnl <= limit
+        return stats["pnl"] <= limit
 
-    # ========================================================
-    # Scan symbol (exclude stablecoins)
-    # ========================================================
     async def scan_symbol(self, symbol):
         if symbol in config.EXCLUDED_SYMBOLS:
             return
@@ -123,7 +105,6 @@ class TradingBot:
         df = klines_to_dataframe(klines)
         if len(df) < 60:
             return
-        # جلب 15m للترند
         klines_15m = await self.fetcher.klines(symbol, config.TREND_INTERVAL, 50)
         df_15m = klines_to_dataframe(klines_15m) if klines_15m else None
         result = self.engine.analyze(symbol, df, self.daily_capital, df_15m)
@@ -131,19 +112,24 @@ class TradingBot:
             return
         if not await self.cooldown_allowed(symbol, result["direction"]):
             return
-        signal_id = await self.db.add_signal(result)
-        await self.db.set_cooldown(symbol, result["direction"])
-        result["signal_id"] = signal_id
-        await self.telegram.broadcast(self.telegram.format_signal(result))
-        logger.info(f"Signal generated: {symbol} {result['direction']} score={result['score']}")
 
-    # ========================================================
-    # Market scan
-    # ========================================================
+        # حفظ الإشارة في قاعدة البيانات (تم إنشاؤها)
+        signal_id = await self.db.add_signal(result)
+        result["signal_id"] = signal_id
+
+        # محاولة الإرسال
+        formatted = self.telegram.format_signal(result)
+        await self.telegram.broadcast(formatted)
+
+        # بعد الإرسال، نقوم بتفعيل الـ cooldown فقط إذا كان الإرسال ناجحاً (أو على الأقل حاولنا)
+        # ولكننا سنفعل cooldown بغض النظر، لأن الإشارة صدرت بالفعل.
+        await self.db.set_cooldown(symbol, result["direction"])
+        logger.info(f"Signal generated: {symbol} {result['direction']} score={result['score']} (id={signal_id})")
+
     async def scan_market(self):
         prewatch = await self.db.get_prewatch(config.MAX_PREWATCH_TO_SCAN)
-        prewatch_symbols = [item["symbol"] for item in prewatch]
-        symbols = list(dict.fromkeys(config.CORE_UNIVERSE + prewatch_symbols))
+        prewatch_symbols = [item["symbol"] for item in prewatch if item["symbol"] not in self.known_symbols]
+        symbols = list(dict.fromkeys(list(self.known_symbols) + prewatch_symbols))
         tasks = [self.scan_symbol(symbol) for symbol in symbols]
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -151,9 +137,6 @@ class TradingBot:
                 if isinstance(result, Exception):
                     logger.error(f"Scan task failed: {result}")
 
-    # ========================================================
-    # Prewatch
-    # ========================================================
     async def scan_prewatch(self):
         data = await self.fetcher.ticker_24h()
         if not isinstance(data, list):
@@ -162,12 +145,20 @@ class TradingBot:
             symbol = item.get("symbol", "").upper()
             if not symbol.endswith("USDT"):
                 continue
-            if symbol in config.CORE_UNIVERSE or symbol in config.EXCLUDED_SYMBOLS:
+            if symbol in self.known_symbols or symbol in config.EXCLUDED_SYMBOLS:
                 continue
             try:
                 change = float(item.get("priceChangePercent", 0))
                 volume = float(item.get("quoteVolume", 0))
+                trades = int(item.get("count", 0))
+                price = float(item.get("lastPrice", 0))
             except (ValueError, TypeError):
+                continue
+            if volume < config.PREWATCH_MIN_VOLUME_USDT:
+                continue
+            if trades < config.PREWATCH_MIN_TRADES:
+                continue
+            if price > config.PREWATCH_MAX_PRICE or price < config.PREWATCH_MIN_PRICE:
                 continue
             if abs(change) > config.PREWATCH_PRICE_CHANGE or volume > config.PREWATCH_VOLUME_USDT:
                 reasons = []
@@ -175,11 +166,9 @@ class TradingBot:
                     reasons.append("price_move")
                 if volume > config.PREWATCH_VOLUME_USDT:
                     reasons.append("high_volume")
-                await self.db.add_prewatch(symbol, ",".join(reasons), change, volume)
+                await self.db.add_prewatch(symbol, ",".join(reasons), change, volume, trades, price)
+                self.known_symbols.add(symbol)
 
-    # ========================================================
-    # Health monitor
-    # ========================================================
     async def health_monitor(self):
         while self.running:
             try:
@@ -196,36 +185,32 @@ class TradingBot:
             except Exception as exc:
                 logger.exception(f"Health monitor error: {exc}")
 
-    # ========================================================
-    # Self ping
-    # ========================================================
     async def self_ping(self):
+        # استخدام جلسة واحدة طويلة العمر
         url = config.RENDER_EXTERNAL_URL or f"http://127.0.0.1:{config.PORT}/health"
         timeout = aiohttp.ClientTimeout(total=10)
-        while self.running:
-            try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            while self.running:
+                try:
                     async with session.get(url) as response:
                         logger.info(f"Self-ping: {response.status}")
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.warning(f"Self-ping failed: {exc}")
-            await asyncio.sleep(config.SELF_PING_INTERVAL)
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    logger.warning(f"Self-ping failed: {exc}")
+                await asyncio.sleep(config.SELF_PING_INTERVAL)
 
-    # ========================================================
-    # Evaluate open signals
-    # ========================================================
     async def evaluate_open_signals(self):
         open_signals = await self.db.get_open_signals()
         if not open_signals:
             return
         for signal_row in open_signals:
             try:
+                signal_time = datetime.fromisoformat(signal_row["created_at"])
                 klines = await self.fetcher.klines(
                     signal_row["symbol"],
                     config.ANALYSIS_INTERVAL,
-                    config.SIGNAL_MAX_HOLD_CANDLES + 1
+                    config.SIGNAL_MAX_HOLD_CANDLES + 5
                 )
                 if not klines:
                     continue
@@ -234,37 +219,63 @@ class TradingBot:
                 tp = float(signal_row["tp"])
                 direction = signal_row["direction"]
                 outcome = None
+                exit_reason = None
+
                 for candle in klines:
+                    candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
+                    if candle_time <= signal_time:
+                        continue
                     high = float(candle[2])
                     low = float(candle[3])
-                    if direction == "BUY":
-                        hit_sl = low <= sl
-                        hit_tp = high >= tp
-                    else:
-                        hit_sl = high >= sl
-                        hit_tp = low <= tp
-                    if hit_sl:
+                    hit_sl = low <= sl if direction == "BUY" else high >= sl
+                    hit_tp = high >= tp if direction == "BUY" else low <= tp
+
+                    if hit_sl and hit_tp:
+                        outcome = 0.0
+                        exit_reason = "INCONCLUSIVE"
+                        break
+                    elif hit_sl:
                         outcome = -1.0
+                        exit_reason = "SL"
                         break
-                    if hit_tp:
+                    elif hit_tp:
                         outcome = 2.0
+                        exit_reason = "TP"
                         break
+
                 if outcome is None:
-                    continue
+                    outcome = 0.0
+                    exit_reason = "TIMEOUT"
+
                 result_amount = outcome * self.daily_capital * config.RISK_PER_TRADE
-                await self.db.close_signal(signal_row["id"], result_amount, outcome)
-                await self.db.add_daily_pnl(self.daily_capital, result_amount)
+                await self.db.close_signal(signal_row["id"], result_amount, outcome, exit_reason)
+
+                # تصنيف النتيجة
+                if outcome > 0:
+                    category = "win"
+                elif outcome < 0:
+                    category = "loss"
+                elif exit_reason == "INCONCLUSIVE":
+                    category = "inconclusive"
+                elif exit_reason == "TIMEOUT":
+                    category = "timeout"
+                else:
+                    category = "breakeven"
+
+                await self.db.add_daily_result(self.daily_capital, result_amount, category)
+
+                # تحديث الأوزان التكيفية بناءً على مساهمة العوامل (نحتاج للحصول على المساهمات من الإشارة)
+                # في هذه النسخة سنحصل على factor_contributions من قاعدة البيانات إذا كانت محفوظة.
+                # هنا نفترض أننا لا نحفظها حالياً، لذا نستخدم update عام مع مساهمة 0.5
                 success = outcome > 0
                 for factor in config.FACTORS:
-                    self.weights.update(factor, success)
+                    self.weights.update(factor, success, contribution=0.5)
                     await self.db.save_weight(factor, self.weights.weights[factor])
-                logger.info(f"Signal evaluated: id={signal_row['id']} result={outcome}")
+
+                logger.info(f"Signal evaluated: id={signal_row['id']} result={outcome} reason={exit_reason}")
             except Exception as exc:
                 logger.exception(f"Signal evaluation error: {exc}")
 
-    # ========================================================
-    # Scanner loop
-    # ========================================================
     async def scanner_loop(self):
         while self.running:
             started = time.monotonic()
@@ -282,9 +293,6 @@ class TradingBot:
             wait = max(1, config.SCAN_INTERVAL - elapsed)
             await asyncio.sleep(wait)
 
-    # ========================================================
-    # Start (add admin as subscriber)
-    # ========================================================
     async def start(self):
         config.validate_config()
         await self.db.init()
@@ -292,11 +300,17 @@ class TradingBot:
         await self.fetcher.start()
         await self.telegram.start()
 
-        # Add admin as subscriber automatically
         admin_id = config.TELEGRAM_ADMIN_ID
         if admin_id:
-            await self.db.add_subscriber(admin_id)
-            logger.info(f"Admin {admin_id} added as subscriber")
+            success = await self.db.add_subscriber(admin_id)
+            if success:
+                logger.info(f"✅ Admin {admin_id} added as subscriber")
+                await self.telegram.send_message(admin_id, "✅ You have been added as a subscriber.")
+            else:
+                logger.error(f"❌ Failed to add admin {admin_id} as subscriber")
+
+        count = await self.db.count_subscribers()
+        logger.info(f"📊 Total active subscribers: {count}")
 
         runner = web.AppRunner(self.app)
         await runner.setup()
@@ -325,15 +339,9 @@ class TradingBot:
             await self.db.close()
             logger.info("System shutdown complete")
 
-    # ========================================================
-    # Stop
-    # ========================================================
     def stop(self):
         self.running = False
 
-# ============================================================
-# Main
-# ============================================================
 async def main():
     bot = TradingBot()
     loop = asyncio.get_running_loop()
