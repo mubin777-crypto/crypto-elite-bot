@@ -22,21 +22,21 @@ class SignalEngine:
 
         scores = {"BUY": {}, "SELL": {}}
 
-        # RSI
-        if rsi_value > config.RSI_OVERBOUGHT:
-            buy_rsi = -1.0
-        elif 45 <= rsi_value <= 65:
-            buy_rsi = 1.0
-        else:
-            buy_rsi = 0.0
-        if rsi_value < config.RSI_OVERSOLD:
-            sell_rsi = -1.0
-        elif 35 <= rsi_value <= 55:
-            sell_rsi = 1.0
-        else:
-            sell_rsi = 0.0
-        scores["BUY"]["rsi"] = buy_rsi
-        scores["SELL"]["rsi"] = sell_rsi
+        # ----------------------------------------------------
+        # RSI with Overbought/Oversold Penalty
+        # ----------------------------------------------------
+        rsi_buy = 1.0 if 45 <= rsi_value <= 65 else 0.0
+        rsi_sell = 1.0 if 35 <= rsi_value <= 55 else 0.0
+
+        # 🔥 عقوبة التشبع: RSI > 70 يمنع الشراء، RSI < 30 يمنع البيع
+        if config.ENABLE_RSI_FILTER:
+            if rsi_value > config.RSI_OVERBOUGHT:
+                rsi_buy = -1.0  # عقوبة قوية
+            if rsi_value < config.RSI_OVERSOLD:
+                rsi_sell = -1.0
+
+        scores["BUY"]["rsi"] = rsi_buy
+        scores["SELL"]["rsi"] = rsi_sell
 
         # ADX
         scores["BUY"]["adx"] = 1.0 if (adx_value > config.MIN_ADX and momentum_value > 0) else 0.0
@@ -182,7 +182,7 @@ class SignalEngine:
         if direction is None:
             return None
 
-        # RSI protection
+        # 🔥 فلتر RSI الإضافي (طبقة أمان مزدوجة)
         rsi_value = float(latest["rsi"])
         if config.ENABLE_RSI_FILTER:
             if direction == "BUY" and rsi_value > config.RSI_OVERBOUGHT:
@@ -212,7 +212,7 @@ class SignalEngine:
             trend_ema50 = df_15m["close"].ewm(span=50).mean().iloc[-1] if len(df_15m) >= 50 else trend_close
             trend_slope = trend_close - trend_ema50
         else:
-            trend_slope = momentum(df, period=20).iloc[-1] if len(df) >= 20 else 0
+            trend_slope = 0
 
         if direction == "BUY" and trend_slope > 0:
             score += 1.0
