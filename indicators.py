@@ -6,15 +6,9 @@ import numpy as np
 import pandas as pd
 import config
 
-# ============================================================
-# Helpers
-# ============================================================
 def _series(df, column):
     return pd.to_numeric(df[column], errors="coerce")
 
-# ============================================================
-# RSI
-# ============================================================
 def rsi(df, period=None):
     period = period or config.RSI_PERIOD
     close = _series(df, "close")
@@ -28,9 +22,6 @@ def rsi(df, period=None):
     result = result.where(result.notna(), np.where(avg_gain > 0, 100, 50))
     return result
 
-# ============================================================
-# True Range
-# ============================================================
 def true_range(df):
     high = _series(df, "high")
     low = _series(df, "low")
@@ -42,17 +33,11 @@ def true_range(df):
         (low - previous_close).abs(),
     ], axis=1).max(axis=1)
 
-# ============================================================
-# ATR
-# ============================================================
 def atr(df, period=None):
     period = period or config.ATR_PERIOD
     tr = true_range(df)
     return tr.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
 
-# ============================================================
-# ADX
-# ============================================================
 def adx(df, period=None):
     period = period or config.ADX_PERIOD
     high = _series(df, "high")
@@ -75,9 +60,6 @@ def adx(df, period=None):
     dx = 100 * (plus_di - minus_di).abs() / denominator
     return dx.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
 
-# ============================================================
-# Bollinger Bands
-# ============================================================
 def bollinger_bands(df, period=None, std_multiplier=None):
     period = period or config.BB_PERIOD
     std_multiplier = std_multiplier or config.BB_STD
@@ -89,9 +71,6 @@ def bollinger_bands(df, period=None, std_multiplier=None):
     width = (upper - lower) / middle.replace(0, np.nan)
     return middle, upper, lower, width
 
-# ============================================================
-# MACD
-# ============================================================
 def macd(df, fast=None, slow=None, signal=None):
     fast = fast or config.MACD_FAST
     slow = slow or config.MACD_SLOW
@@ -104,26 +83,17 @@ def macd(df, fast=None, slow=None, signal=None):
     histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
 
-# ============================================================
-# Momentum
-# ============================================================
 def momentum(df, period=None):
     period = period or config.MOMENTUM_PERIOD
     close = _series(df, "close")
     return close.pct_change(periods=period) * 100
 
-# ============================================================
-# Volume Ratio
-# ============================================================
 def volume_ratio(df, period=None):
     period = period or config.VOLUME_AVG_PERIOD
     volume = _series(df, "volume")
     average = volume.rolling(period).mean()
     return volume / average.replace(0, np.nan)
 
-# ============================================================
-# Daily Pivot
-# ============================================================
 def pivot_points(df):
     if len(df) < 2:
         return {"pivot": np.nan, "r1": np.nan, "r2": np.nan, "s1": np.nan, "s2": np.nan}
@@ -138,9 +108,6 @@ def pivot_points(df):
     s2 = pivot - high + low
     return {"pivot": pivot, "r1": r1, "r2": r2, "s1": s1, "s2": s2}
 
-# ============================================================
-# Add all indicators
-# ============================================================
 def add_indicators(df):
     result = df.copy()
     result["rsi"] = rsi(result)
@@ -152,9 +119,6 @@ def add_indicators(df):
     result["volume_ratio"] = volume_ratio(result)
     return result
 
-# ============================================================
-# Early Snipe
-# ============================================================
 def detect_early_snipe(df):
     if len(df) < 25:
         return {"active": False, "direction": None, "score": 0}
