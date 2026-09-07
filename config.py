@@ -1,6 +1,4 @@
 # config.py
-# Quant Crypto Signal System v2026
-
 import os
 from pathlib import Path
 
@@ -16,8 +14,8 @@ SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
-TELEGRAM_USE_WEBHOOK = os.getenv("TELEGRAM_USE_WEBHOOK", "true").lower() == "true"
-TELEGRAM_FALLBACK_POLLING = os.getenv("TELEGRAM_FALLBACK_POLLING", "false").lower() == "true"
+TELEGRAM_USE_WEBHOOK = os.getenv("TELEGRAM_USE_WEBHOOK", "false").lower() == "true"  # ✅ false
+TELEGRAM_FALLBACK_POLLING = os.getenv("TELEGRAM_FALLBACK_POLLING", "true").lower() == "true"
 TELEGRAM_API_TIMEOUT = int(os.getenv("TELEGRAM_API_TIMEOUT", "15"))
 TELEGRAM_RETRY_BACKOFF_BASE = 1.0
 TELEGRAM_MAX_RETRIES = 5
