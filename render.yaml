@@ -1,0 +1,25 @@
+version: "1"
+projects:
+- name: crypto-elite-bot
+  environments:
+  - name: Runtime
+    services:
+    - type: web
+      name: crypto-elite-bot
+      runtime: python
+      repo: https://github.com/mubin777-crypto/crypto-elite-bot
+      branch: main   # غيّر حسب الحاجة
+      plan: free
+      envVars:
+      - key: TELEGRAM_USE_WEBHOOK
+        value: false
+      - key: WEBHOOK_URL
+        value: https://crypto-elite-bot.onrender.com
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false   # أو ضع القيمة مباشرة
+      - key: TELEGRAM_ADMIN_ID
+        sync: false
+      region: ohio
+      buildCommand: pip install -r requirements.txt
+      startCommand: python bot.py
+      autoDeployTrigger: commit
