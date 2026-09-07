@@ -1,12 +1,11 @@
 # telegram_bot.py
-# Telegram Webhook & Polling Interface
+# Telegram Bot - Production Ready
 
 import asyncio
 import logging
 import aiohttp
 import html
 import config
-import time
 from datetime import datetime, timezone
 
 logger = logging.getLogger("quant_bot.telegram")
@@ -23,6 +22,8 @@ class TelegramBot:
         self.admin_id = config.TELEGRAM_ADMIN_ID
         self.polling_task = None
         self.last_update_id = 0
+        self.is_running = False
+        self._webhook_set = False
 
     def safe_text(self, text):
         return html.escape(str(text))
@@ -30,60 +31,85 @@ class TelegramBot:
     async def start(self):
         if not self.token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
+
+        self.is_running = True
         timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
         self.session = aiohttp.ClientSession(timeout=timeout)
 
         if self.webhook_mode:
-            webhook_url = config.WEBHOOK_URL.rstrip("/") + config.WEBHOOK_PATH
-            result = await self.api_call("setWebhook", {
-                "url": webhook_url,
-                "drop_pending_updates": False,
-                "allowed_updates": ["message"],
-            })
-            if not result or not result.get("ok", False):
-                logger.warning("Failed to register webhook, falling back to polling")
-                self.webhook_mode = False
-            else:
-                logger.info(f"Telegram webhook registered: {webhook_url}")
-
-        if not self.webhook_mode:
+            logger.info("ℹ️ Telegram Webhook mode enabled (will be set by bot.py)")
+        else:
             await self.api_call("deleteWebhook", {"drop_pending_updates": True})
-            logger.info("Telegram polling mode selected")
+            logger.info("ℹ️ Telegram polling mode selected")
             self.polling_task = asyncio.create_task(self.polling_loop())
 
         if self.admin_id:
             await self.send_message(self.admin_id, "🤖 <b>Bot started successfully!</b>")
 
     async def close(self):
-        if self.polling_task:
+        self.is_running = False
+        if self.polling_task and not self.polling_task.done():
             self.polling_task.cancel()
             try:
                 await self.polling_task
             except asyncio.CancelledError:
                 pass
-        if self.session:
+        if self.session and not self.session.closed:
             await self.session.close()
             self.session = None
 
+    async def set_webhook(self, webhook_url: str) -> bool:
+        if not self.session:
+            timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
+            self.session = aiohttp.ClientSession(timeout=timeout)
+
+        result = await self.api_call("setWebhook", {
+            "url": webhook_url,
+            "drop_pending_updates": False,
+            "allowed_updates": ["message"],
+        })
+
+        if result and result.get("ok"):
+            self._webhook_set = True
+            logger.info(f"✅ Webhook registered: {webhook_url}")
+            return True
+        else:
+            logger.error(f"❌ Failed to register webhook: {result}")
+            return False
+
+    async def delete_webhook(self) -> bool:
+        if not self.session:
+            timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
+            self.session = aiohttp.ClientSession(timeout=timeout)
+
+        result = await self.api_call("deleteWebhook", {"drop_pending_updates": True})
+        if result and result.get("ok"):
+            self._webhook_set = False
+            logger.info("✅ Webhook deleted successfully")
+            return True
+        else:
+            logger.warning(f"⚠️ Failed to delete webhook: {result}")
+            return False
+
     async def polling_loop(self):
-        """حلقة Polling لتلقي التحديثات من Telegram"""
-        while True:
+        while self.is_running:
             try:
                 await asyncio.sleep(1)
-                params = {"offset": self.last_update_id + 1, "timeout": 10}
+                params = {"offset": self.last_update_id + 1, "timeout": 30}
                 result = await self.api_call("getUpdates", params)
                 if result and result.get("ok"):
                     updates = result.get("result", [])
                     for update in updates:
                         self.last_update_id = update.get("update_id", self.last_update_id)
                         await self.handle_update(update)
-                else:
-                    logger.warning("Polling error: no updates")
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error(f"Polling loop error: {exc}")
                 await asyncio.sleep(5)
+
+    async def process_update(self, update: dict):
+        await self.handle_update(update)
 
     async def api_call(self, method, payload=None, retries=config.TELEGRAM_MAX_RETRIES):
         if not self.session:
@@ -150,6 +176,7 @@ class TelegramBot:
         if self.admin_id and self.admin_id not in subscribers:
             subscribers = [self.admin_id] + subscribers
 
+        blocked_users = []
         success_count = 0
         failure_count = 0
         for user_id in subscribers:
@@ -158,12 +185,23 @@ class TelegramBot:
                 if result and result.get("ok"):
                     success_count += 1
                 else:
+                    if result and result.get("error_code") == 403:
+                        logger.warning(f"User {user_id} blocked the bot, removing from subscribers")
+                        await self.database.remove_subscriber(user_id)
+                        blocked_users.append(user_id)
                     failure_count += 1
                 await asyncio.sleep(0.05)
             except Exception as exc:
                 failure_count += 1
-                logger.warning(f"Broadcast exception for {user_id}: {exc}")
+                if "403" in str(exc):
+                    logger.warning(f"User {user_id} blocked the bot, removing from subscribers")
+                    await self.database.remove_subscriber(user_id)
+                    blocked_users.append(user_id)
+                else:
+                    logger.warning(f"Broadcast exception for {user_id}: {exc}")
 
+        if blocked_users:
+            logger.info(f"Removed blocked users: {blocked_users}")
         logger.info(f"✅ Broadcast: {success_count}/{len(subscribers)} sent, {failure_count} failed")
 
     async def handle_update(self, update):
@@ -359,12 +397,14 @@ class TelegramBot:
         emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
         snipe = "\n🎯 <b>EARLY SNIPE</b>" if signal.get("early_snipe") else ""
         quality_label = f"Quality: {signal.get('quality', 0)}%" if signal.get('quality') else ""
+        risk_label = f"Risk: {signal.get('actual_risk_percent', 0):.2f}%" if signal.get('actual_risk_percent') else ""
 
         return (
             f"{emoji} <b>{self.safe_text(signal['symbol'])}</b>\n\n"
             f"Direction: <b>{self.safe_text(signal['direction'])}</b>\n"
             f"Score: <b>{self.safe_text(signal['score'])}/10</b>\n"
-            f"{quality_label}\n\n"
+            f"{quality_label}\n"
+            f"{risk_label}\n\n"
             f"Entry: {fmt(signal['entry'])}\n"
             f"SL: {fmt(signal['sl'])}\n"
             f"TP: {fmt(signal['tp'])}\n"
