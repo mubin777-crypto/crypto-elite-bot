@@ -286,6 +286,10 @@ class TradingBot:
 
     async def start(self):
         config.validate_config()
+
+        # ✅ طباعة إعدادات Binance للتأكد من استخدام data-api.binance.vision
+        logger.info(f"🔧 BINANCE_ENDPOINTS: {config.BINANCE_ENDPOINTS}")
+
         await self.db.init()
         await self.load_weights()
         await self.fetcher.start()
