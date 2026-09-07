@@ -1,5 +1,5 @@
 # telegram_bot.py
-# Telegram Webhook Interface
+# Telegram Webhook & Polling Interface
 
 import asyncio
 import logging
@@ -21,6 +21,8 @@ class TelegramBot:
         self.session = None
         self.webhook_mode = config.TELEGRAM_USE_WEBHOOK
         self.admin_id = config.TELEGRAM_ADMIN_ID
+        self.polling_task = None
+        self.last_update_id = 0
 
     def safe_text(self, text):
         return html.escape(str(text))
@@ -32,7 +34,6 @@ class TelegramBot:
         self.session = aiohttp.ClientSession(timeout=timeout)
 
         if self.webhook_mode:
-            # ✅ بناء webhook_url بشكل صحيح (بدون تكرار)
             webhook_url = config.WEBHOOK_URL.rstrip("/") + config.WEBHOOK_PATH
             result = await self.api_call("setWebhook", {
                 "url": webhook_url,
@@ -40,19 +41,49 @@ class TelegramBot:
                 "allowed_updates": ["message"],
             })
             if not result or not result.get("ok", False):
-                raise RuntimeError("Failed to register Telegram webhook")
-            logger.info(f"Telegram webhook registered: {webhook_url}")
-        else:
+                logger.warning("Failed to register webhook, falling back to polling")
+                self.webhook_mode = False
+            else:
+                logger.info(f"Telegram webhook registered: {webhook_url}")
+
+        if not self.webhook_mode:
             await self.api_call("deleteWebhook", {"drop_pending_updates": True})
             logger.info("Telegram polling mode selected")
+            self.polling_task = asyncio.create_task(self.polling_loop())
 
         if self.admin_id:
             await self.send_message(self.admin_id, "🤖 <b>Bot started successfully!</b>")
 
     async def close(self):
+        if self.polling_task:
+            self.polling_task.cancel()
+            try:
+                await self.polling_task
+            except asyncio.CancelledError:
+                pass
         if self.session:
             await self.session.close()
             self.session = None
+
+    async def polling_loop(self):
+        """حلقة Polling لتلقي التحديثات من Telegram"""
+        while True:
+            try:
+                await asyncio.sleep(1)
+                params = {"offset": self.last_update_id + 1, "timeout": 10}
+                result = await self.api_call("getUpdates", params)
+                if result and result.get("ok"):
+                    updates = result.get("result", [])
+                    for update in updates:
+                        self.last_update_id = update.get("update_id", self.last_update_id)
+                        await self.handle_update(update)
+                else:
+                    logger.warning("Polling error: no updates")
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error(f"Polling loop error: {exc}")
+                await asyncio.sleep(5)
 
     async def api_call(self, method, payload=None, retries=config.TELEGRAM_MAX_RETRIES):
         if not self.session:
