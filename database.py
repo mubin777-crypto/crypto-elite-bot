@@ -17,6 +17,7 @@ class Database:
         self.database_url = config.DATABASE_URL
 
     async def init(self):
+        """تهيئة قاعدة البيانات"""
         if self.use_postgres and self.database_url:
             await self._init_postgres()
         else:
@@ -24,6 +25,7 @@ class Database:
         logger.info(f"Database initialized: {'PostgreSQL' if self.use_postgres else 'SQLite'}")
 
     async def _init_postgres(self):
+        """تهيئة PostgreSQL"""
         try:
             import asyncpg
             self.conn = await asyncpg.connect(self.database_url)
@@ -101,6 +103,7 @@ class Database:
             """)
             logger.info("PostgreSQL tables created")
 
+            # إنشاء الأوزان الأولية
             for factor in config.FACTORS:
                 existing = await self.get_weight(factor)
                 if existing is None:
@@ -116,6 +119,7 @@ class Database:
             await self._init_sqlite()
 
     async def _init_sqlite(self):
+        """تهيئة SQLite"""
         import aiosqlite
         self.conn = await aiosqlite.connect(self.db_path)
         self.conn.row_factory = aiosqlite.Row
@@ -194,12 +198,14 @@ class Database:
         """)
         await self.conn.commit()
 
+        # إنشاء الأوزان الأولية
         for factor in config.FACTORS:
             existing = await self.get_weight(factor)
             if existing is None:
                 await self.save_weight(factor, 1.0)
 
     async def close(self):
+        """إغلاق اتصال قاعدة البيانات"""
         if self.conn:
             await self.conn.close()
             self.conn = None
@@ -435,6 +441,24 @@ class Database:
     # ============================================================
     # Adaptive Weights
     # ============================================================
+    async def get_weight(self, factor):
+        """الحصول على وزن عامل معين"""
+        try:
+            if self.use_postgres:
+                row = await self.conn.fetchrow(
+                    "SELECT weight FROM adaptive_weights WHERE factor = $1", factor
+                )
+                return float(row["weight"]) if row else None
+            else:
+                cursor = await self.conn.execute(
+                    "SELECT weight FROM adaptive_weights WHERE factor = ?", (factor,)
+                )
+                row = await cursor.fetchone()
+                return float(row["weight"]) if row else None
+        except Exception as e:
+            logger.error(f"Failed to get weight for {factor}: {e}")
+            return None
+
     async def save_weight(self, factor, weight):
         now = datetime.now(timezone.utc).isoformat()
         try:
