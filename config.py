@@ -4,15 +4,9 @@
 import os
 from pathlib import Path
 
-# ============================================================
-# Base
-# ============================================================
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "trading_bot.db"))
 
-# ============================================================
-# Render
-# ============================================================
 PORT = int(os.getenv("PORT", "10000"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
@@ -20,9 +14,6 @@ WEBHOOK_PATH = "/webhook"
 HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "600"))
 SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))
 
-# ============================================================
-# Telegram
-# ============================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 TELEGRAM_USE_WEBHOOK = os.getenv("TELEGRAM_USE_WEBHOOK", "true").lower() == "true"
@@ -32,10 +23,10 @@ TELEGRAM_RETRY_BACKOFF_BASE = 1.0
 TELEGRAM_MAX_RETRIES = 5
 
 # ============================================================
-# Binance - الأولوية القصوى لـ data-api.binance.vision
+# Binance - الترتيب النهائي
 # ============================================================
 BINANCE_ENDPOINTS = [
-    "https://data-api.binance.vision",   # ✅ الأولوية الأولى - يعمل من أي مكان
+    "https://data-api.binance.vision",   # ✅ الأولوية الأولى
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
@@ -47,9 +38,7 @@ BINANCE_RETRIES = 2
 MAX_CONCURRENT_REQUESTS = 10
 REQUEST_DELAY = 0.05
 
-# ============================================================
-# Core Universe
-# ============================================================
+# باقي الإعدادات...
 CORE_UNIVERSE = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
     "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "MATICUSDT", "UNIUSDT",
@@ -60,14 +49,8 @@ CORE_UNIVERSE = [
     "AXSUSDT", "THETAUSDT", "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT",
 ]
 
-# ============================================================
-# Excluded stablecoins
-# ============================================================
 EXCLUDED_SYMBOLS = ["USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT"]
 
-# ============================================================
-# Pre-watch strict filters
-# ============================================================
 PREWATCH_MIN_VOLUME_USDT = 5_000_000
 PREWATCH_MIN_TRADES = 5000
 PREWATCH_MAX_PRICE = 1000.0
@@ -75,18 +58,12 @@ PREWATCH_MIN_PRICE = 0.00001
 PREWATCH_PRICE_CHANGE = 3.0
 PREWATCH_VOLUME_USDT = 2_000_000
 
-# ============================================================
-# Timeframes
-# ============================================================
 ANALYSIS_INTERVAL = "5m"
 TREND_INTERVAL = "15m"
 DAILY_INTERVAL = "1d"
 KLINE_LIMIT = 250
 BACKTEST_LIMIT = 5000
 
-# ============================================================
-# Indicators
-# ============================================================
 RSI_PERIOD = 6
 ADX_PERIOD = 14
 ATR_PERIOD = 14
@@ -98,30 +75,18 @@ BB_STD = 2.0
 MOMENTUM_PERIOD = 5
 VOLUME_AVG_PERIOD = 20
 
-# ============================================================
-# Signal scoring
-# ============================================================
 MIN_SCORE = float(os.getenv("MIN_SCORE", "6.0"))
 EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "5.0"))
 MIN_ADX = 12.0
 
-# ============================================================
-# RSI Overbought/Oversold Filters
-# ============================================================
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
 ENABLE_RSI_FILTER = True
 
-# ============================================================
-# Early breakout
-# ============================================================
 SQUEEZE_BB_WIDTH = 0.02
 SILENT_VOLUME_MULTIPLIER = 1.8
 RESISTANCE_DISTANCE = 0.015
 
-# ============================================================
-# Risk
-# ============================================================
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "10000"))
 RISK_PER_TRADE = 0.01
 MAX_POSITION_PERCENT = 0.50
@@ -132,35 +97,20 @@ COOLDOWN_MINUTES = 45
 OPPOSITE_COOLDOWN_HOURS = 4
 DAILY_MAX_LOSS_PERCENT = 0.03
 
-# ============================================================
-# Scanner
-# ============================================================
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "30"))
 PREWATCH_SCAN_EVERY = 3
 MAX_PREWATCH_TO_SCAN = 30
 
-# ============================================================
-# Signal evaluation
-# ============================================================
 SIGNAL_MAX_HOLD_CANDLES = 1
 SIGNAL_EVALUATION_INTERVAL = 60
 
-# ============================================================
-# Adaptive weights
-# ============================================================
 FACTORS = [
     "rsi", "adx", "momentum", "volume",
     "bollinger", "macd", "pivot",
 ]
 
-# ============================================================
-# Logging
-# ============================================================
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# ============================================================
-# Validation
-# ============================================================
 def validate_config():
     errors = []
     if not TELEGRAM_BOT_TOKEN:
