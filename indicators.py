@@ -122,11 +122,17 @@ def add_indicators(df):
 def detect_early_snipe(df):
     if len(df) < 25:
         return {"active": False, "direction": None, "score": 0}
+
     latest = df.iloc[-1]
-    close = float(latest["close"])
-    bb_width = float(latest["bb_width"])
-    vol_ratio = float(latest["volume_ratio"])
-    adx_val = float(latest["adx"])
+
+    close = float(latest["close"]) if np.isfinite(latest["close"]) else None
+    bb_width = float(latest["bb_width"]) if np.isfinite(latest["bb_width"]) else None
+    vol_ratio = float(latest["volume_ratio"]) if np.isfinite(latest["volume_ratio"]) else None
+    adx_val = float(latest["adx"]) if np.isfinite(latest["adx"]) else None
+
+    if None in [close, bb_width, vol_ratio, adx_val]:
+        return {"active": False, "direction": None, "score": 0}
+
     recent_high = float(df["high"].iloc[-20:].max())
     recent_low = float(df["low"].iloc[-20:].min())
     resistance_distance = (recent_high - close) / close
