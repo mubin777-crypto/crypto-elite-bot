@@ -1,5 +1,5 @@
 # backtest.py
-# Historical Backtesting
+# Historical Backtesting with Fees & Slippage
 
 import argparse
 import asyncio
@@ -12,13 +12,14 @@ from indicators import add_indicators
 from signals import SignalEngine
 from utils import DataFetcher, klines_to_dataframe
 
-def simulate_trade(signal, future_candles, signal_time=None):
+def calculate_trade_result(signal, future_candles, signal_time=None):
     direction = signal["direction"]
     entry = float(signal["entry"])
     sl = float(signal["sl"])
     tp = float(signal["tp"])
     risk = abs(entry - sl)
-    hit_counts = {"sl": 0, "tp": 0, "both": 0}
+
+    fee_slippage = config.TRADING_FEE_PERCENT + config.SLIPPAGE_PERCENT
 
     for candle in future_candles:
         candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
@@ -30,22 +31,20 @@ def simulate_trade(signal, future_candles, signal_time=None):
         hit_tp = high >= tp if direction == "BUY" else low <= tp
 
         if hit_sl and hit_tp:
-            hit_counts["both"] += 1
-            return {"result_r": 0.0, "outcome": "INCONCLUSIVE", "reason": "SL_TP_SAME_CANDLE"}
+            return {"result_r": -1.0, "outcome": "LOSS", "reason": "SL_TP_SAME_CANDLE"}
         elif hit_sl:
-            hit_counts["sl"] += 1
             return {"result_r": -1.0, "outcome": "LOSS", "reason": "SL"}
         elif hit_tp:
-            hit_counts["tp"] += 1
-            reward = abs(tp - entry)
-            r = reward / risk if risk > 0 else 0
+            gross_reward = abs(tp - entry)
+            net_reward = gross_reward * (1 - fee_slippage)
+            r = net_reward / risk if risk > 0 else 0
             return {"result_r": r, "outcome": "WIN", "reason": "TP"}
 
-    return {"result_r": 0.0, "outcome": "TIMEOUT", "reason": "TIMEOUT", "hit_counts": hit_counts}
+    return {"result_r": 0.0, "outcome": "TIMEOUT", "reason": "TIMEOUT"}
 
 async def backtest_symbol(fetcher, engine, symbol, limit=config.BACKTEST_LIMIT):
     raw = await fetcher.klines(symbol, config.ANALYSIS_INTERVAL, limit)
-    if not raw or len(raw) < 120:
+    if not raw or len(raw) < 200:
         return None
 
     results = []
@@ -59,7 +58,7 @@ async def backtest_symbol(fetcher, engine, symbol, limit=config.BACKTEST_LIMIT):
         signal = engine.analyze(symbol, df, config.INITIAL_CAPITAL)
         if not signal:
             continue
-        outcome = simulate_trade(signal, future, signal_time)
+        outcome = calculate_trade_result(signal, future, signal_time)
         results.append(outcome)
 
     if not results:
@@ -68,7 +67,7 @@ async def backtest_symbol(fetcher, engine, symbol, limit=config.BACKTEST_LIMIT):
     wins = [x for x in results if x["outcome"] == "WIN"]
     losses = [x for x in results if x["outcome"] == "LOSS"]
     timeouts = [x for x in results if x["outcome"] == "TIMEOUT"]
-    inconclusive = [x for x in results if x["outcome"] == "INCONCLUSIVE"]
+    both_events = [x for x in results if x.get("reason") == "SL_TP_SAME_CANDLE"]
 
     win_rate = len(wins) / len(results) * 100
     gross_profit = sum(x["result_r"] for x in wins)
@@ -101,7 +100,7 @@ async def backtest_symbol(fetcher, engine, symbol, limit=config.BACKTEST_LIMIT):
         "wins": len(wins),
         "losses": len(losses),
         "timeouts": len(timeouts),
-        "inconclusive": len(inconclusive),
+        "both_events": len(both_events),
         "win_rate": round(win_rate, 2),
         "profit_factor": "INF" if math.isinf(profit_factor) else round(profit_factor, 3),
         "average_R": round(average_r, 4),
