@@ -35,7 +35,7 @@ TELEGRAM_MAX_RETRIES = 5
 # Binance - الأولوية القصوى لـ data-api.binance.vision
 # ============================================================
 BINANCE_ENDPOINTS = [
-    "https://data-api.binance.vision",   # ✅ الأولوية الأولى
+    "https://data-api.binance.vision",   # ✅ الأولوية الأولى - يعمل من أي مكان
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
