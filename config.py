@@ -23,7 +23,7 @@ TELEGRAM_RETRY_BACKOFF_BASE = 1.0
 TELEGRAM_MAX_RETRIES = 5
 
 # ============================================================
-# Binance - الترتيب النهائي
+# Binance - الأولوية القصوى لـ data-api.binance.vision
 # ============================================================
 BINANCE_ENDPOINTS = [
     "https://data-api.binance.vision",   # ✅ الأولوية الأولى
