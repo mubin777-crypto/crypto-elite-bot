@@ -35,9 +35,11 @@ SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 TELEGRAM_USE_WEBHOOK = os.getenv("TELEGRAM_USE_WEBHOOK", "false").lower() == "true"
-TELEGRAM_API_TIMEOUT = int(os.getenv("TELEGRAM_API_TIMEOUT", "15"))
+# ✅ إصلاح: يجب أن يكون أكبر من 30 (long-poll timeout) + buffer
+TELEGRAM_API_TIMEOUT = int(os.getenv("TELEGRAM_API_TIMEOUT", "45"))
+TELEGRAM_LONG_POLL_TIMEOUT = int(os.getenv("TELEGRAM_LONG_POLL_TIMEOUT", "25"))
 TELEGRAM_RETRY_BACKOFF_BASE = 1.0
-TELEGRAM_MAX_RETRIES = 5
+TELEGRAM_MAX_RETRIES = 3
 
 # ============================================================
 # Binance
@@ -81,7 +83,31 @@ CORE_UNIVERSE = [
     "AXSUSDT", "THETAUSDT", "EGLDUSDT", "ENJUSDT", "FLOWUSDT", "GALAUSDT",
 ]
 
-EXCLUDED_SYMBOLS = ["USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT"]
+# ============================================================
+# ✅ استبعاد العملات المستقرة والأسهم المرمزة والعملات السياسية
+# ============================================================
+EXCLUDED_SYMBOLS = [
+    # عملات مستقرة
+    "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT",
+    "FDUSDUSDT", "PYUSDUSDT", "USDDUSDT", "RLUSDUSDT", "USTCUSDT",
+    "EURUSDT", "TRYUSDT", "BRLUSDT", "ARSUSDT", "BIDRUSDT",
+    "AEURUSDT", "EURIUSDT", "USD1USDT",
+    # عملات سياسية / meme
+    "TRUMPUSDT", "WLFIUSDT", "MELANIAUSDT", "BIDENUSDT",
+    # أسهم مُرمّزة - سنستخدم منطق إضافي لاستبعاد أي شيء ينتهي بـ BUSDT
+]
+
+# ✅ أنماط لاستبعاد الأسهم المرمّزة والعملات الغريبة
+EXCLUDED_SUFFIXES = [
+    "BUSD",        # Binance USD (stablecoin)
+    "UPUSDT",      # Leveraged tokens
+    "DOWNUSDT",    # Leveraged tokens
+    "BULLUSDT",    # Leveraged tokens
+    "BEARUSDT",    # Leveraged tokens
+]
+
+# ✅ الأسهم المرمّزة على Binance تنتهي بـ "BUSDT" (مثل: MSTRBUSDT, QQQBUSDT)
+EXCLUDE_TOKENIZED_STOCKS = True
 
 # ============================================================
 # Pre-watch
@@ -117,57 +143,52 @@ MOMENTUM_PERIOD = 5
 VOLUME_AVG_PERIOD = 20
 
 # ============================================================
-# 🔥 Signal scoring - عتبات مشددة لإشارات قوية فقط
+# Signal scoring - عتبات مشددة
 # ============================================================
-MIN_SCORE = float(os.getenv("MIN_SCORE", "7.5"))        # ✅ رُفع من 6.0 إلى 7.5
-EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "7.0"))  # ✅ رُفع من 5.0 إلى 7.0
-MIN_ADX = float(os.getenv("MIN_ADX", "20.0"))           # ✅ رُفع من 12 إلى 20 (اتجاه قوي)
-MIN_FACTORS_ALIGNED = 5                                 # ✅ 5 من 7 عوامل على الأقل
+MIN_SCORE = float(os.getenv("MIN_SCORE", "7.5"))
+EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "7.0"))
+MIN_ADX = float(os.getenv("MIN_ADX", "20.0"))
+MIN_FACTORS_ALIGNED = 5
 
 # ============================================================
-# RSI Filters - نطاقات مشددة
+# RSI Filters
 # ============================================================
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
-RSI_BUY_ZONE_MIN = 40.0    # ✅ نطاق الشراء الأمثل
+RSI_BUY_ZONE_MIN = 40.0
 RSI_BUY_ZONE_MAX = 60.0
 RSI_SELL_ZONE_MIN = 40.0
 RSI_SELL_ZONE_MAX = 60.0
 ENABLE_RSI_FILTER = True
 
 # ============================================================
-# 🔥 Explosion Detection (كشف الانفجارات)
+# Explosion Detection
 # ============================================================
-# شروط الانضغاط
-SQUEEZE_BB_WIDTH = 0.015              # ✅ أكثر تشدداً (1.5% بدلاً من 2%)
-SQUEEZE_MIN_CANDLES = 5               # ✅ الانضغاط يجب أن يستمر 5 شموع على الأقل
-SQUEEZE_WIDTH_TREND_CANDLES = 3       # ✅ عرض البولينجر يجب أن يكون في تضييق
-KELTNER_PERIOD = 20                   # ✅ TTM Squeeze - Keltner
+SQUEEZE_BB_WIDTH = 0.015
+SQUEEZE_MIN_CANDLES = 5
+SQUEEZE_WIDTH_TREND_CANDLES = 3
+KELTNER_PERIOD = 20
 KELTNER_ATR_MULT = 1.5
 
-# شروط الحجم
-SILENT_VOLUME_MULTIPLIER = 1.5        # ✅ الحجم الحالي مقارنة بالمتوسط
-VOLUME_TREND_MULTIPLIER = 1.2         # ✅ متوسط 3 شموع أعلى من 20 شمعة بـ 20%
-VOLUME_MIN_CONSECUTIVE = 3            # ✅ 3 شموع متتالية بحجم مرتفع
+SILENT_VOLUME_MULTIPLIER = 1.5
+VOLUME_TREND_MULTIPLIER = 1.2
+VOLUME_MIN_CONSECUTIVE = 3
 
-# شروط السعر
-RESISTANCE_DISTANCE = 0.008           # ✅ 0.8% من القمة (أقرب من السابق)
-CONSOLIDATION_RANGE_MAX = 0.025       # ✅ نطاق التذبذب أقل من 2.5%
-HIGHER_LOWS_COUNT = 3                 # ✅ 3 قيعان صاعدة
-BREAKOUT_CONFIRMATION_PCT = 0.003     # ✅ اختراق بـ 0.3% على الأقل
+RESISTANCE_DISTANCE = 0.008
+CONSOLIDATION_RANGE_MAX = 0.025
+HIGHER_LOWS_COUNT = 3
+BREAKOUT_CONFIRMATION_PCT = 0.003
 
-# شروط الزخم
-MOMENTUM_MIN = 0.3                    # ✅ زخم 5 شموع > 0.3%
-MOMENTUM_MAX = 5.0                    # ✅ حد أقصى لمنع الشراء في القمم
+MOMENTUM_MIN = 0.3
+MOMENTUM_MAX = 5.0
 
 # ============================================================
-# 🔥 Quality Gate (بوابة الجودة النهائية)
+# Quality Gate
 # ============================================================
-# يجب أن تجتاز الإشارة كل هذه الشروط قبل الإرسال
-MIN_QUALITY_PERCENT = 75.0            # ✅ الحد الأدنى للجودة 75%
-REQUIRE_TREND_ALIGNMENT = True        # ✅ الترند 15m يجب أن يكون متوافقاً
-REQUIRE_VOLUME_CONFIRMATION = True    # ✅ الحجم يجب أن يؤكد
-REQUIRE_MOMENTUM_ALIGNMENT = True     # ✅ الزخم يجب أن يكون متوافقاً
+MIN_QUALITY_PERCENT = 75.0
+REQUIRE_TREND_ALIGNMENT = True
+REQUIRE_VOLUME_CONFIRMATION = True
+REQUIRE_MOMENTUM_ALIGNMENT = True
 
 # ============================================================
 # Risk
@@ -177,20 +198,20 @@ RISK_PER_TRADE = 0.01
 MAX_POSITION_PERCENT = 0.50
 ATR_SL_MULTIPLIER = 1.5
 SL_BUFFER_PERCENT = 0.003
-MIN_RR = 2.0                          # ✅ رُفع من 1.5 إلى 2.0 (عائد أعلى)
-COOLDOWN_MINUTES = 60                 # ✅ رُفع من 45 دقيقة (إشارات أقوى)
-OPPOSITE_COOLDOWN_HOURS = 6           # ✅ رُفع من 4 ساعات
+MIN_RR = 2.0
+COOLDOWN_MINUTES = 60
+OPPOSITE_COOLDOWN_HOURS = 6
 DAILY_MAX_LOSS_PERCENT = 0.03
 
-SIGNAL_MAX_HOLD_CANDLES = 6           # ✅ رُفع من 3 إلى 6 (30 دقيقة)
+SIGNAL_MAX_HOLD_CANDLES = 6
 SIGNAL_EVALUATION_INTERVAL = 60
 
 # ============================================================
 # Scanner
 # ============================================================
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "45"))  # ✅ رُفع من 30 لتقليل الضغط
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "45"))
 PREWATCH_SCAN_EVERY = 3
-MAX_PREWATCH_TO_SCAN = 20              # ✅ قللنا من 30 لتحسين الجودة
+MAX_PREWATCH_TO_SCAN = 20
 MAX_LAST_DATA_UPDATE = 100
 
 # ============================================================
@@ -227,5 +248,8 @@ def validate_config():
         errors.append("BINANCE_TIMEOUT must not exceed 5 seconds")
     if MIN_SCORE < 7.0:
         errors.append("MIN_SCORE must be at least 7.0 for strong signals")
+    # ✅ التحقق من أن المهلة أكبر من long-poll
+    if TELEGRAM_API_TIMEOUT <= TELEGRAM_LONG_POLL_TIMEOUT:
+        errors.append(f"TELEGRAM_API_TIMEOUT ({TELEGRAM_API_TIMEOUT}) must be > TELEGRAM_LONG_POLL_TIMEOUT ({TELEGRAM_LONG_POLL_TIMEOUT})")
     if errors:
         raise ValueError(" | ".join(errors))
