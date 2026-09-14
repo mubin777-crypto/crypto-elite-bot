@@ -33,7 +33,6 @@ async def handle_telegram_webhook(request):
     try:
         data = await request.json()
         bot_instance = request.app['bot_instance']
-
         await bot_instance.telegram.process_update(data)
         return web.Response(status=200)
     except Exception as e:
@@ -46,7 +45,6 @@ async def handle_status_api(request):
     try:
         open_signals = await bot_instance.db.get_open_signals()
         daily_stats = await bot_instance.db.get_daily_pnl()
-
         return web.json_response({
             "open_trades": len(open_signals),
             "daily_pnl": daily_stats.get("pnl", 0.0),
@@ -155,10 +153,34 @@ class TradingBot:
         return stats["pnl"] <= limit
 
     # ============================================================
+    # Helper: التحقق من صلاحية رمز العملة
+    # ============================================================
+    def is_valid_symbol(self, symbol: str) -> bool:
+        """
+        ✅ التحقق من أن الرمز:
+        - ينتهي بـ USDT
+        - يحتوي على أحرف إنجليزية وأرقام فقط
+        - طول الجزء الأساسي بين 2 و 15 حرفاً
+        - لا يبدأ برقم
+        """
+        if not symbol.endswith("USDT"):
+            return False
+        base = symbol[:-4]
+        if not base or len(base) < 2 or len(base) > 15:
+            return False
+        if not base.isascii() or not base.isalnum():
+            return False
+        if base[0].isdigit():
+            return False
+        return True
+
+    # ============================================================
     # Scan Symbol
     # ============================================================
     async def scan_symbol(self, symbol):
         if symbol in config.EXCLUDED_SYMBOLS:
+            return
+        if not self.is_valid_symbol(symbol):
             return
         if await self.daily_loss_exceeded():
             return
@@ -197,7 +219,10 @@ class TradingBot:
     # ============================================================
     async def scan_market(self):
         prewatch = await self.db.get_prewatch(config.MAX_PREWATCH_TO_SCAN)
-        prewatch_symbols = [item["symbol"] for item in prewatch if item["symbol"] not in self.known_symbols]
+        prewatch_symbols = [
+            item["symbol"] for item in prewatch
+            if item["symbol"] not in self.known_symbols and self.is_valid_symbol(item["symbol"])
+        ]
         symbols = list(dict.fromkeys(list(self.known_symbols) + prewatch_symbols))
         tasks = [self.scan_symbol(symbol) for symbol in symbols]
         if tasks:
@@ -210,13 +235,17 @@ class TradingBot:
     # Scan Pre-watch
     # ============================================================
     async def scan_prewatch(self):
+        """✅ مع فلترة صارمة للرموز"""
         data = await self.fetcher.ticker_24h()
         if not isinstance(data, list):
             return
         for item in data:
             symbol = item.get("symbol", "").upper()
-            if not symbol.endswith("USDT"):
+            
+            # ✅ استخدام دالة التحقق
+            if not self.is_valid_symbol(symbol):
                 continue
+            
             if symbol in self.known_symbols or symbol in config.EXCLUDED_SYMBOLS:
                 continue
             try:
@@ -397,21 +426,26 @@ class TradingBot:
         logger.info(f"🔧 TELEGRAM_MODE: {'Webhook' if config.TELEGRAM_USE_WEBHOOK else 'Polling'}")
 
         # 1️⃣ تهيئة قاعدة البيانات
-        await self.db.init()
+        try:
+            await self.db.init()
+            logger.info("✅ Database initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Database initialization failed: {e}")
+            return
 
         # 2️⃣ تحميل الأوزان
         await self.load_weights()
 
-        # 3️⃣ بدء جلب البيانات (WebSocket + REST)
+        # 3️⃣ بدء جلب البيانات
         await self.fetcher.start()
 
         # 4️⃣ بدء خادم الويب
         await self.init_web_server()
 
-        # 5️⃣ تفعيل Webhook (إذا كان مفعلاً)
+        # 5️⃣ تفعيل Webhook
         await self.setup_telegram_webhook()
 
-        # 6️⃣ بدء Telegram Bot (Polling إذا لزم الأمر)
+        # 6️⃣ بدء Telegram Bot
         await self.telegram.start()
 
         # 7️⃣ إضافة الأدمن كمشترك
