@@ -1,5 +1,5 @@
 # config.py
-# Quant Crypto Signal System v2026 - Production Ready
+# Quant Crypto Signal System v2026 - Strong Signals Edition
 
 import os
 from pathlib import Path
@@ -10,7 +10,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 # ============================================================
-# Database - إصلاح رابط PostgreSQL
+# Database
 # ============================================================
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if DATABASE_URL.startswith("postgres://"):
@@ -117,19 +117,57 @@ MOMENTUM_PERIOD = 5
 VOLUME_AVG_PERIOD = 20
 
 # ============================================================
-# Signal scoring
+# 🔥 Signal scoring - عتبات مشددة لإشارات قوية فقط
 # ============================================================
-MIN_SCORE = float(os.getenv("MIN_SCORE", "6.0"))
-EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "5.0"))
-MIN_ADX = 12.0
+MIN_SCORE = float(os.getenv("MIN_SCORE", "7.5"))        # ✅ رُفع من 6.0 إلى 7.5
+EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "7.0"))  # ✅ رُفع من 5.0 إلى 7.0
+MIN_ADX = float(os.getenv("MIN_ADX", "20.0"))           # ✅ رُفع من 12 إلى 20 (اتجاه قوي)
+MIN_FACTORS_ALIGNED = 5                                 # ✅ 5 من 7 عوامل على الأقل
 
+# ============================================================
+# RSI Filters - نطاقات مشددة
+# ============================================================
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
+RSI_BUY_ZONE_MIN = 40.0    # ✅ نطاق الشراء الأمثل
+RSI_BUY_ZONE_MAX = 60.0
+RSI_SELL_ZONE_MIN = 40.0
+RSI_SELL_ZONE_MAX = 60.0
 ENABLE_RSI_FILTER = True
 
-SQUEEZE_BB_WIDTH = 0.02
-SILENT_VOLUME_MULTIPLIER = 1.8
-RESISTANCE_DISTANCE = 0.015
+# ============================================================
+# 🔥 Explosion Detection (كشف الانفجارات)
+# ============================================================
+# شروط الانضغاط
+SQUEEZE_BB_WIDTH = 0.015              # ✅ أكثر تشدداً (1.5% بدلاً من 2%)
+SQUEEZE_MIN_CANDLES = 5               # ✅ الانضغاط يجب أن يستمر 5 شموع على الأقل
+SQUEEZE_WIDTH_TREND_CANDLES = 3       # ✅ عرض البولينجر يجب أن يكون في تضييق
+KELTNER_PERIOD = 20                   # ✅ TTM Squeeze - Keltner
+KELTNER_ATR_MULT = 1.5
+
+# شروط الحجم
+SILENT_VOLUME_MULTIPLIER = 1.5        # ✅ الحجم الحالي مقارنة بالمتوسط
+VOLUME_TREND_MULTIPLIER = 1.2         # ✅ متوسط 3 شموع أعلى من 20 شمعة بـ 20%
+VOLUME_MIN_CONSECUTIVE = 3            # ✅ 3 شموع متتالية بحجم مرتفع
+
+# شروط السعر
+RESISTANCE_DISTANCE = 0.008           # ✅ 0.8% من القمة (أقرب من السابق)
+CONSOLIDATION_RANGE_MAX = 0.025       # ✅ نطاق التذبذب أقل من 2.5%
+HIGHER_LOWS_COUNT = 3                 # ✅ 3 قيعان صاعدة
+BREAKOUT_CONFIRMATION_PCT = 0.003     # ✅ اختراق بـ 0.3% على الأقل
+
+# شروط الزخم
+MOMENTUM_MIN = 0.3                    # ✅ زخم 5 شموع > 0.3%
+MOMENTUM_MAX = 5.0                    # ✅ حد أقصى لمنع الشراء في القمم
+
+# ============================================================
+# 🔥 Quality Gate (بوابة الجودة النهائية)
+# ============================================================
+# يجب أن تجتاز الإشارة كل هذه الشروط قبل الإرسال
+MIN_QUALITY_PERCENT = 75.0            # ✅ الحد الأدنى للجودة 75%
+REQUIRE_TREND_ALIGNMENT = True        # ✅ الترند 15m يجب أن يكون متوافقاً
+REQUIRE_VOLUME_CONFIRMATION = True    # ✅ الحجم يجب أن يؤكد
+REQUIRE_MOMENTUM_ALIGNMENT = True     # ✅ الزخم يجب أن يكون متوافقاً
 
 # ============================================================
 # Risk
@@ -139,44 +177,34 @@ RISK_PER_TRADE = 0.01
 MAX_POSITION_PERCENT = 0.50
 ATR_SL_MULTIPLIER = 1.5
 SL_BUFFER_PERCENT = 0.003
-MIN_RR = 1.5
-COOLDOWN_MINUTES = 45
-OPPOSITE_COOLDOWN_HOURS = 4
+MIN_RR = 2.0                          # ✅ رُفع من 1.5 إلى 2.0 (عائد أعلى)
+COOLDOWN_MINUTES = 60                 # ✅ رُفع من 45 دقيقة (إشارات أقوى)
+OPPOSITE_COOLDOWN_HOURS = 6           # ✅ رُفع من 4 ساعات
 DAILY_MAX_LOSS_PERCENT = 0.03
 
-SIGNAL_MAX_HOLD_CANDLES = 3
+SIGNAL_MAX_HOLD_CANDLES = 6           # ✅ رُفع من 3 إلى 6 (30 دقيقة)
 SIGNAL_EVALUATION_INTERVAL = 60
 
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "30"))
+# ============================================================
+# Scanner
+# ============================================================
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "45"))  # ✅ رُفع من 30 لتقليل الضغط
 PREWATCH_SCAN_EVERY = 3
-MAX_PREWATCH_TO_SCAN = 30
+MAX_PREWATCH_TO_SCAN = 20              # ✅ قللنا من 30 لتحسين الجودة
 MAX_LAST_DATA_UPDATE = 100
 
+# ============================================================
+# Adaptive weights
+# ============================================================
 FACTORS = [
     "rsi", "adx", "momentum", "volume",
     "bollinger", "macd", "pivot",
 ]
 
+# ============================================================
+# Logging
+# ============================================================
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
-# ============================================================
-# Environment Variables Checklist
-# ============================================================
-# Required:
-#   TELEGRAM_BOT_TOKEN    - Token من BotFather
-#   TELEGRAM_ADMIN_ID     - معرف المستخدم المدير
-#
-# Optional:
-#   PORT                  - منفذ الخادم (افتراضي: 10000)
-#   WEBHOOK_URL           - رابط الخدمة (مطلوب لـ Webhook)
-#   WEBHOOK_PATH          - مسار Webhook (افتراضي: /webhook)
-#   TELEGRAM_USE_WEBHOOK  - true/false (افتراضي: false)
-#   DATABASE_URL          - رابط PostgreSQL (اختياري)
-#   USE_POSTGRES          - true/false (افتراضي: false)
-#   RENDER_EXTERNAL_URL   - يُضبط تلقائياً في Render
-#   LOG_LEVEL             - DEBUG/INFO/WARNING/ERROR (افتراضي: INFO)
-#   SCAN_INTERVAL         - فترة المسح بالثواني (افتراضي: 30)
-#   MIN_SCORE             - الحد الأدنى لدرجة الإشارة (افتراضي: 6.0)
 
 # ============================================================
 # Validation
@@ -193,9 +221,11 @@ def validate_config():
         errors.append("RISK_PER_TRADE must be between 0 and 0.05")
     if not 0 < MAX_POSITION_PERCENT <= 1:
         errors.append("MAX_POSITION_PERCENT must be between 0 and 1")
-    if MIN_RR < 1.5:
-        errors.append("MIN_RR must be at least 1.5")
+    if MIN_RR < 2.0:
+        errors.append("MIN_RR must be at least 2.0")
     if BINANCE_TIMEOUT > 5:
         errors.append("BINANCE_TIMEOUT must not exceed 5 seconds")
+    if MIN_SCORE < 7.0:
+        errors.append("MIN_SCORE must be at least 7.0 for strong signals")
     if errors:
         raise ValueError(" | ".join(errors))
