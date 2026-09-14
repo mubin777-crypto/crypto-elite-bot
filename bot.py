@@ -1,5 +1,5 @@
 # bot.py
-# Main Application - مع خادم ويب متكامل
+# Main Application - Production Ready with Strict Symbol Filtering
 
 import asyncio
 import json
@@ -28,6 +28,7 @@ async def handle_health(request):
         "timestamp": datetime.now(timezone.utc).isoformat()
     }, status=200)
 
+
 async def handle_telegram_webhook(request):
     """استقبال تحديثات Telegram Webhook"""
     try:
@@ -38,6 +39,7 @@ async def handle_telegram_webhook(request):
     except Exception as e:
         logger.error(f"Error handling Telegram Webhook: {e}")
         return web.Response(status=500)
+
 
 async def handle_status_api(request):
     """استرجاع حالة النظام عبر REST API"""
@@ -60,6 +62,7 @@ async def handle_status_api(request):
     except Exception as e:
         logger.error(f"Error fetching status: {e}")
         return web.json_response({"error": str(e)}, status=500)
+
 
 # ============================================================
 # TradingBot Class
@@ -153,25 +156,65 @@ class TradingBot:
         return stats["pnl"] <= limit
 
     # ============================================================
-    # Helper: التحقق من صلاحية رمز العملة
+    # ✅ Helper: التحقق الصارم من صلاحية رمز العملة
     # ============================================================
     def is_valid_symbol(self, symbol: str) -> bool:
         """
-        ✅ التحقق من أن الرمز:
-        - ينتهي بـ USDT
-        - يحتوي على أحرف إنجليزية وأرقام فقط
-        - طول الجزء الأساسي بين 2 و 15 حرفاً
-        - لا يبدأ برقم
+        ✅ التحقق الصارم من صلاحية رمز العملة
+
+        يستبعد:
+        - الأسهم المرمّزة (MSTRBUSDT, QQQBUSDT, SPYBUSDT)
+        - العملات المستقرة (RLUSDUSDT, PYUSDUSDT, USD1USDT)
+        - العملات السياسية (TRUMPUSDT, WLFIUSDT, MELANIAUSDT)
+        - الرموز الغريبة أو غير المنطقية
         """
-        if not symbol.endswith("USDT"):
+        if not symbol or not symbol.endswith("USDT"):
             return False
+
+        # ✅ استبعاد القائمة السوداء (stablecoins + political)
+        if symbol in config.EXCLUDED_SYMBOLS:
+            return False
+
+        # ✅ إزالة USDT للحصول على القاعدة
         base = symbol[:-4]
-        if not base or len(base) < 2 or len(base) > 15:
+        if not base:
             return False
-        if not base.isascii() or not base.isalnum():
-            return False
+
+        # ✅ استبعاد الأسهم المرمّزة
+        # الأسهم المرمّزة على Binance تنتهي بـ "B" قبل USDT
+        # مثال: MSTRBUSDT → base = MSTRB, QQQBUSDT → base = QQQB
+        if config.EXCLUDE_TOKENIZED_STOCKS and base.endswith("B") and len(base) > 2:
+            # قائمة استثناءات: عملات حقيقية تنتهي بـ B
+            known_cryptos_ending_in_b = {
+                "BNB", "ARB", "BGB", "WIF", "SATS", "ORDI",
+                "OMB", "GLMB", "STGB", "BANB", "VIB", "SNB",
+                "MTLB", "RBNB", "VETB", "ACB", "TROYB"
+            }
+            # إذا كان الرمز يحتوي على حروف كبيرة متتالية (يشبه سهم مُرمّز)
+            # نتحقق من أنه ليس من العملات المعروفة
+            if base not in known_cryptos_ending_in_b:
+                logger.debug(f"Rejected tokenized stock: {symbol}")
+                return False
+
+        # ✅ استبعاد اللواحق الممنوعة (Leveraged tokens)
+        for suffix in config.EXCLUDED_SUFFIXES:
+            if symbol.endswith(suffix):
+                logger.debug(f"Rejected leveraged token: {symbol}")
+                return False
+
+        # ✅ استبعاد الرموز التي تبدأ برقم
         if base[0].isdigit():
             return False
+
+        # ✅ التحقق من أن القاعدة تحتوي فقط على أحرف إنجليزية وأرقام
+        if not base.isascii() or not base.isalnum():
+            logger.debug(f"Rejected non-ascii symbol: {symbol}")
+            return False
+
+        # ✅ طول منطقي للقاعدة
+        if len(base) < 2 or len(base) > 10:
+            return False
+
         return True
 
     # ============================================================
@@ -184,6 +227,7 @@ class TradingBot:
             return
         if await self.daily_loss_exceeded():
             return
+
         klines = await self.fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT)
         if not klines:
             return
@@ -199,9 +243,11 @@ class TradingBot:
 
         klines_15m = await self.fetcher.klines(symbol, config.TREND_INTERVAL, 50)
         df_15m = klines_to_dataframe(klines_15m) if klines_15m else None
+
         result = self.engine.analyze(symbol, df, self.daily_capital, df_15m)
         if not result:
             return
+
         if not await self.cooldown_allowed(symbol, result["direction"]):
             return
 
@@ -212,17 +258,24 @@ class TradingBot:
         await self.telegram.broadcast(formatted)
 
         await self.db.set_cooldown(symbol, result["direction"])
-        logger.info(f"📊 Signal generated: {symbol} {result['direction']} score={result['score']} (id={signal_id})")
+        logger.info(
+            f"📊 Signal generated: {symbol} {result['direction']} "
+            f"score={result['score']} (id={signal_id})"
+        )
 
     # ============================================================
     # Scan Market
     # ============================================================
     async def scan_market(self):
         prewatch = await self.db.get_prewatch(config.MAX_PREWATCH_TO_SCAN)
+
+        # ✅ فلترة رموز Pre-watch
         prewatch_symbols = [
             item["symbol"] for item in prewatch
-            if item["symbol"] not in self.known_symbols and self.is_valid_symbol(item["symbol"])
+            if item["symbol"] not in self.known_symbols
+            and self.is_valid_symbol(item["symbol"])
         ]
+
         symbols = list(dict.fromkeys(list(self.known_symbols) + prewatch_symbols))
         tasks = [self.scan_symbol(symbol) for symbol in symbols]
         if tasks:
@@ -232,22 +285,28 @@ class TradingBot:
                     logger.error(f"Scan task failed: {result}")
 
     # ============================================================
-    # Scan Pre-watch
+    # Scan Pre-watch (✅ فلترة صارمة)
     # ============================================================
     async def scan_prewatch(self):
         """✅ مع فلترة صارمة للرموز"""
         data = await self.fetcher.ticker_24h()
         if not isinstance(data, list):
             return
+
+        added_count = 0
+        rejected_count = 0
+
         for item in data:
             symbol = item.get("symbol", "").upper()
-            
-            # ✅ استخدام دالة التحقق
+
+            # ✅ تطبيق فلترة صارمة
             if not self.is_valid_symbol(symbol):
+                rejected_count += 1
                 continue
-            
-            if symbol in self.known_symbols or symbol in config.EXCLUDED_SYMBOLS:
+
+            if symbol in self.known_symbols:
                 continue
+
             try:
                 change = float(item.get("priceChangePercent", 0))
                 volume = float(item.get("quoteVolume", 0))
@@ -255,20 +314,36 @@ class TradingBot:
                 price = float(item.get("lastPrice", 0))
             except (ValueError, TypeError):
                 continue
+
+            # ✅ فلترة السيولة والصفقات
             if volume < config.PREWATCH_MIN_VOLUME_USDT:
                 continue
             if trades < config.PREWATCH_MIN_TRADES:
                 continue
+
+            # ✅ فلترة نطاق السعر
             if price > config.PREWATCH_MAX_PRICE or price < config.PREWATCH_MIN_PRICE:
                 continue
+
+            # ✅ فلترة الحركة أو الحجم
             if abs(change) > config.PREWATCH_PRICE_CHANGE or volume > config.PREWATCH_VOLUME_USDT:
                 reasons = []
                 if abs(change) > config.PREWATCH_PRICE_CHANGE:
                     reasons.append("price_move")
                 if volume > config.PREWATCH_VOLUME_USDT:
                     reasons.append("high_volume")
-                await self.db.add_prewatch(symbol, ",".join(reasons), change, volume, trades, price)
+
+                await self.db.add_prewatch(
+                    symbol, ",".join(reasons), change, volume, trades, price
+                )
                 self.known_symbols.add(symbol)
+                added_count += 1
+
+        if added_count > 0 or rejected_count > 0:
+            logger.info(
+                f"📋 Pre-watch scan: Added {added_count} new symbols, "
+                f"rejected {rejected_count} invalid"
+            )
 
     # ============================================================
     # Health Monitor
@@ -278,10 +353,15 @@ class TradingBot:
             try:
                 await asyncio.sleep(config.HEALTH_CHECK_INTERVAL)
                 now = time.time()
-                stale = [sym for sym, ts in self.last_data_update.items() if now - ts > 900]
+                stale = [
+                    sym for sym, ts in self.last_data_update.items()
+                    if now - ts > 900
+                ]
                 if len(stale) > 3 and now - self.last_health_alert > config.HEALTH_CHECK_INTERVAL:
                     await self.telegram.broadcast(
-                        f"⚠️ <b>Data Health Alert</b>\n\nStale symbols: {len(stale)}\n" + "\n".join(stale[:5])
+                        f"⚠️ <b>تنبيه صحة البيانات</b>\n\n"
+                        f"عملات متوقفة: {len(stale)}\n"
+                        + "\n".join(stale[:5])
                     )
                     self.last_health_alert = now
             except asyncio.CancelledError:
@@ -313,6 +393,7 @@ class TradingBot:
         open_signals = await self.db.get_open_signals()
         if not open_signals:
             return
+
         for signal_row in open_signals:
             try:
                 signal_time = datetime.fromisoformat(signal_row["created_at"])
@@ -323,6 +404,7 @@ class TradingBot:
                 )
                 if not klines:
                     continue
+
                 entry = float(signal_row["entry"])
                 sl = float(signal_row["sl"])
                 tp = float(signal_row["tp"])
@@ -331,9 +413,12 @@ class TradingBot:
                 exit_reason = None
 
                 for candle in klines:
-                    candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
+                    candle_time = datetime.fromtimestamp(
+                        candle[0] / 1000, tz=timezone.utc
+                    )
                     if candle_time <= signal_time:
                         continue
+
                     high = float(candle[2])
                     low = float(candle[3])
                     hit_sl = low <= sl if direction == "BUY" else high >= sl
@@ -357,7 +442,9 @@ class TradingBot:
                     exit_reason = "TIMEOUT"
 
                 result_amount = outcome * self.daily_capital * config.RISK_PER_TRADE
-                await self.db.close_signal(signal_row["id"], result_amount, outcome, exit_reason)
+                await self.db.close_signal(
+                    signal_row["id"], result_amount, outcome, exit_reason
+                )
 
                 if outcome > 0:
                     category = "win"
@@ -368,30 +455,44 @@ class TradingBot:
                 else:
                     category = "breakeven"
 
-                await self.db.add_daily_result(self.daily_capital, result_amount, category)
+                await self.db.add_daily_result(
+                    self.daily_capital, result_amount, category
+                )
 
+                # ✅ تحديث الأوزان بناءً على المساهمات الفعلية
                 signal_data = await self.db.get_signal(signal_row["id"])
                 if signal_data and signal_data.get("factor_contributions"):
                     try:
                         if isinstance(signal_data["factor_contributions"], str):
-                            factor_contributions = json.loads(signal_data["factor_contributions"])
+                            factor_contributions = json.loads(
+                                signal_data["factor_contributions"]
+                            )
                         else:
                             factor_contributions = signal_data["factor_contributions"]
-                    except:
+                    except Exception:
                         factor_contributions = {}
 
                     success = outcome > 0
                     for factor, contribution in factor_contributions.items():
                         if factor in config.FACTORS:
-                            self.weights.update(factor, success, contribution=contribution)
-                            await self.db.save_weight(factor, self.weights.weights[factor])
+                            self.weights.update(
+                                factor, success, contribution=contribution
+                            )
+                            await self.db.save_weight(
+                                factor, self.weights.weights[factor]
+                            )
                 else:
                     success = outcome > 0
                     for factor in config.FACTORS:
                         self.weights.update(factor, success, contribution=0.5)
-                        await self.db.save_weight(factor, self.weights.weights[factor])
+                        await self.db.save_weight(
+                            factor, self.weights.weights[factor]
+                        )
 
-                logger.info(f"📈 Signal evaluated: id={signal_row['id']} result={outcome} reason={exit_reason}")
+                logger.info(
+                    f"📈 Signal evaluated: id={signal_row['id']} "
+                    f"result={outcome} reason={exit_reason}"
+                )
             except Exception as exc:
                 logger.exception(f"Signal evaluation error: {exc}")
 
@@ -403,14 +504,19 @@ class TradingBot:
             started = time.monotonic()
             try:
                 self.scan_counter += 1
+
+                # ✅ Pre-watch كل 3 دورات
                 if self.scan_counter % config.PREWATCH_SCAN_EVERY == 0:
                     await self.scan_prewatch()
+
                 await self.scan_market()
                 await self.evaluate_open_signals()
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.exception(f"Scanner error: {exc}")
+
             elapsed = time.monotonic() - started
             wait = max(1, config.SCAN_INTERVAL - elapsed)
             await asyncio.sleep(wait)
@@ -424,6 +530,8 @@ class TradingBot:
         logger.info(f"🔧 BINANCE_ENDPOINTS: {config.BINANCE_ENDPOINTS}")
         logger.info(f"🔧 DATABASE: {'PostgreSQL' if config.USE_POSTGRES else 'SQLite'}")
         logger.info(f"🔧 TELEGRAM_MODE: {'Webhook' if config.TELEGRAM_USE_WEBHOOK else 'Polling'}")
+        logger.info(f"🔧 MIN_SCORE: {config.MIN_SCORE}, MIN_ADX: {config.MIN_ADX}")
+        logger.info(f"🔧 EXCLUDED_SYMBOLS: {len(config.EXCLUDED_SYMBOLS)} entries")
 
         # 1️⃣ تهيئة قاعدة البيانات
         try:
@@ -454,12 +562,17 @@ class TradingBot:
             success = await self.db.add_subscriber(admin_id)
             if success:
                 logger.info(f"✅ Admin {admin_id} added as subscriber")
-                await self.telegram.send_message(admin_id, "✅ Bot started successfully!")
+                await self.telegram.send_message(
+                    admin_id,
+                    "✅ <b>تم تشغيل النظام بنجاح!</b>\n\n"
+                    "النظام يرسل الإشارات القوية فقط + تنبؤات الانفجارات 💥"
+                )
             else:
                 logger.error(f"❌ Failed to add admin {admin_id} as subscriber")
 
         count = await self.db.get_subscribers()
         logger.info(f"📊 Total active subscribers: {len(count)}")
+        logger.info(f"📊 Known symbols: {len(self.known_symbols)}")
 
         # 8️⃣ بدء المهام الخلفية
         self.tasks = [
@@ -501,6 +614,7 @@ class TradingBot:
     def stop(self):
         self.running = False
 
+
 # ============================================================
 # Main
 # ============================================================
@@ -513,6 +627,7 @@ async def main():
         except NotImplementedError:
             pass
     await bot.start()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
