@@ -1,5 +1,5 @@
 # telegram_bot.py
-# Telegram Bot - Production Ready
+# Telegram Bot - Production Ready with Arabic Signals
 
 import asyncio
 import logging
@@ -25,9 +25,15 @@ class TelegramBot:
         self.is_running = False
         self._webhook_set = False
 
+    # ============================================================
+    # Helper: HTML Escape
+    # ============================================================
     def safe_text(self, text):
         return html.escape(str(text))
 
+    # ============================================================
+    # Start / Stop
+    # ============================================================
     async def start(self):
         if not self.token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
@@ -44,7 +50,7 @@ class TelegramBot:
             self.polling_task = asyncio.create_task(self.polling_loop())
 
         if self.admin_id:
-            await self.send_message(self.admin_id, "🤖 <b>Bot started successfully!</b>")
+            await self.send_message(self.admin_id, "🤖 <b>تم تشغيل البوت بنجاح!</b>")
 
     async def close(self):
         self.is_running = False
@@ -58,6 +64,9 @@ class TelegramBot:
             await self.session.close()
             self.session = None
 
+    # ============================================================
+    # Webhook Management
+    # ============================================================
     async def set_webhook(self, webhook_url: str) -> bool:
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
@@ -91,6 +100,9 @@ class TelegramBot:
             logger.warning(f"⚠️ Failed to delete webhook: {result}")
             return False
 
+    # ============================================================
+    # Polling Loop
+    # ============================================================
     async def polling_loop(self):
         while self.is_running:
             try:
@@ -105,7 +117,6 @@ class TelegramBot:
                 else:
                     if result:
                         error_code = result.get("error_code")
-                        # 409 Conflict لا يستدعي إيقاف الحلقة
                         if error_code == 409:
                             logger.warning("Polling conflict, another instance may be running")
                             await asyncio.sleep(5)
@@ -115,9 +126,15 @@ class TelegramBot:
                 logger.error(f"Polling loop error: {exc}")
                 await asyncio.sleep(5)
 
+    # ============================================================
+    # Process Update (for Webhook)
+    # ============================================================
     async def process_update(self, update: dict):
         await self.handle_update(update)
 
+    # ============================================================
+    # Telegram API Call
+    # ============================================================
     async def api_call(self, method, payload=None, retries=config.TELEGRAM_MAX_RETRIES):
         if not self.session:
             return None
@@ -147,6 +164,9 @@ class TelegramBot:
         logger.error(f"All retries failed for {method}")
         return None
 
+    # ============================================================
+    # Send Message
+    # ============================================================
     async def send_message(self, chat_id, text, parse_mode="HTML", retries=config.TELEGRAM_MAX_RETRIES):
         if not text:
             return None
@@ -163,7 +183,6 @@ class TelegramBot:
                 })
                 if result and result.get("ok"):
                     return result
-                # ✅ لا تعد المحاولة إذا كان الخطأ من نوع 400/403
                 if result:
                     error_code = result.get("error_code")
                     if error_code in (400, 403):
@@ -175,6 +194,9 @@ class TelegramBot:
                 backoff *= 2
         return None
 
+    # ============================================================
+    # Broadcast to All Subscribers
+    # ============================================================
     async def broadcast(self, text):
         subscribers = await self.database.get_subscribers()
         count = len(subscribers)
@@ -182,7 +204,7 @@ class TelegramBot:
         if count == 0:
             logger.warning("⚠️ No active subscribers found!")
             if self.admin_id:
-                await self.send_message(self.admin_id, "⚠️ No active subscribers. Please add users with /adduser")
+                await self.send_message(self.admin_id, "⚠️ لا يوجد مشتركون نشطون. استخدم /adduser لإضافة مستخدمين.")
             return
 
         if self.admin_id and self.admin_id not in subscribers:
@@ -198,11 +220,15 @@ class TelegramBot:
                     success_count += 1
                 else:
                     failure_count += 1
-                    # ✅ التعامل مع 400 chat not found و 403 blocked
                     if result:
                         error_code = result.get("error_code")
                         error_desc = result.get("description", "").lower()
-                        if error_code == 403 or "blocked" in error_desc or "chat not found" in error_desc or "user not found" in error_desc:
+                        if (
+                            error_code == 403
+                            or "blocked" in error_desc
+                            or "chat not found" in error_desc
+                            or "user not found" in error_desc
+                        ):
                             logger.warning(f"User {user_id} invalid/blocked, removing: {error_desc}")
                             await self.database.remove_subscriber(user_id)
                             blocked_users.append(user_id)
@@ -215,6 +241,9 @@ class TelegramBot:
             logger.info(f"✅ Removed invalid users: {blocked_users}")
         logger.info(f"✅ Broadcast: {success_count}/{len(subscribers)} sent, {failure_count} failed")
 
+    # ============================================================
+    # Handle Update (Commands)
+    # ============================================================
     async def handle_update(self, update):
         if not isinstance(update, dict):
             return
@@ -250,51 +279,58 @@ class TelegramBot:
                 await self.signal(chat_id, parts[1].upper())
         elif command.startswith("/adduser"):
             if not self.is_admin(user_id):
-                await self.send_message(chat_id, "⛔ Admin only.")
+                await self.send_message(chat_id, "⛔ للمشرف فقط.")
                 return
             parts = text.split()
             if len(parts) != 2:
-                await self.send_message(chat_id, "Usage: /adduser USER_ID")
+                await self.send_message(chat_id, "الاستخدام: /adduser USER_ID")
                 return
             try:
                 target_id = int(parts[1])
                 if await self.database.add_subscriber(target_id):
-                    await self.send_message(chat_id, f"✅ Subscriber {target_id} added.")
+                    await self.send_message(chat_id, f"✅ تم إضافة المشترك {target_id}.")
                 else:
-                    await self.send_message(chat_id, "❌ Failed to add subscriber.")
+                    await self.send_message(chat_id, "❌ فشل إضافة المشترك.")
             except ValueError:
-                await self.send_message(chat_id, "❌ USER_ID must be numeric.")
+                await self.send_message(chat_id, "❌ يجب أن يكون USER_ID رقمياً.")
         elif command.startswith("/removeuser"):
             if not self.is_admin(user_id):
-                await self.send_message(chat_id, "⛔ Admin only.")
+                await self.send_message(chat_id, "⛔ للمشرف فقط.")
                 return
             parts = text.split()
             if len(parts) != 2:
-                await self.send_message(chat_id, "Usage: /removeuser USER_ID")
+                await self.send_message(chat_id, "الاستخدام: /removeuser USER_ID")
                 return
             try:
                 target_id = int(parts[1])
                 if await self.database.remove_subscriber(target_id):
-                    await self.send_message(chat_id, f"✅ Subscriber {target_id} removed.")
+                    await self.send_message(chat_id, f"✅ تم حذف المشترك {target_id}.")
                 else:
-                    await self.send_message(chat_id, "❌ Failed to remove subscriber.")
+                    await self.send_message(chat_id, "❌ فشل حذف المشترك.")
             except ValueError:
-                await self.send_message(chat_id, "❌ USER_ID must be numeric.")
+                await self.send_message(chat_id, "❌ يجب أن يكون USER_ID رقمياً.")
         elif command.startswith("/reset_daily"):
             if not self.is_admin(user_id):
-                await self.send_message(chat_id, "⛔ Admin only.")
+                await self.send_message(chat_id, "⛔ للمشرف فقط.")
                 return
             await self.database.reset_daily(config.INITIAL_CAPITAL)
-            await self.send_message(chat_id, "✅ Daily statistics reset.")
+            await self.send_message(chat_id, "✅ تم إعادة الإحصائيات اليومية.")
         else:
             await self.send_message(chat_id, "❓ أمر غير معروف. استخدم /start للمساعدة.")
 
+    # ============================================================
+    # Admin Check
+    # ============================================================
     def is_admin(self, user_id):
         return int(user_id) == int(self.admin_id)
 
+    # ============================================================
+    # Help Text
+    # ============================================================
     def help_text(self):
         return (
-            "🤖 <b>Quant Crypto Signal System v2026</b>\n\n"
+            "🤖 <b>نظام إشارات العملات الرقمية v2026</b>\n\n"
+            "📋 <b>الأوامر المتاحة:</b>\n"
             "/status - حالة النظام\n"
             "/prewatch - قائمة المراقبة\n"
             "/performance - الأداء\n"
@@ -302,68 +338,91 @@ class TelegramBot:
             "/signal BTCUSDT - تحليل فوري\n"
             "/adduser USER_ID - إضافة مشترك\n"
             "/removeuser USER_ID - حذف مشترك\n"
-            "/reset_daily - إعادة الإحصائيات"
+            "/reset_daily - إعادة الإحصائيات\n\n"
+            "💥 النظام يرسل الإشارات القوية فقط + تنبؤات الانفجارات"
         )
 
+    # ============================================================
+    # Subscribers List
+    # ============================================================
     async def subscribers_list(self, chat_id, user_id):
         if not self.is_admin(user_id):
-            await self.send_message(chat_id, "⛔ Admin only.")
+            await self.send_message(chat_id, "⛔ للمشرف فقط.")
             return
         subs = await self.database.get_subscribers()
         count = len(subs)
         if count == 0:
-            await self.send_message(chat_id, "📭 No subscribers.")
+            await self.send_message(chat_id, "📭 لا يوجد مشتركون.")
             return
-        lines = [f"📋 Subscribers ({count}):"]
+        lines = [f"📋 المشتركون ({count}):"]
         for uid in subs:
             lines.append(f"• {uid}")
         await self.send_message(chat_id, "\n".join(lines))
 
+    # ============================================================
+    # Status Command
+    # ============================================================
     async def status(self, chat_id):
         signals = await self.database.get_daily_signals()
         stats = await self.database.get_daily_pnl()
         prewatch = await self.database.get_prewatch(20)
         subscribers = await self.database.get_subscribers()
+
+        explosion_count = sum(
+            1 for s in signals
+            if s.get("exit_reason") is None and s.get("score", 0) >= config.EARLY_SNIPE_SCORE
+        )
+
         text = (
-            f"📊 <b>System Status</b>\n\n"
-            f"Signals today: {self.safe_text(len(signals))}\n"
-            f"Daily PnL: {self.safe_text(f'{stats['pnl']:.2f}')}\n"
-            f"W/L/B/I/T: {stats['wins']}/{stats['losses']}/{stats['breakeven']}/{stats['inconclusive']}/{stats['timeout']}\n"
-            f"Pre-watch: {self.safe_text(len(prewatch))}\n"
-            f"Subscribers: {self.safe_text(len(subscribers))}"
+            f"📊 <b>حالة النظام</b>\n\n"
+            f"📈 إشارات اليوم: {self.safe_text(len(signals))}\n"
+            f"💥 تنبيهات الانفجار: {self.safe_text(explosion_count)}\n"
+            f"💰 الأرباح اليومية: {self.safe_text(f'{stats['pnl']:.2f}')}\n"
+            f"🏆 ربح/خسارة/تعادل/غير محدد/مهلة: {stats['wins']}/{stats['losses']}/{stats['breakeven']}/{stats['inconclusive']}/{stats['timeout']}\n"
+            f"🔭 قائمة المراقبة: {self.safe_text(len(prewatch))}\n"
+            f"👥 المشتركون: {self.safe_text(len(subscribers))}"
         )
         await self.send_message(chat_id, text)
 
+    # ============================================================
+    # Prewatch Command
+    # ============================================================
     async def prewatch(self, chat_id):
         items = await self.database.get_prewatch(10)
         if not items:
-            await self.send_message(chat_id, "🔭 Pre-watch فارغة.")
+            await self.send_message(chat_id, "🔭 قائمة المراقبة فارغة.")
             return
-        lines = ["🔭 <b>Pre-watch</b>\n"]
+        lines = ["🔭 <b>قائمة المراقبة</b>\n"]
         for item in items:
             lines.append(
                 f"• <b>{self.safe_text(item['symbol'])}</b> | "
                 f"{self.safe_text(f'{item['price_change']:.2f}')}% | "
                 f"${self.safe_text(f'{item['quote_volume']:,.0f}')} | "
-                f"Trades: {self.safe_text(item.get('trades', 0))}"
+                f"الصفقات: {self.safe_text(item.get('trades', 0))}"
             )
         await self.send_message(chat_id, "\n".join(lines))
 
+    # ============================================================
+    # Performance Command
+    # ============================================================
     async def performance(self, chat_id):
         signals = await self.database.get_daily_signals()
         closed = [x for x in signals if x["status"] == "CLOSED"]
         if not closed:
             await self.send_message(chat_id, "لا توجد صفقات مغلقة كافية.")
             return
+
         wins = [x for x in closed if float(x["result_r"]) > 0]
         losses = [x for x in closed if float(x["result_r"]) < 0]
         breakeven = [x for x in closed if float(x["result_r"]) == 0]
         inconclusive = [x for x in closed if x.get("exit_reason") == "INCONCLUSIVE"]
         timeouts = [x for x in closed if x.get("exit_reason") == "TIMEOUT"]
+
         win_rate = len(wins) / len(closed) * 100
         gross_profit = sum(float(x["result_r"]) for x in wins)
         gross_loss = abs(sum(float(x["result_r"]) for x in losses))
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+
         returns = [float(x["result_r"]) for x in closed]
         import statistics
         if len(returns) > 1:
@@ -372,21 +431,25 @@ class TelegramBot:
             sharpe = avg / stdev if stdev > 0 else 0
         else:
             sharpe = 0
-        pf_text = "INF" if profit_factor == float("inf") else f"{profit_factor:.2f}"
+
+        pf_text = "∞" if profit_factor == float("inf") else f"{profit_factor:.2f}"
         text = (
-            f"📈 <b>Performance</b>\n\n"
-            f"Closed: {self.safe_text(len(closed))}\n"
-            f"Win/Loss/BE/Inc/TO: {len(wins)}/{len(losses)}/{len(breakeven)}/{len(inconclusive)}/{len(timeouts)}\n"
-            f"Win Rate: {self.safe_text(f'{win_rate:.2f}')}%\n"
-            f"Profit Factor: {self.safe_text(pf_text)}\n"
-            f"Sharpe (R): {self.safe_text(f'{sharpe:.2f}')}"
+            f"📈 <b>تقرير الأداء</b>\n\n"
+            f"📊 الصفقات المغلقة: {self.safe_text(len(closed))}\n"
+            f"🏆 ربح/خسارة/تعادل/غير محدد/مهلة: {len(wins)}/{len(losses)}/{len(breakeven)}/{len(inconclusive)}/{len(timeouts)}\n"
+            f"🎯 نسبة الفوز: {self.safe_text(f'{win_rate:.2f}')}%\n"
+            f"💹 معامل الربح: {self.safe_text(pf_text)}\n"
+            f"📉 نسبة شارب (R): {self.safe_text(f'{sharpe:.2f}')}"
         )
         await self.send_message(chat_id, text)
 
+    # ============================================================
+    # Manual Signal Analysis
+    # ============================================================
     async def signal(self, chat_id, symbol):
         klines = await self.data_fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT)
         if not klines:
-            await self.send_message(chat_id, f"❌ No data for {self.safe_text(symbol)}.")
+            await self.send_message(chat_id, f"❌ لا توجد بيانات لـ {self.safe_text(symbol)}.")
             return
         from utils import klines_to_dataframe
         df = klines_to_dataframe(klines)
@@ -394,10 +457,17 @@ class TelegramBot:
         df_15m = klines_to_dataframe(klines_15m) if klines_15m else None
         result = self.signal_engine.analyze(symbol, df, config.INITIAL_CAPITAL, df_15m)
         if not result:
-            await self.send_message(chat_id, f"⚪ No qualified signal for {self.safe_text(symbol)}.")
+            await self.send_message(
+                chat_id,
+                f"⚪ لا توجد إشارة قوية لـ {self.safe_text(symbol)}.\n"
+                f"(المعايير مشددة: الحد الأدنى للنقاط={config.MIN_SCORE}, الحد الأدنى للاتجاه={config.MIN_ADX})"
+            )
             return
         await self.send_message(chat_id, self.format_signal(result))
 
+    # ============================================================
+    # Format Signal (Arabic + Explosion Detection)
+    # ============================================================
     def format_signal(self, signal):
         def fmt(val):
             if abs(val) < 1e-5:
@@ -405,25 +475,81 @@ class TelegramBot:
             else:
                 return self.safe_text(f"{val:.6f}")
 
-        emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
-        snipe = "\n🎯 <b>EARLY SNIPE</b>" if signal.get("early_snipe") else ""
-        quality_label = f"Quality: {signal.get('quality', 0)}%" if signal.get('quality') else ""
-        risk_label = f"Risk: {signal.get('actual_risk_percent', 0):.2f}%" if signal.get('actual_risk_percent') else ""
+        # ✅ تحديد الاتجاه بالعربية
+        if signal["direction"] == "BUY":
+            direction_ar = "🟢 شراء"
+            emoji = "🟢"
+        else:
+            direction_ar = "🔴 بيع"
+            emoji = "🔴"
+
+        # ✅ حساب التقييم
+        score_val = signal.get('score', 0)
+        if score_val >= 9.0:
+            rating = "🔥 إشارة استثنائية"
+        elif score_val >= 8.0:
+            rating = "⚡ إشارة قوية جداً"
+        elif score_val >= 7.5:
+            rating = "✅ إشارة قوية"
+        else:
+            rating = "📊 إشارة مقبولة"
+
+        quality_label = f"⚡ الجودة: {signal.get('quality', 0)}%" if signal.get('quality') else ""
+        risk_label = f"🎯 المخاطرة: {signal.get('actual_risk_percent', 0):.2f}%" if signal.get('actual_risk_percent') else ""
+
+        # ✅ تمييز الانفجارات
+        if signal.get("early_snipe"):
+            title = f"{emoji} <b>💥 تنبؤ بانفجار — {self.safe_text(signal['symbol'])}</b>"
+            explosion_info = signal.get("explosion_details", {})
+            conditions = signal.get("explosion_conditions", 0)
+
+            details_lines = []
+            if explosion_info.get("squeeze"):
+                details_lines.append("  ✅ انضغاط بولينجر (TTM Squeeze)")
+            if explosion_info.get("consolidation"):
+                details_lines.append("  ✅ تجميع سعري (Consolidation)")
+            if explosion_info.get("volume_buildup"):
+                details_lines.append("  ✅ تراكم حجم (Volume Buildup)")
+            if explosion_info.get("breakout_proximity"):
+                details_lines.append("  ✅ اقتراب من مقاومة/دعم")
+
+            explosion_section = (
+                f"\n💥 <b>إعداد انفجار</b> ({conditions}/4 شروط)\n"
+                + "\n".join(details_lines)
+                + "\n"
+            )
+        else:
+            title = f"{emoji} <b>{rating} — {self.safe_text(signal['symbol'])}</b>"
+            explosion_section = ""
+
+        # ✅ عدد العوامل المتوافقة
+        factor_count = signal.get("factor_count", 0)
+        factor_section = f"📊 العوامل المتوافقة: {factor_count}/7\n" if factor_count else ""
+
+        # ✅ حجم الصفقة بحجم مقروء
+        position = signal.get('position_size', 0)
+        position_str = self.safe_text(f"{position:.6f}" if position >= 0.01 else f"{position:.4e}")
 
         return (
-            f"{emoji} <b>{self.safe_text(signal['symbol'])}</b>\n\n"
-            f"Direction: <b>{self.safe_text(signal['direction'])}</b>\n"
-            f"Score: <b>{self.safe_text(signal['score'])}/10</b>\n"
+            f"{title}\n"
+            f"{'━' * 20}\n\n"
+            f"📌 <b>الاتجاه:</b> {direction_ar}\n"
+            f"⭐ <b>النقاط:</b> {self.safe_text(score_val)}/10\n"
             f"{quality_label}\n"
-            f"{risk_label}\n\n"
-            f"Entry: {fmt(signal['entry'])}\n"
-            f"SL: {fmt(signal['sl'])}\n"
-            f"TP: {fmt(signal['tp'])}\n"
-            f"R/R: {self.safe_text(signal['rr'])}\n"
-            f"Position: {fmt(signal['position_size'])}\n\n"
-            f"RSI: {self.safe_text(signal['rsi'])}\n"
-            f"ADX: {self.safe_text(signal['adx'])}\n"
-            f"ATR: {fmt(signal['atr'])}{snipe}\n\n"
-            "⚠️ إشارة تحليلية وليست ضماناً للربح.\n"
-            "📊 Quality تعبر عن قوة الإشارة وليست احتمالية ربح."
+            f"{risk_label}\n"
+            f"{factor_section}"
+            f"{explosion_section}\n"
+            f"━━━━━ <b>إدارة المخاطر</b> ━━━━━\n\n"
+            f"💰 <b>سعر الدخول:</b> {fmt(signal['entry'])}\n"
+            f"🛑 <b>وقف الخسارة:</b> {fmt(signal['sl'])}\n"
+            f"🎯 <b>جني الأرباح:</b> {fmt(signal['tp'])}\n"
+            f"📊 <b>نسبة R/R:</b> {self.safe_text(signal['rr'])}\n"
+            f"📦 <b>حجم الصفقة:</b> {position_str}\n\n"
+            f"━━━━━ <b>المؤشرات الفنية</b> ━━━━━\n\n"
+            f"📈 <b>RSI:</b> {self.safe_text(signal['rsi'])}\n"
+            f"📊 <b>ADX:</b> {self.safe_text(signal['adx'])}\n"
+            f"📉 <b>ATR:</b> {fmt(signal['atr'])}\n\n"
+            f"⏱ <b>الوقت:</b> {self.safe_text(signal['timestamp'][:19].replace('T', ' '))}\n\n"
+            "⚠️ <i>إشارة تحليلية وليست ضماناً للربح.</i>\n"
+            "📊 <i>الجودة تعبر عن قوة الإشارة وليست احتمالية ربح.</i>"
         )
