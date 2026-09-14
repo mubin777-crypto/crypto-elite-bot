@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("quant_bot.telegram")
 
+
 class TelegramBot:
     def __init__(self, database, signal_engine, data_fetcher):
         self.database = database
@@ -28,20 +29,25 @@ class TelegramBot:
     def safe_text(self, text):
         return html.escape(str(text))
 
+    # ============================================================
+    # Start / Stop
+    # ============================================================
     async def start(self):
         if not self.token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
 
         self.is_running = True
-        # ✅ إصلاح: المهلة 45 ثانية (أكبر من long-poll 25 ثانية)
         timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
         self.session = aiohttp.ClientSession(timeout=timeout)
 
         if self.webhook_mode:
             logger.info("ℹ️ Telegram Webhook mode enabled")
         else:
+            # ✅ حذف Webhook قبل بدء Polling لمنع 409 Conflict
             await self.api_call("deleteWebhook", {"drop_pending_updates": True})
             logger.info("ℹ️ Telegram polling mode selected")
+            # ✅ انتظار قصير للتأكد من حذف Webhook على سيرفرات Telegram
+            await asyncio.sleep(2)
             self.polling_task = asyncio.create_task(self.polling_loop())
 
         if self.admin_id:
@@ -59,6 +65,9 @@ class TelegramBot:
             await self.session.close()
             self.session = None
 
+    # ============================================================
+    # Webhook Management
+    # ============================================================
     async def set_webhook(self, webhook_url: str) -> bool:
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
@@ -92,13 +101,15 @@ class TelegramBot:
             logger.warning(f"⚠️ Failed to delete webhook: {result}")
             return False
 
+    # ============================================================
+    # Polling Loop
+    # ============================================================
     async def polling_loop(self):
-        """✅ إصلاح: استخدام long-poll timeout صحيح"""
         while self.is_running:
             try:
                 params = {
                     "offset": self.last_update_id + 1,
-                    "timeout": config.TELEGRAM_LONG_POLL_TIMEOUT,  # 25 ثانية
+                    "timeout": config.TELEGRAM_LONG_POLL_TIMEOUT,
                 }
                 result = await self.api_call("getUpdates", params)
                 if result and result.get("ok"):
@@ -110,9 +121,8 @@ class TelegramBot:
                     if result:
                         error_code = result.get("error_code")
                         if error_code == 409:
-                            logger.warning("Polling conflict, another instance may be running")
-                            await asyncio.sleep(5)
-                # ✅ استراحة قصيرة بين الدورات
+                            logger.warning("Polling conflict, waiting...")
+                            await asyncio.sleep(10)
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
@@ -123,6 +133,9 @@ class TelegramBot:
     async def process_update(self, update: dict):
         await self.handle_update(update)
 
+    # ============================================================
+    # Telegram API Call
+    # ============================================================
     async def api_call(self, method, payload=None, retries=config.TELEGRAM_MAX_RETRIES):
         if not self.session:
             return None
@@ -152,6 +165,9 @@ class TelegramBot:
         logger.error(f"All retries failed for {method}")
         return None
 
+    # ============================================================
+    # Send Message
+    # ============================================================
     async def send_message(self, chat_id, text, parse_mode="HTML", retries=config.TELEGRAM_MAX_RETRIES):
         if not text:
             return None
@@ -179,6 +195,9 @@ class TelegramBot:
                 backoff *= 2
         return None
 
+    # ============================================================
+    # Broadcast
+    # ============================================================
     async def broadcast(self, text):
         subscribers = await self.database.get_subscribers()
         count = len(subscribers)
@@ -186,7 +205,10 @@ class TelegramBot:
         if count == 0:
             logger.warning("⚠️ No active subscribers found!")
             if self.admin_id:
-                await self.send_message(self.admin_id, "⚠️ لا يوجد مشتركون نشطون. استخدم /adduser لإضافة مستخدمين.")
+                await self.send_message(
+                    self.admin_id,
+                    "⚠️ لا يوجد مشتركون نشطون. استخدم /adduser لإضافة مستخدمين.",
+                )
             return
 
         if self.admin_id and self.admin_id not in subscribers:
@@ -223,6 +245,9 @@ class TelegramBot:
             logger.info(f"✅ Removed invalid users: {blocked_users}")
         logger.info(f"✅ Broadcast: {success_count}/{len(subscribers)} sent, {failure_count} failed")
 
+    # ============================================================
+    # Update Handler
+    # ============================================================
     async def handle_update(self, update):
         if not isinstance(update, dict):
             return
@@ -297,9 +322,15 @@ class TelegramBot:
         else:
             await self.send_message(chat_id, "❓ أمر غير معروف. استخدم /start للمساعدة.")
 
+    # ============================================================
+    # Admin Check
+    # ============================================================
     def is_admin(self, user_id):
         return int(user_id) == int(self.admin_id)
 
+    # ============================================================
+    # Help Text
+    # ============================================================
     def help_text(self):
         return (
             "🤖 <b>نظام إشارات العملات الرقمية v2026</b>\n\n"
@@ -315,6 +346,9 @@ class TelegramBot:
             "💥 النظام يرسل الإشارات القوية فقط + تنبؤات الانفجارات"
         )
 
+    # ============================================================
+    # Subscribers List
+    # ============================================================
     async def subscribers_list(self, chat_id, user_id):
         if not self.is_admin(user_id):
             await self.send_message(chat_id, "⛔ للمشرف فقط.")
@@ -329,6 +363,9 @@ class TelegramBot:
             lines.append(f"• {uid}")
         await self.send_message(chat_id, "\n".join(lines))
 
+    # ============================================================
+    # Status Command
+    # ============================================================
     async def status(self, chat_id):
         signals = await self.database.get_daily_signals()
         stats = await self.database.get_daily_pnl()
@@ -351,6 +388,9 @@ class TelegramBot:
         )
         await self.send_message(chat_id, text)
 
+    # ============================================================
+    # Prewatch Command
+    # ============================================================
     async def prewatch(self, chat_id):
         items = await self.database.get_prewatch(10)
         if not items:
@@ -365,6 +405,9 @@ class TelegramBot:
             )
         await self.send_message(chat_id, "\n".join(lines))
 
+    # ============================================================
+    # Performance Command
+    # ============================================================
     async def performance(self, chat_id):
         signals = await self.database.get_daily_signals()
         closed = [x for x in signals if x["status"] == "CLOSED"]
@@ -403,6 +446,9 @@ class TelegramBot:
         )
         await self.send_message(chat_id, text)
 
+    # ============================================================
+    # Manual Signal Analysis
+    # ============================================================
     async def signal(self, chat_id, symbol):
         klines = await self.data_fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT)
         if not klines:
@@ -422,6 +468,9 @@ class TelegramBot:
             return
         await self.send_message(chat_id, self.format_signal(result))
 
+    # ============================================================
+    # Format Signal (Arabic)
+    # ============================================================
     def format_signal(self, signal):
         def fmt(val):
             if abs(val) < 1e-5:
