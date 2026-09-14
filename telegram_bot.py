@@ -102,6 +102,13 @@ class TelegramBot:
                     for update in updates:
                         self.last_update_id = update.get("update_id", self.last_update_id)
                         await self.handle_update(update)
+                else:
+                    if result:
+                        error_code = result.get("error_code")
+                        # 409 Conflict لا يستدعي إيقاف الحلقة
+                        if error_code == 409:
+                            logger.warning("Polling conflict, another instance may be running")
+                            await asyncio.sleep(5)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -156,6 +163,11 @@ class TelegramBot:
                 })
                 if result and result.get("ok"):
                     return result
+                # ✅ لا تعد المحاولة إذا كان الخطأ من نوع 400/403
+                if result:
+                    error_code = result.get("error_code")
+                    if error_code in (400, 403):
+                        return result
             except Exception as exc:
                 logger.warning(f"Send attempt {attempt+1} exception for {chat_id}: {exc}")
             if attempt < retries:
@@ -185,23 +197,22 @@ class TelegramBot:
                 if result and result.get("ok"):
                     success_count += 1
                 else:
-                    if result and result.get("error_code") == 403:
-                        logger.warning(f"User {user_id} blocked the bot, removing from subscribers")
-                        await self.database.remove_subscriber(user_id)
-                        blocked_users.append(user_id)
                     failure_count += 1
+                    # ✅ التعامل مع 400 chat not found و 403 blocked
+                    if result:
+                        error_code = result.get("error_code")
+                        error_desc = result.get("description", "").lower()
+                        if error_code == 403 or "blocked" in error_desc or "chat not found" in error_desc or "user not found" in error_desc:
+                            logger.warning(f"User {user_id} invalid/blocked, removing: {error_desc}")
+                            await self.database.remove_subscriber(user_id)
+                            blocked_users.append(user_id)
                 await asyncio.sleep(0.05)
             except Exception as exc:
                 failure_count += 1
-                if "403" in str(exc):
-                    logger.warning(f"User {user_id} blocked the bot, removing from subscribers")
-                    await self.database.remove_subscriber(user_id)
-                    blocked_users.append(user_id)
-                else:
-                    logger.warning(f"Broadcast exception for {user_id}: {exc}")
+                logger.warning(f"Broadcast exception for {user_id}: {exc}")
 
         if blocked_users:
-            logger.info(f"Removed blocked users: {blocked_users}")
+            logger.info(f"✅ Removed invalid users: {blocked_users}")
         logger.info(f"✅ Broadcast: {success_count}/{len(subscribers)} sent, {failure_count} failed")
 
     async def handle_update(self, update):
