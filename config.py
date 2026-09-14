@@ -35,7 +35,6 @@ SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 TELEGRAM_USE_WEBHOOK = os.getenv("TELEGRAM_USE_WEBHOOK", "false").lower() == "true"
-# ✅ إصلاح: يجب أن يكون أكبر من 30 (long-poll timeout) + buffer
 TELEGRAM_API_TIMEOUT = int(os.getenv("TELEGRAM_API_TIMEOUT", "45"))
 TELEGRAM_LONG_POLL_TIMEOUT = int(os.getenv("TELEGRAM_LONG_POLL_TIMEOUT", "25"))
 TELEGRAM_RETRY_BACKOFF_BASE = 1.0
@@ -84,7 +83,7 @@ CORE_UNIVERSE = [
 ]
 
 # ============================================================
-# ✅ استبعاد العملات المستقرة والأسهم المرمزة والعملات السياسية
+# Excluded Symbols (stablecoins + political + leveraged)
 # ============================================================
 EXCLUDED_SYMBOLS = [
     # عملات مستقرة
@@ -94,19 +93,16 @@ EXCLUDED_SYMBOLS = [
     "AEURUSDT", "EURIUSDT", "USD1USDT",
     # عملات سياسية / meme
     "TRUMPUSDT", "WLFIUSDT", "MELANIAUSDT", "BIDENUSDT",
-    # أسهم مُرمّزة - سنستخدم منطق إضافي لاستبعاد أي شيء ينتهي بـ BUSDT
 ]
 
-# ✅ أنماط لاستبعاد الأسهم المرمّزة والعملات الغريبة
 EXCLUDED_SUFFIXES = [
-    "BUSD",        # Binance USD (stablecoin)
-    "UPUSDT",      # Leveraged tokens
-    "DOWNUSDT",    # Leveraged tokens
-    "BULLUSDT",    # Leveraged tokens
-    "BEARUSDT",    # Leveraged tokens
+    "BUSD",
+    "UPUSDT",
+    "DOWNUSDT",
+    "BULLUSDT",
+    "BEARUSDT",
 ]
 
-# ✅ الأسهم المرمّزة على Binance تنتهي بـ "BUSDT" (مثل: MSTRBUSDT, QQQBUSDT)
 EXCLUDE_TOKENIZED_STOCKS = True
 
 # ============================================================
@@ -143,12 +139,17 @@ MOMENTUM_PERIOD = 5
 VOLUME_AVG_PERIOD = 20
 
 # ============================================================
-# Signal scoring - عتبات مشددة
+# Signal scoring
 # ============================================================
 MIN_SCORE = float(os.getenv("MIN_SCORE", "7.5"))
-EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "7.0"))
+EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "10.0"))  # ✅ رُفع إلى 10.0 (انفجارات 4/4 فقط)
 MIN_ADX = float(os.getenv("MIN_ADX", "20.0"))
 MIN_FACTORS_ALIGNED = 5
+
+# ============================================================
+# ✅ تجاوز فلتر RSI للانفجارات
+# ============================================================
+EXPLOSION_RSI_OVERRIDE = True  # ✅ السماح للانفجارات بتجاوز فلتر RSI
 
 # ============================================================
 # RSI Filters
@@ -248,8 +249,10 @@ def validate_config():
         errors.append("BINANCE_TIMEOUT must not exceed 5 seconds")
     if MIN_SCORE < 7.0:
         errors.append("MIN_SCORE must be at least 7.0 for strong signals")
-    # ✅ التحقق من أن المهلة أكبر من long-poll
     if TELEGRAM_API_TIMEOUT <= TELEGRAM_LONG_POLL_TIMEOUT:
-        errors.append(f"TELEGRAM_API_TIMEOUT ({TELEGRAM_API_TIMEOUT}) must be > TELEGRAM_LONG_POLL_TIMEOUT ({TELEGRAM_LONG_POLL_TIMEOUT})")
+        errors.append(
+            f"TELEGRAM_API_TIMEOUT ({TELEGRAM_API_TIMEOUT}) must be > "
+            f"TELEGRAM_LONG_POLL_TIMEOUT ({TELEGRAM_LONG_POLL_TIMEOUT})"
+        )
     if errors:
         raise ValueError(" | ".join(errors))
