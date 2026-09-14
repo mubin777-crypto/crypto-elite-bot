@@ -103,7 +103,6 @@ class Database:
             """)
             logger.info("PostgreSQL tables created")
 
-            # إنشاء الأوزان الأولية
             for factor in config.FACTORS:
                 existing = await self.get_weight(factor)
                 if existing is None:
@@ -198,7 +197,6 @@ class Database:
         """)
         await self.conn.commit()
 
-        # إنشاء الأوزان الأولية
         for factor in config.FACTORS:
             existing = await self.get_weight(factor)
             if existing is None:
@@ -300,6 +298,7 @@ class Database:
     # Signals
     # ============================================================
     async def add_signal(self, signal):
+        """✅ إضافة إشارة جديدة - مع إصلاح تمرير Tuple لـ SQLite"""
         now = datetime.now(timezone.utc).isoformat()
         try:
             factor_contributions = json.dumps(signal.get("factor_contributions", {}))
@@ -321,17 +320,30 @@ class Database:
                     factor_contributions, factor_weights, used_factors, now)
                 return row["id"]
             else:
+                # ✅ الإصلاح: تمرير Tuple واحد بدلاً من وسائط منفصلة
+                params = (
+                    signal["symbol"],
+                    signal["direction"],
+                    signal["score"],
+                    signal.get("quality", 0),
+                    signal["entry"],
+                    signal["sl"],
+                    signal["tp"],
+                    signal["rr"],
+                    signal["position_size"],
+                    signal.get("actual_risk_percent", 0),
+                    factor_contributions,
+                    factor_weights,
+                    used_factors,
+                    now,
+                )
                 cursor = await self.conn.execute("""
                     INSERT INTO signals (
                         symbol, direction, score, quality, entry, sl, tp, rr, quantity,
                         actual_risk_percent, factor_contributions, factor_weights, used_factors,
                         created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, signal["symbol"], signal["direction"], signal["score"],
-                    signal.get("quality", 0), signal["entry"], signal["sl"],
-                    signal["tp"], signal["rr"], signal["position_size"],
-                    signal.get("actual_risk_percent", 0),
-                    factor_contributions, factor_weights, used_factors, now)
+                """, params)
                 await self.conn.commit()
                 return cursor.lastrowid
         except Exception as e:
