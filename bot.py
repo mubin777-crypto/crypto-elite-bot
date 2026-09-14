@@ -1,5 +1,5 @@
 # bot.py
-# Main Application - Production Ready with Strict Symbol Filtering
+# Main Application - Production Ready
 
 import asyncio
 import json
@@ -16,12 +16,12 @@ from utils import (
 from signals import SignalEngine
 from telegram_bot import TelegramBot
 
+
 # ============================================================
 # Web Handlers
 # ============================================================
 
 async def handle_health(request):
-    """نقطة فحص السلامة (Health Check)"""
     return web.json_response({
         "status": "healthy",
         "service": "Quant Signal Engine",
@@ -30,7 +30,6 @@ async def handle_health(request):
 
 
 async def handle_telegram_webhook(request):
-    """استقبال تحديثات Telegram Webhook"""
     try:
         data = await request.json()
         bot_instance = request.app['bot_instance']
@@ -42,7 +41,6 @@ async def handle_telegram_webhook(request):
 
 
 async def handle_status_api(request):
-    """استرجاع حالة النظام عبر REST API"""
     bot_instance = request.app['bot_instance']
     try:
         open_signals = await bot_instance.db.get_open_signals()
@@ -101,15 +99,25 @@ class TradingBot:
         await self.web_runner.setup()
         site = web.TCPSite(self.web_runner, "0.0.0.0", config.PORT)
         await site.start()
+
+        # ✅ تنظيف WEBHOOK_URL من التكرار /webhook
+        webhook_base = config.WEBHOOK_URL.rstrip("/")
+        if webhook_base.endswith("/webhook"):
+            webhook_base = webhook_base[:-8]
+
         logger.info(f"🌐 Web Server running on port {config.PORT}")
         logger.info(f"📍 Health: http://0.0.0.0:{config.PORT}/health")
-        logger.info(f"📍 Webhook: {config.WEBHOOK_URL}{config.WEBHOOK_PATH}")
+        logger.info(f"📍 Webhook: {webhook_base}{config.WEBHOOK_PATH}")
         logger.info(f"📍 Status API: http://0.0.0.0:{config.PORT}/api/status")
         return self.web_runner
 
     async def setup_telegram_webhook(self):
         if config.TELEGRAM_USE_WEBHOOK and config.WEBHOOK_URL:
-            full_webhook_url = f"{config.WEBHOOK_URL.rstrip('/')}{config.WEBHOOK_PATH}"
+            # ✅ تنظيف WEBHOOK_URL من التكرار
+            webhook_base = config.WEBHOOK_URL.rstrip("/")
+            if webhook_base.endswith("/webhook"):
+                webhook_base = webhook_base[:-8]
+            full_webhook_url = f"{webhook_base}{config.WEBHOOK_PATH}"
             success = await self.telegram.set_webhook(full_webhook_url)
             if success:
                 logger.info(f"✅ Telegram Webhook set to: {full_webhook_url}")
@@ -156,62 +164,39 @@ class TradingBot:
         return stats["pnl"] <= limit
 
     # ============================================================
-    # ✅ Helper: التحقق الصارم من صلاحية رمز العملة
+    # Strict Symbol Validation
     # ============================================================
     def is_valid_symbol(self, symbol: str) -> bool:
-        """
-        ✅ التحقق الصارم من صلاحية رمز العملة
-
-        يستبعد:
-        - الأسهم المرمّزة (MSTRBUSDT, QQQBUSDT, SPYBUSDT)
-        - العملات المستقرة (RLUSDUSDT, PYUSDUSDT, USD1USDT)
-        - العملات السياسية (TRUMPUSDT, WLFIUSDT, MELANIAUSDT)
-        - الرموز الغريبة أو غير المنطقية
-        """
         if not symbol or not symbol.endswith("USDT"):
             return False
-
-        # ✅ استبعاد القائمة السوداء (stablecoins + political)
         if symbol in config.EXCLUDED_SYMBOLS:
             return False
 
-        # ✅ إزالة USDT للحصول على القاعدة
         base = symbol[:-4]
         if not base:
             return False
 
-        # ✅ استبعاد الأسهم المرمّزة
-        # الأسهم المرمّزة على Binance تنتهي بـ "B" قبل USDT
-        # مثال: MSTRBUSDT → base = MSTRB, QQQBUSDT → base = QQQB
+        # استبعاد الأسهم المرمّزة (تنتهي بـ B قبل USDT)
         if config.EXCLUDE_TOKENIZED_STOCKS and base.endswith("B") and len(base) > 2:
-            # قائمة استثناءات: عملات حقيقية تنتهي بـ B
             known_cryptos_ending_in_b = {
                 "BNB", "ARB", "BGB", "WIF", "SATS", "ORDI",
                 "OMB", "GLMB", "STGB", "BANB", "VIB", "SNB",
                 "MTLB", "RBNB", "VETB", "ACB", "TROYB"
             }
-            # إذا كان الرمز يحتوي على حروف كبيرة متتالية (يشبه سهم مُرمّز)
-            # نتحقق من أنه ليس من العملات المعروفة
             if base not in known_cryptos_ending_in_b:
                 logger.debug(f"Rejected tokenized stock: {symbol}")
                 return False
 
-        # ✅ استبعاد اللواحق الممنوعة (Leveraged tokens)
+        # استبعاد اللواحق الممنوعة
         for suffix in config.EXCLUDED_SUFFIXES:
             if symbol.endswith(suffix):
                 logger.debug(f"Rejected leveraged token: {symbol}")
                 return False
 
-        # ✅ استبعاد الرموز التي تبدأ برقم
         if base[0].isdigit():
             return False
-
-        # ✅ التحقق من أن القاعدة تحتوي فقط على أحرف إنجليزية وأرقام
         if not base.isascii() or not base.isalnum():
-            logger.debug(f"Rejected non-ascii symbol: {symbol}")
             return False
-
-        # ✅ طول منطقي للقاعدة
         if len(base) < 2 or len(base) > 10:
             return False
 
@@ -247,7 +232,6 @@ class TradingBot:
         result = self.engine.analyze(symbol, df, self.daily_capital, df_15m)
         if not result:
             return
-
         if not await self.cooldown_allowed(symbol, result["direction"]):
             return
 
@@ -268,14 +252,11 @@ class TradingBot:
     # ============================================================
     async def scan_market(self):
         prewatch = await self.db.get_prewatch(config.MAX_PREWATCH_TO_SCAN)
-
-        # ✅ فلترة رموز Pre-watch
         prewatch_symbols = [
             item["symbol"] for item in prewatch
             if item["symbol"] not in self.known_symbols
             and self.is_valid_symbol(item["symbol"])
         ]
-
         symbols = list(dict.fromkeys(list(self.known_symbols) + prewatch_symbols))
         tasks = [self.scan_symbol(symbol) for symbol in symbols]
         if tasks:
@@ -285,10 +266,9 @@ class TradingBot:
                     logger.error(f"Scan task failed: {result}")
 
     # ============================================================
-    # Scan Pre-watch (✅ فلترة صارمة)
+    # Scan Pre-watch
     # ============================================================
     async def scan_prewatch(self):
-        """✅ مع فلترة صارمة للرموز"""
         data = await self.fetcher.ticker_24h()
         if not isinstance(data, list):
             return
@@ -299,11 +279,9 @@ class TradingBot:
         for item in data:
             symbol = item.get("symbol", "").upper()
 
-            # ✅ تطبيق فلترة صارمة
             if not self.is_valid_symbol(symbol):
                 rejected_count += 1
                 continue
-
             if symbol in self.known_symbols:
                 continue
 
@@ -315,24 +293,19 @@ class TradingBot:
             except (ValueError, TypeError):
                 continue
 
-            # ✅ فلترة السيولة والصفقات
             if volume < config.PREWATCH_MIN_VOLUME_USDT:
                 continue
             if trades < config.PREWATCH_MIN_TRADES:
                 continue
-
-            # ✅ فلترة نطاق السعر
             if price > config.PREWATCH_MAX_PRICE or price < config.PREWATCH_MIN_PRICE:
                 continue
 
-            # ✅ فلترة الحركة أو الحجم
             if abs(change) > config.PREWATCH_PRICE_CHANGE or volume > config.PREWATCH_VOLUME_USDT:
                 reasons = []
                 if abs(change) > config.PREWATCH_PRICE_CHANGE:
                     reasons.append("price_move")
                 if volume > config.PREWATCH_VOLUME_USDT:
                     reasons.append("high_volume")
-
                 await self.db.add_prewatch(
                     symbol, ",".join(reasons), change, volume, trades, price
                 )
@@ -370,7 +343,7 @@ class TradingBot:
                 logger.exception(f"Health monitor error: {exc}")
 
     # ============================================================
-    # Self Ping (Keep-Alive)
+    # Self Ping
     # ============================================================
     async def self_ping(self):
         url = config.RENDER_EXTERNAL_URL or f"http://127.0.0.1:{config.PORT}/health"
@@ -459,7 +432,6 @@ class TradingBot:
                     self.daily_capital, result_amount, category
                 )
 
-                # ✅ تحديث الأوزان بناءً على المساهمات الفعلية
                 signal_data = await self.db.get_signal(signal_row["id"])
                 if signal_data and signal_data.get("factor_contributions"):
                     try:
@@ -504,19 +476,14 @@ class TradingBot:
             started = time.monotonic()
             try:
                 self.scan_counter += 1
-
-                # ✅ Pre-watch كل 3 دورات
                 if self.scan_counter % config.PREWATCH_SCAN_EVERY == 0:
                     await self.scan_prewatch()
-
                 await self.scan_market()
                 await self.evaluate_open_signals()
-
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.exception(f"Scanner error: {exc}")
-
             elapsed = time.monotonic() - started
             wait = max(1, config.SCAN_INTERVAL - elapsed)
             await asyncio.sleep(wait)
@@ -531,6 +498,7 @@ class TradingBot:
         logger.info(f"🔧 DATABASE: {'PostgreSQL' if config.USE_POSTGRES else 'SQLite'}")
         logger.info(f"🔧 TELEGRAM_MODE: {'Webhook' if config.TELEGRAM_USE_WEBHOOK else 'Polling'}")
         logger.info(f"🔧 MIN_SCORE: {config.MIN_SCORE}, MIN_ADX: {config.MIN_ADX}")
+        logger.info(f"🔧 EARLY_SNIPE_SCORE: {config.EARLY_SNIPE_SCORE}")
         logger.info(f"🔧 EXCLUDED_SYMBOLS: {len(config.EXCLUDED_SYMBOLS)} entries")
 
         # 1️⃣ تهيئة قاعدة البيانات
