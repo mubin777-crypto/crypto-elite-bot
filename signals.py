@@ -1,12 +1,12 @@
 # signals.py
-# Signal Engine - Production Ready
+# Signal Engine - Strong Signals Only
 
 import math
 import json
 import logging
 from datetime import datetime, timezone
 import config
-from indicators import add_indicators, detect_early_snipe, pivot_points
+from indicators import add_indicators, detect_early_snipe, detect_explosion_setup, pivot_points
 
 logger = logging.getLogger("quant_bot.signals")
 
@@ -26,33 +26,50 @@ class SignalEngine:
 
         scores = {"BUY": {}, "SELL": {}}
 
-        rsi_buy = 1.0 if 45 <= rsi_value <= 65 else 0.0
-        rsi_sell = 1.0 if 35 <= rsi_value <= 55 else 0.0
-
-        if config.ENABLE_RSI_FILTER:
-            if rsi_value > config.RSI_OVERBOUGHT:
-                rsi_buy = -1.0
-            if rsi_value < config.RSI_OVERSOLD:
-                rsi_sell = -1.0
+        # ✅ RSI - نطاق شراء/بيع أمثل
+        if config.RSI_BUY_ZONE_MIN <= rsi_value <= config.RSI_BUY_ZONE_MAX:
+            rsi_buy = 1.0
+        elif rsi_value > config.RSI_OVERBOUGHT:
+            rsi_buy = -1.0
+        else:
+            rsi_buy = 0.0
+        
+        if config.RSI_SELL_ZONE_MIN <= rsi_value <= config.RSI_SELL_ZONE_MAX:
+            rsi_sell = 1.0
+        elif rsi_value < config.RSI_OVERSOLD:
+            rsi_sell = -1.0
+        else:
+            rsi_sell = 0.0
 
         scores["BUY"]["rsi"] = rsi_buy
         scores["SELL"]["rsi"] = rsi_sell
 
+        # ✅ ADX - يتطلب اتجاه قوي
         scores["BUY"]["adx"] = 1.0 if (adx_value > config.MIN_ADX and momentum_value > 0) else 0.0
         scores["SELL"]["adx"] = 1.0 if (adx_value > config.MIN_ADX and momentum_value < 0) else 0.0
 
-        scores["BUY"]["momentum"] = 1.0 if momentum_value > 0 else 0.0
-        scores["SELL"]["momentum"] = 1.0 if momentum_value < 0 else 0.0
+        # ✅ Momentum - نطاق محدود
+        if config.MOMENTUM_MIN <= momentum_value <= config.MOMENTUM_MAX:
+            scores["BUY"]["momentum"] = 1.0
+        elif -config.MOMENTUM_MAX <= momentum_value <= -config.MOMENTUM_MIN:
+            scores["SELL"]["momentum"] = 1.0
+        else:
+            scores["BUY"]["momentum"] = 0.0
+            scores["SELL"]["momentum"] = 0.0
 
-        scores["BUY"]["volume"] = 1.0 if volume_value >= 1.0 else 0.0
-        scores["SELL"]["volume"] = 1.0 if volume_value >= 1.0 else 0.0
+        # ✅ Volume
+        scores["BUY"]["volume"] = 1.0 if volume_value >= 1.2 else 0.0
+        scores["SELL"]["volume"] = 1.0 if volume_value >= 1.2 else 0.0
 
+        # ✅ Bollinger
         scores["BUY"]["bollinger"] = 1.0 if close > bb_middle else 0.0
         scores["SELL"]["bollinger"] = 1.0 if close < bb_middle else 0.0
 
+        # ✅ MACD
         scores["BUY"]["macd"] = 1.0 if macd_hist > 0 else 0.0
         scores["SELL"]["macd"] = 1.0 if macd_hist < 0 else 0.0
 
+        # ✅ Pivot
         pivots = pivot_points(df)
         scores["BUY"]["pivot"] = 0.0
         scores["SELL"]["pivot"] = 0.0
@@ -68,6 +85,7 @@ class SignalEngine:
         total = 0.0
         contributions = {}
         weights = {}
+        positives = 0
 
         for name, value in factors.items():
             weight = 1.0 if not self.adaptive_weights else self.adaptive_weights.get(name, 1.0)
@@ -75,13 +93,15 @@ class SignalEngine:
             contrib = value * weight
             contributions[name] = contrib
             total += contrib
+            if value > 0:
+                positives += 1
 
         if return_contributions:
             if total > 0:
                 normalized = {k: v / total for k, v in contributions.items()}
             else:
                 normalized = {k: 0 for k in contributions}
-            return total, normalized, weights
+            return total, normalized, weights, positives
         return total
 
     def calculate_risk_levels(self, direction, entry, atr_value, pivots):
@@ -155,13 +175,47 @@ class SignalEngine:
         max_quantity = max_notional / entry
 
         if raw_quantity > max_quantity:
-            logger.debug(f"Signal rejected: position size exceeds max {config.MAX_POSITION_PERCENT*100}%")
+            logger.debug(f"Signal rejected: position size exceeds max")
             return None, None
 
         actual_risk_amount = raw_quantity * distance
         actual_risk_percent = actual_risk_amount / capital
 
         return raw_quantity, actual_risk_percent
+
+    def check_trend_alignment(self, direction, df_15m):
+        """✅ التحقق من توافق الترند على 15m"""
+        if df_15m is None or len(df_15m) < 50:
+            return True, 0.0  # لا نمنع إذا لم تتوفر بيانات 15m
+
+        df_15m_ind = add_indicators(df_15m)
+        trend_close = float(df_15m["close"].iloc[-1])
+        trend_ema50 = df_15m["close"].ewm(span=50).mean().iloc[-1]
+        trend_slope_pct = (trend_close - trend_ema50) / trend_ema50 * 100
+
+        if direction == "BUY":
+            aligned = trend_slope_pct > 0.1  # الترند صاعد بشكل واضح
+        else:
+            aligned = trend_slope_pct < -0.1
+
+        return aligned, trend_slope_pct
+
+    def check_volume_confirmation(self, df):
+        """✅ التحقق من تأكيد الحجم"""
+        latest = df.iloc[-1]
+        vol_ratio = float(latest["volume_ratio"])
+        return vol_ratio >= 1.2
+
+    def check_momentum_alignment(self, direction, df):
+        """✅ التحقق من توافق الزخم"""
+        latest = df.iloc[-1]
+        momentum_value = float(latest["momentum"])
+        macd_hist = float(latest["macd_hist"])
+
+        if direction == "BUY":
+            return momentum_value > 0 and macd_hist > 0
+        else:
+            return momentum_value < 0 and macd_hist < 0
 
     def analyze(self, symbol, df, capital=None, df_15m=None):
         capital = capital or config.INITIAL_CAPITAL
@@ -177,40 +231,56 @@ class SignalEngine:
                 return None
 
         factors, pivots = self.score_factors(df)
-        buy_score, buy_contrib, buy_weights = self.weighted_score(factors["BUY"], return_contributions=True)
-        sell_score, sell_contrib, sell_weights = self.weighted_score(factors["SELL"], return_contributions=True)
+        buy_score, buy_contrib, buy_weights, buy_positives = self.weighted_score(
+            factors["BUY"], return_contributions=True
+        )
+        sell_score, sell_contrib, sell_weights, sell_positives = self.weighted_score(
+            factors["SELL"], return_contributions=True
+        )
 
-        early = detect_early_snipe(df)
+        # ✅ التحقق من كاشف الانفجارات
+        explosion = detect_explosion_setup(df)
+        
         direction = None
         score = 0.0
-        early_snipe = False
+        is_explosion = False
         used_factors = {}
         factor_weights = {}
         factor_contributions = {}
+        factor_count = 0
 
-        if early["active"]:
-            direction = early["direction"]
-            score = early["score"]
-            early_snipe = True
-            used_factors = {"early_snipe": 1.0}
-            factor_weights = {"early_snipe": 1.0}
-            factor_contributions = {"early_snipe": 1.0}
-        elif buy_score >= config.MIN_SCORE:
+        # ✅ أولوية للانفجارات القوية
+        if explosion["active"] and explosion["score"] >= config.EARLY_SNIPE_SCORE:
+            direction = explosion["direction"]
+            score = explosion["score"]
+            is_explosion = True
+            used_factors = {"explosion": 1.0}
+            factor_weights = {"explosion": 1.0}
+            factor_contributions = {"explosion": 1.0}
+            factor_count = explosion["conditions_met"]
+            logger.info(f"💥 Explosion setup detected: {symbol} {direction} ({explosion['conditions_met']}/4 conditions)")
+        
+        # ✅ إشارات عادية قوية فقط
+        elif buy_score >= config.MIN_SCORE and buy_positives >= config.MIN_FACTORS_ALIGNED:
             direction = "BUY"
             score = buy_score
             used_factors = {k: v for k, v in factors["BUY"].items() if v > 0}
             factor_weights = buy_weights
             factor_contributions = buy_contrib
-        elif sell_score >= config.MIN_SCORE:
+            factor_count = buy_positives
+        
+        elif sell_score >= config.MIN_SCORE and sell_positives >= config.MIN_FACTORS_ALIGNED:
             direction = "SELL"
             score = sell_score
             used_factors = {k: v for k, v in factors["SELL"].items() if v > 0}
             factor_weights = sell_weights
             factor_contributions = sell_contrib
+            factor_count = sell_positives
 
         if direction is None:
             return None
 
+        # ✅ RSI filter
         rsi_value = float(latest["rsi"])
         if config.ENABLE_RSI_FILTER:
             if direction == "BUY" and rsi_value > config.RSI_OVERBOUGHT:
@@ -218,9 +288,32 @@ class SignalEngine:
             if direction == "SELL" and rsi_value < config.RSI_OVERSOLD:
                 return None
 
+        # ✅ ADX filter (إلا للانفجارات)
         adx_value = float(latest["adx"])
-        if not early_snipe and adx_value <= config.MIN_ADX:
+        if not is_explosion and adx_value <= config.MIN_ADX:
             return None
+
+        # ✅ التحقق من بوابة الجودة
+        # 1. توافق الترند
+        if config.REQUIRE_TREND_ALIGNMENT:
+            trend_aligned, trend_slope = self.check_trend_alignment(direction, df_15m)
+            if not trend_aligned and not is_explosion:
+                logger.debug(f"Rejected {symbol}: trend not aligned (slope={trend_slope:.2f}%)")
+                return None
+        else:
+            trend_slope = 0.0
+
+        # 2. تأكيد الحجم
+        if config.REQUIRE_VOLUME_CONFIRMATION:
+            if not self.check_volume_confirmation(df) and not is_explosion:
+                logger.debug(f"Rejected {symbol}: volume not confirmed")
+                return None
+
+        # 3. توافق الزخم
+        if config.REQUIRE_MOMENTUM_ALIGNMENT:
+            if not self.check_momentum_alignment(direction, df) and not is_explosion:
+                logger.debug(f"Rejected {symbol}: momentum not aligned")
+                return None
 
         entry = float(latest["close"])
         atr_value = float(latest["atr"])
@@ -233,8 +326,8 @@ class SignalEngine:
         if quantity is None or quantity <= 0:
             return None
 
+        # ✅ حساب الترند والجودة
         if df_15m is not None and len(df_15m) > 0:
-            df_15m_indicators = add_indicators(df_15m)
             trend_close = float(df_15m["close"].iloc[-1])
             trend_ema50 = df_15m["close"].ewm(span=50).mean().iloc[-1] if len(df_15m) >= 50 else trend_close
             trend_slope = trend_close - trend_ema50
@@ -246,10 +339,17 @@ class SignalEngine:
         elif direction == "SELL" and trend_slope < 0:
             score += 1.0
 
+        # ✅ حساب الجودة النهائية
         max_possible = 7.0
-        if early_snipe:
-            max_possible += 1.0
+        if is_explosion:
+            max_possible += 3.0  # bonus للانفجارات
+        
         quality = min(score / max_possible * 100, 100)
+        
+        # ✅ بوابة الجودة النهائية
+        if quality < config.MIN_QUALITY_PERCENT and not is_explosion:
+            logger.debug(f"Rejected {symbol}: quality {quality:.1f}% < {config.MIN_QUALITY_PERCENT}%")
+            return None
 
         return {
             "symbol": symbol.upper(),
@@ -265,9 +365,12 @@ class SignalEngine:
             "rsi": round(rsi_value, 2),
             "adx": round(adx_value, 2),
             "atr": round(atr_value, 8),
-            "early_snipe": early_snipe,
+            "early_snipe": is_explosion,
+            "factor_count": factor_count,
             "factor_contributions": factor_contributions,
             "factor_weights": factor_weights,
             "used_factors": used_factors,
+            "explosion_details": explosion.get("details", {}) if is_explosion else {},
+            "explosion_conditions": explosion.get("conditions_met", 0) if is_explosion else 0,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
