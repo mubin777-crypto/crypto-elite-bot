@@ -25,25 +25,20 @@ class TelegramBot:
         self.is_running = False
         self._webhook_set = False
 
-    # ============================================================
-    # Helper: HTML Escape
-    # ============================================================
     def safe_text(self, text):
         return html.escape(str(text))
 
-    # ============================================================
-    # Start / Stop
-    # ============================================================
     async def start(self):
         if not self.token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
 
         self.is_running = True
+        # ✅ إصلاح: المهلة 45 ثانية (أكبر من long-poll 25 ثانية)
         timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
         self.session = aiohttp.ClientSession(timeout=timeout)
 
         if self.webhook_mode:
-            logger.info("ℹ️ Telegram Webhook mode enabled (will be set by bot.py)")
+            logger.info("ℹ️ Telegram Webhook mode enabled")
         else:
             await self.api_call("deleteWebhook", {"drop_pending_updates": True})
             logger.info("ℹ️ Telegram polling mode selected")
@@ -64,9 +59,6 @@ class TelegramBot:
             await self.session.close()
             self.session = None
 
-    # ============================================================
-    # Webhook Management
-    # ============================================================
     async def set_webhook(self, webhook_url: str) -> bool:
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
@@ -100,14 +92,14 @@ class TelegramBot:
             logger.warning(f"⚠️ Failed to delete webhook: {result}")
             return False
 
-    # ============================================================
-    # Polling Loop
-    # ============================================================
     async def polling_loop(self):
+        """✅ إصلاح: استخدام long-poll timeout صحيح"""
         while self.is_running:
             try:
-                await asyncio.sleep(1)
-                params = {"offset": self.last_update_id + 1, "timeout": 30}
+                params = {
+                    "offset": self.last_update_id + 1,
+                    "timeout": config.TELEGRAM_LONG_POLL_TIMEOUT,  # 25 ثانية
+                }
                 result = await self.api_call("getUpdates", params)
                 if result and result.get("ok"):
                     updates = result.get("result", [])
@@ -120,21 +112,17 @@ class TelegramBot:
                         if error_code == 409:
                             logger.warning("Polling conflict, another instance may be running")
                             await asyncio.sleep(5)
+                # ✅ استراحة قصيرة بين الدورات
+                await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error(f"Polling loop error: {exc}")
                 await asyncio.sleep(5)
 
-    # ============================================================
-    # Process Update (for Webhook)
-    # ============================================================
     async def process_update(self, update: dict):
         await self.handle_update(update)
 
-    # ============================================================
-    # Telegram API Call
-    # ============================================================
     async def api_call(self, method, payload=None, retries=config.TELEGRAM_MAX_RETRIES):
         if not self.session:
             return None
@@ -164,9 +152,6 @@ class TelegramBot:
         logger.error(f"All retries failed for {method}")
         return None
 
-    # ============================================================
-    # Send Message
-    # ============================================================
     async def send_message(self, chat_id, text, parse_mode="HTML", retries=config.TELEGRAM_MAX_RETRIES):
         if not text:
             return None
@@ -194,9 +179,6 @@ class TelegramBot:
                 backoff *= 2
         return None
 
-    # ============================================================
-    # Broadcast to All Subscribers
-    # ============================================================
     async def broadcast(self, text):
         subscribers = await self.database.get_subscribers()
         count = len(subscribers)
@@ -229,7 +211,7 @@ class TelegramBot:
                             or "chat not found" in error_desc
                             or "user not found" in error_desc
                         ):
-                            logger.warning(f"User {user_id} invalid/blocked, removing: {error_desc}")
+                            logger.warning(f"User {user_id} invalid/blocked, removing")
                             await self.database.remove_subscriber(user_id)
                             blocked_users.append(user_id)
                 await asyncio.sleep(0.05)
@@ -241,9 +223,6 @@ class TelegramBot:
             logger.info(f"✅ Removed invalid users: {blocked_users}")
         logger.info(f"✅ Broadcast: {success_count}/{len(subscribers)} sent, {failure_count} failed")
 
-    # ============================================================
-    # Handle Update (Commands)
-    # ============================================================
     async def handle_update(self, update):
         if not isinstance(update, dict):
             return
@@ -318,15 +297,9 @@ class TelegramBot:
         else:
             await self.send_message(chat_id, "❓ أمر غير معروف. استخدم /start للمساعدة.")
 
-    # ============================================================
-    # Admin Check
-    # ============================================================
     def is_admin(self, user_id):
         return int(user_id) == int(self.admin_id)
 
-    # ============================================================
-    # Help Text
-    # ============================================================
     def help_text(self):
         return (
             "🤖 <b>نظام إشارات العملات الرقمية v2026</b>\n\n"
@@ -342,9 +315,6 @@ class TelegramBot:
             "💥 النظام يرسل الإشارات القوية فقط + تنبؤات الانفجارات"
         )
 
-    # ============================================================
-    # Subscribers List
-    # ============================================================
     async def subscribers_list(self, chat_id, user_id):
         if not self.is_admin(user_id):
             await self.send_message(chat_id, "⛔ للمشرف فقط.")
@@ -359,9 +329,6 @@ class TelegramBot:
             lines.append(f"• {uid}")
         await self.send_message(chat_id, "\n".join(lines))
 
-    # ============================================================
-    # Status Command
-    # ============================================================
     async def status(self, chat_id):
         signals = await self.database.get_daily_signals()
         stats = await self.database.get_daily_pnl()
@@ -378,15 +345,12 @@ class TelegramBot:
             f"📈 إشارات اليوم: {self.safe_text(len(signals))}\n"
             f"💥 تنبيهات الانفجار: {self.safe_text(explosion_count)}\n"
             f"💰 الأرباح اليومية: {self.safe_text(f'{stats['pnl']:.2f}')}\n"
-            f"🏆 ربح/خسارة/تعادل/غير محدد/مهلة: {stats['wins']}/{stats['losses']}/{stats['breakeven']}/{stats['inconclusive']}/{stats['timeout']}\n"
+            f"🏆 ربح/خسارة/تعادل: {stats['wins']}/{stats['losses']}/{stats['breakeven']}\n"
             f"🔭 قائمة المراقبة: {self.safe_text(len(prewatch))}\n"
             f"👥 المشتركون: {self.safe_text(len(subscribers))}"
         )
         await self.send_message(chat_id, text)
 
-    # ============================================================
-    # Prewatch Command
-    # ============================================================
     async def prewatch(self, chat_id):
         items = await self.database.get_prewatch(10)
         if not items:
@@ -397,14 +361,10 @@ class TelegramBot:
             lines.append(
                 f"• <b>{self.safe_text(item['symbol'])}</b> | "
                 f"{self.safe_text(f'{item['price_change']:.2f}')}% | "
-                f"${self.safe_text(f'{item['quote_volume']:,.0f}')} | "
-                f"الصفقات: {self.safe_text(item.get('trades', 0))}"
+                f"${self.safe_text(f'{item['quote_volume']:,.0f}')}"
             )
         await self.send_message(chat_id, "\n".join(lines))
 
-    # ============================================================
-    # Performance Command
-    # ============================================================
     async def performance(self, chat_id):
         signals = await self.database.get_daily_signals()
         closed = [x for x in signals if x["status"] == "CLOSED"]
@@ -443,9 +403,6 @@ class TelegramBot:
         )
         await self.send_message(chat_id, text)
 
-    # ============================================================
-    # Manual Signal Analysis
-    # ============================================================
     async def signal(self, chat_id, symbol):
         klines = await self.data_fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT)
         if not klines:
@@ -460,14 +417,11 @@ class TelegramBot:
             await self.send_message(
                 chat_id,
                 f"⚪ لا توجد إشارة قوية لـ {self.safe_text(symbol)}.\n"
-                f"(المعايير مشددة: الحد الأدنى للنقاط={config.MIN_SCORE}, الحد الأدنى للاتجاه={config.MIN_ADX})"
+                f"(المعايير مشددة: الحد الأدنى للنقاط={config.MIN_SCORE})"
             )
             return
         await self.send_message(chat_id, self.format_signal(result))
 
-    # ============================================================
-    # Format Signal (Arabic + Explosion Detection)
-    # ============================================================
     def format_signal(self, signal):
         def fmt(val):
             if abs(val) < 1e-5:
@@ -475,7 +429,6 @@ class TelegramBot:
             else:
                 return self.safe_text(f"{val:.6f}")
 
-        # ✅ تحديد الاتجاه بالعربية
         if signal["direction"] == "BUY":
             direction_ar = "🟢 شراء"
             emoji = "🟢"
@@ -483,7 +436,6 @@ class TelegramBot:
             direction_ar = "🔴 بيع"
             emoji = "🔴"
 
-        # ✅ حساب التقييم
         score_val = signal.get('score', 0)
         if score_val >= 9.0:
             rating = "🔥 إشارة استثنائية"
@@ -497,7 +449,6 @@ class TelegramBot:
         quality_label = f"⚡ الجودة: {signal.get('quality', 0)}%" if signal.get('quality') else ""
         risk_label = f"🎯 المخاطرة: {signal.get('actual_risk_percent', 0):.2f}%" if signal.get('actual_risk_percent') else ""
 
-        # ✅ تمييز الانفجارات
         if signal.get("early_snipe"):
             title = f"{emoji} <b>💥 تنبؤ بانفجار — {self.safe_text(signal['symbol'])}</b>"
             explosion_info = signal.get("explosion_details", {})
@@ -522,11 +473,9 @@ class TelegramBot:
             title = f"{emoji} <b>{rating} — {self.safe_text(signal['symbol'])}</b>"
             explosion_section = ""
 
-        # ✅ عدد العوامل المتوافقة
         factor_count = signal.get("factor_count", 0)
         factor_section = f"📊 العوامل المتوافقة: {factor_count}/7\n" if factor_count else ""
 
-        # ✅ حجم الصفقة بحجم مقروء
         position = signal.get('position_size', 0)
         position_str = self.safe_text(f"{position:.6f}" if position >= 0.01 else f"{position:.4e}")
 
