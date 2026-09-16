@@ -141,10 +141,10 @@ VOLUME_AVG_PERIOD = 20
 # ============================================================
 # Signal scoring - عتبات متوازنة (قوية + عملية)
 # ============================================================
-MIN_SCORE = float(os.getenv("MIN_SCORE", "6.0"))
+MIN_SCORE = float(os.getenv("MIN_SCORE", "7.0"))
 EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "7.5"))
-MIN_ADX = float(os.getenv("MIN_ADX", "18.0"))
-MIN_FACTORS_ALIGNED = 4
+MIN_ADX = float(os.getenv("MIN_ADX", "20.0"))
+MIN_FACTORS_ALIGNED = 5
 
 # ============================================================
 # تجاوز فلتر RSI للانفجارات
