@@ -1,5 +1,5 @@
 # config.py
-# Quant Crypto Signal System v2026 - Strong Signals Edition
+# Quant Crypto Signal System v2026 - Balanced Strong Signals Edition
 
 import os
 from pathlib import Path
@@ -41,7 +41,7 @@ TELEGRAM_RETRY_BACKOFF_BASE = 1.0
 TELEGRAM_MAX_RETRIES = 3
 
 # ============================================================
-# Binance
+# Binance - الأولوية القصوى لـ data-api.binance.vision
 # ============================================================
 BINANCE_ENDPOINTS = [
     "https://data-api.binance.vision",
@@ -139,17 +139,17 @@ MOMENTUM_PERIOD = 5
 VOLUME_AVG_PERIOD = 20
 
 # ============================================================
-# Signal scoring
+# Signal scoring - عتبات متوازنة (قوية + عملية)
 # ============================================================
-MIN_SCORE = float(os.getenv("MIN_SCORE", "7.5"))
-EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "10.0"))  # ✅ رُفع إلى 10.0 (انفجارات 4/4 فقط)
-MIN_ADX = float(os.getenv("MIN_ADX", "20.0"))
-MIN_FACTORS_ALIGNED = 5
+MIN_SCORE = float(os.getenv("MIN_SCORE", "6.0"))
+EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "7.5"))
+MIN_ADX = float(os.getenv("MIN_ADX", "18.0"))
+MIN_FACTORS_ALIGNED = 4
 
 # ============================================================
-# ✅ تجاوز فلتر RSI للانفجارات
+# تجاوز فلتر RSI للانفجارات
 # ============================================================
-EXPLOSION_RSI_OVERRIDE = True  # ✅ السماح للانفجارات بتجاوز فلتر RSI
+EXPLOSION_RSI_OVERRIDE = True
 
 # ============================================================
 # RSI Filters
@@ -157,36 +157,36 @@ EXPLOSION_RSI_OVERRIDE = True  # ✅ السماح للانفجارات بتجا�
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
 RSI_BUY_ZONE_MIN = 40.0
-RSI_BUY_ZONE_MAX = 60.0
-RSI_SELL_ZONE_MIN = 40.0
+RSI_BUY_ZONE_MAX = 65.0
+RSI_SELL_ZONE_MIN = 35.0
 RSI_SELL_ZONE_MAX = 60.0
 ENABLE_RSI_FILTER = True
 
 # ============================================================
-# Explosion Detection
+# Explosion Detection - شروط مخففة
 # ============================================================
-SQUEEZE_BB_WIDTH = 0.015
-SQUEEZE_MIN_CANDLES = 5
+SQUEEZE_BB_WIDTH = 0.020
+SQUEEZE_MIN_CANDLES = 3
 SQUEEZE_WIDTH_TREND_CANDLES = 3
 KELTNER_PERIOD = 20
 KELTNER_ATR_MULT = 1.5
 
-SILENT_VOLUME_MULTIPLIER = 1.5
-VOLUME_TREND_MULTIPLIER = 1.2
-VOLUME_MIN_CONSECUTIVE = 3
+SILENT_VOLUME_MULTIPLIER = 1.3
+VOLUME_TREND_MULTIPLIER = 1.1
+VOLUME_MIN_CONSECUTIVE = 2
 
-RESISTANCE_DISTANCE = 0.008
-CONSOLIDATION_RANGE_MAX = 0.025
-HIGHER_LOWS_COUNT = 3
-BREAKOUT_CONFIRMATION_PCT = 0.003
+RESISTANCE_DISTANCE = 0.012
+CONSOLIDATION_RANGE_MAX = 0.030
+HIGHER_LOWS_COUNT = 2
+BREAKOUT_CONFIRMATION_PCT = 0.002
 
-MOMENTUM_MIN = 0.3
-MOMENTUM_MAX = 5.0
+MOMENTUM_MIN = 0.2
+MOMENTUM_MAX = 6.0
 
 # ============================================================
-# Quality Gate
+# Quality Gate - مخفف
 # ============================================================
-MIN_QUALITY_PERCENT = 75.0
+MIN_QUALITY_PERCENT = 60.0
 REQUIRE_TREND_ALIGNMENT = True
 REQUIRE_VOLUME_CONFIRMATION = True
 REQUIRE_MOMENTUM_ALIGNMENT = True
@@ -200,8 +200,8 @@ MAX_POSITION_PERCENT = 0.50
 ATR_SL_MULTIPLIER = 1.5
 SL_BUFFER_PERCENT = 0.003
 MIN_RR = 2.0
-COOLDOWN_MINUTES = 60
-OPPOSITE_COOLDOWN_HOURS = 6
+COOLDOWN_MINUTES = 45
+OPPOSITE_COOLDOWN_HOURS = 4
 DAILY_MAX_LOSS_PERCENT = 0.03
 
 SIGNAL_MAX_HOLD_CANDLES = 6
@@ -247,8 +247,14 @@ def validate_config():
         errors.append("MIN_RR must be at least 2.0")
     if BINANCE_TIMEOUT > 5:
         errors.append("BINANCE_TIMEOUT must not exceed 5 seconds")
-    if MIN_SCORE < 7.0:
-        errors.append("MIN_SCORE must be at least 7.0 for strong signals")
+    if MIN_SCORE < 5.5:
+        errors.append("MIN_SCORE must be at least 5.5 for balanced signals")
+    if MIN_SCORE > 7.0:
+        errors.append("MIN_SCORE must not exceed 7.0 (would be impractical)")
+    if EARLY_SNIPE_SCORE < 7.0:
+        errors.append("EARLY_SNIPE_SCORE must be at least 7.0")
+    if EARLY_SNIPE_SCORE > 9.0:
+        errors.append("EARLY_SNIPE_SCORE must not exceed 9.0")
     if TELEGRAM_API_TIMEOUT <= TELEGRAM_LONG_POLL_TIMEOUT:
         errors.append(
             f"TELEGRAM_API_TIMEOUT ({TELEGRAM_API_TIMEOUT}) must be > "
