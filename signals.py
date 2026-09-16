@@ -1,5 +1,5 @@
 # signals.py
-# Signal Engine - Strong Signals Only + Explosion RSI Override
+# Signal Engine - Strong Signals Only + Fixed Position Size
 
 import math
 import json
@@ -30,7 +30,7 @@ class SignalEngine:
 
         scores = {"BUY": {}, "SELL": {}}
 
-        # RSI - نطاق شراء/بيع أمثل
+        # RSI
         if config.RSI_BUY_ZONE_MIN <= rsi_value <= config.RSI_BUY_ZONE_MAX:
             rsi_buy = 1.0
         elif rsi_value > config.RSI_OVERBOUGHT:
@@ -172,9 +172,13 @@ class SignalEngine:
         }
 
     # ============================================================
-    # Position Size
+    # Position Size - الإصلاح الحرج
     # ============================================================
     def position_size(self, capital, entry, sl):
+        """
+        ✅ الإصلاح: نأخذ الأدنى بين الحجم المطلوب والحد الأقصى
+        بدلاً من رفض الإشارة بالكامل.
+        """
         if capital <= 0 or entry <= 0:
             return None, None
 
@@ -187,14 +191,21 @@ class SignalEngine:
         max_notional = capital * config.MAX_POSITION_PERCENT
         max_quantity = max_notional / entry
 
-        if raw_quantity > max_quantity:
-            logger.debug("Signal rejected: position size exceeds max")
+        # ✅ نأخذ الأدنى (لا رفض)
+        final_quantity = min(raw_quantity, max_quantity)
+
+        # ✅ التحقق من المخاطرة النهائية
+        actual_risk = final_quantity * distance
+        max_acceptable_risk = capital * 0.05
+        if actual_risk > max_acceptable_risk:
+            logger.debug(
+                f"Signal rejected: actual_risk {actual_risk:.2f} > "
+                f"max {max_acceptable_risk:.2f}"
+            )
             return None, None
 
-        actual_risk_amount = raw_quantity * distance
-        actual_risk_percent = actual_risk_amount / capital
-
-        return raw_quantity, actual_risk_percent
+        actual_risk_percent = actual_risk / capital
+        return final_quantity, actual_risk_percent
 
     # ============================================================
     # Quality Gates
@@ -249,7 +260,6 @@ class SignalEngine:
             factors["SELL"], return_contributions=True
         )
 
-        # ✅ كشف الانفجارات
         explosion = detect_explosion_setup(df)
 
         direction = None
@@ -260,7 +270,7 @@ class SignalEngine:
         factor_contributions = {}
         factor_count = 0
 
-        # ✅ أولوية للانفجارات القوية (4/4 معيار)
+        # ✅ أولوية للانفجارات (3/4 شروط = 7.5)
         if explosion["active"] and explosion["score"] >= config.EARLY_SNIPE_SCORE:
             direction = explosion["direction"]
             score = explosion["score"]
@@ -271,10 +281,9 @@ class SignalEngine:
             factor_count = explosion["conditions_met"]
             logger.info(
                 f"💥 Explosion setup detected: {symbol} {direction} "
-                f"({explosion['conditions_met']}/4 conditions)"
+                f"({explosion['conditions_met']}/4 conditions) → processing"
             )
 
-        # ✅ إشارات عادية قوية
         elif buy_score >= config.MIN_SCORE and buy_positives >= config.MIN_FACTORS_ALIGNED:
             direction = "BUY"
             score = buy_score
@@ -309,16 +318,15 @@ class SignalEngine:
         # ✅ ADX filter (إلا للانفجارات)
         adx_value = float(latest["adx"])
         if not is_explosion and adx_value <= config.MIN_ADX:
+            logger.debug(f"Rejected {symbol}: ADX too low ({adx_value:.1f})")
             return None
 
-        # ✅ بوابة الجودة
+        # ✅ بوابة الجودة (مخففة للانفجارات)
         if config.REQUIRE_TREND_ALIGNMENT:
             trend_aligned, trend_slope = self.check_trend_alignment(direction, df_15m)
             if not trend_aligned and not is_explosion:
                 logger.debug(f"Rejected {symbol}: trend not aligned")
                 return None
-        else:
-            trend_slope = 0.0
 
         if config.REQUIRE_VOLUME_CONFIRMATION:
             if not self.check_volume_confirmation(df) and not is_explosion:
@@ -335,15 +343,21 @@ class SignalEngine:
 
         risk = self.calculate_risk_levels(direction, entry, atr_value, pivots)
         if risk is None:
+            logger.debug(f"Rejected {symbol}: risk levels invalid")
             return None
 
+        # ✅ الإصلاح: position_size الآن يأخذ الأدنى
         quantity, actual_risk_percent = self.position_size(
             capital, risk["entry"], risk["sl"]
         )
         if quantity is None or quantity <= 0:
+            logger.warning(
+                f"⚠️ {symbol} {direction} rejected at position_size "
+                f"(entry={entry}, sl={risk['sl']})"
+            )
             return None
 
-        # ✅ حساب الترند
+        # حساب الترند
         if df_15m is not None and len(df_15m) > 0:
             trend_close = float(df_15m["close"].iloc[-1])
             trend_ema50 = (
@@ -360,7 +374,6 @@ class SignalEngine:
         elif direction == "SELL" and trend_slope < 0:
             score += 1.0
 
-        # ✅ الجودة النهائية
         max_possible = 7.0
         if is_explosion:
             max_possible += 3.0
@@ -369,6 +382,11 @@ class SignalEngine:
         if quality < config.MIN_QUALITY_PERCENT and not is_explosion:
             logger.debug(f"Rejected {symbol}: quality {quality:.1f}% < {config.MIN_QUALITY_PERCENT}%")
             return None
+
+        logger.info(
+            f"✅ Signal approved: {symbol} {direction} "
+            f"score={score:.2f} quality={quality:.1f}%"
+        )
 
         return {
             "symbol": symbol.upper(),
