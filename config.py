@@ -109,11 +109,11 @@ EXCLUDE_TOKENIZED_STOCKS = True
 # Pre-watch
 # ============================================================
 PREWATCH_MIN_VOLUME_USDT = 5_000_000
-PREWATCH_MIN_TRADES = 5000
+PREWATCH_MIN_TRADES = 15000
 PREWATCH_MAX_PRICE = 1000.0
 PREWATCH_MIN_PRICE = 0.00001
-PREWATCH_PRICE_CHANGE = 3.0
-PREWATCH_VOLUME_USDT = 2_000_000
+PREWATCH_PRICE_CHANGE = 4.5
+PREWATCH_VOLUME_USDT = 6_000_000
 
 # ============================================================
 # Timeframes
@@ -139,12 +139,12 @@ MOMENTUM_PERIOD = 5
 VOLUME_AVG_PERIOD = 20
 
 # ============================================================
-# Signal scoring - عتبات متوازنة (قوية + عملية)
+# Signal scoring - عتبات أقوى لتصفية الإشارات الخاطئة
 # ============================================================
-MIN_SCORE = float(os.getenv("MIN_SCORE", "7.0"))
-EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "10"))
-MIN_ADX = float(os.getenv("MIN_ADX", "20.0"))
-MIN_FACTORS_ALIGNED = 5
+MIN_SCORE = float(os.getenv("MIN_SCORE", "7.5"))
+EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "8.5"))
+MIN_ADX = float(os.getenv("MIN_ADX", "28.0"))
+MIN_FACTORS_ALIGNED = 6
 
 # ============================================================
 # تجاوز فلتر RSI للانفجارات
@@ -152,57 +152,57 @@ MIN_FACTORS_ALIGNED = 5
 EXPLOSION_RSI_OVERRIDE = True
 
 # ============================================================
-# RSI Filters
+# RSI Filters - أضيق لفلترة أقوى
 # ============================================================
-RSI_OVERBOUGHT = 70.0
-RSI_OVERSOLD = 30.0
-RSI_BUY_ZONE_MIN = 40.0
-RSI_BUY_ZONE_MAX = 65.0
-RSI_SELL_ZONE_MIN = 35.0
-RSI_SELL_ZONE_MAX = 60.0
+RSI_OVERBOUGHT = 72.0
+RSI_OVERSOLD = 28.0
+RSI_BUY_ZONE_MIN = 45.0
+RSI_BUY_ZONE_MAX = 62.0
+RSI_SELL_ZONE_MIN = 38.0
+RSI_SELL_ZONE_MAX = 55.0
 ENABLE_RSI_FILTER = True
 
 # ============================================================
-# Explosion Detection - شروط مخففة
+# Explosion Detection - شروط مشددة لدقة أعلى
 # ============================================================
-SQUEEZE_BB_WIDTH = 0.020
-SQUEEZE_MIN_CANDLES = 3
-SQUEEZE_WIDTH_TREND_CANDLES = 3
+SQUEEZE_BB_WIDTH = 0.014
+SQUEEZE_MIN_CANDLES = 4
+SQUEEZE_WIDTH_TREND_CANDLES = 4
 KELTNER_PERIOD = 20
 KELTNER_ATR_MULT = 1.5
 
-SILENT_VOLUME_MULTIPLIER = 1.3
-VOLUME_TREND_MULTIPLIER = 1.1
-VOLUME_MIN_CONSECUTIVE = 2
+SILENT_VOLUME_MULTIPLIER = 2.0
+VOLUME_TREND_MULTIPLIER = 1.5
+VOLUME_MIN_CONSECUTIVE = 3
 
-RESISTANCE_DISTANCE = 0.012
-CONSOLIDATION_RANGE_MAX = 0.030
-HIGHER_LOWS_COUNT = 2
-BREAKOUT_CONFIRMATION_PCT = 0.002
+RESISTANCE_DISTANCE = 0.008
+CONSOLIDATION_RANGE_MAX = 0.020
+HIGHER_LOWS_COUNT = 3
+BREAKOUT_CONFIRMATION_PCT = 0.004
 
-MOMENTUM_MIN = 0.2
-MOMENTUM_MAX = 6.0
+MOMENTUM_MIN = 0.6
+MOMENTUM_MAX = 5.0
 
 # ============================================================
-# Quality Gate - مخفف
+# Quality Gate - مشدد
 # ============================================================
-MIN_QUALITY_PERCENT = 70.0
+MIN_QUALITY_PERCENT = 78.0
 REQUIRE_TREND_ALIGNMENT = True
 REQUIRE_VOLUME_CONFIRMATION = True
 REQUIRE_MOMENTUM_ALIGNMENT = True
 
 # ============================================================
-# Risk
+# Risk - أكثر تحفظاً
 # ============================================================
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "10000"))
-RISK_PER_TRADE = 0.01
-MAX_POSITION_PERCENT = 0.50
-ATR_SL_MULTIPLIER = 1.5
-SL_BUFFER_PERCENT = 0.003
-MIN_RR = 2.0
-COOLDOWN_MINUTES = 45
-OPPOSITE_COOLDOWN_HOURS = 4
-DAILY_MAX_LOSS_PERCENT = 0.03
+RISK_PER_TRADE = 0.0075
+MAX_POSITION_PERCENT = 0.30
+ATR_SL_MULTIPLIER = 1.8
+SL_BUFFER_PERCENT = 0.004
+MIN_RR = 2.8
+COOLDOWN_MINUTES = 90
+OPPOSITE_COOLDOWN_HOURS = 6
+DAILY_MAX_LOSS_PERCENT = 0.02
 
 SIGNAL_MAX_HOLD_CANDLES = 6
 SIGNAL_EVALUATION_INTERVAL = 60
@@ -247,14 +247,14 @@ def validate_config():
         errors.append("MIN_RR must be at least 2.0")
     if BINANCE_TIMEOUT > 5:
         errors.append("BINANCE_TIMEOUT must not exceed 5 seconds")
-    if MIN_SCORE < 5.5:
-        errors.append("MIN_SCORE must be at least 5.5 for balanced signals")
-    if MIN_SCORE > 7.0:
-        errors.append("MIN_SCORE must not exceed 7.0 (would be impractical)")
-    if EARLY_SNIPE_SCORE < 7.0:
-        errors.append("EARLY_SNIPE_SCORE must be at least 7.0")
-    if EARLY_SNIPE_SCORE > 9.0:
-        errors.append("EARLY_SNIPE_SCORE must not exceed 9.0")
+    if MIN_SCORE < 6.5:
+        errors.append("MIN_SCORE must be at least 6.5 for strong signals")
+    if MIN_SCORE > 9.0:
+        errors.append("MIN_SCORE must not exceed 9.0 (would be impractical)")
+    if EARLY_SNIPE_SCORE < 8.0:
+        errors.append("EARLY_SNIPE_SCORE must be at least 8.0")
+    if EARLY_SNIPE_SCORE > 9.5:
+        errors.append("EARLY_SNIPE_SCORE must not exceed 9.5")
     if TELEGRAM_API_TIMEOUT <= TELEGRAM_LONG_POLL_TIMEOUT:
         errors.append(
             f"TELEGRAM_API_TIMEOUT ({TELEGRAM_API_TIMEOUT}) must be > "
