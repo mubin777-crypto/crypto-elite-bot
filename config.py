@@ -142,7 +142,7 @@ VOLUME_AVG_PERIOD = 20
 # Signal scoring - عتبات متوازنة (قوية + عملية)
 # ============================================================
 MIN_SCORE = float(os.getenv("MIN_SCORE", "7.0"))
-EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "7.5"))
+EARLY_SNIPE_SCORE = float(os.getenv("EARLY_SNIPE_SCORE", "10"))
 MIN_ADX = float(os.getenv("MIN_ADX", "20.0"))
 MIN_FACTORS_ALIGNED = 5
 
@@ -186,7 +186,7 @@ MOMENTUM_MAX = 6.0
 # ============================================================
 # Quality Gate - مخفف
 # ============================================================
-MIN_QUALITY_PERCENT = 60.0
+MIN_QUALITY_PERCENT = 70.0
 REQUIRE_TREND_ALIGNMENT = True
 REQUIRE_VOLUME_CONFIRMATION = True
 REQUIRE_MOMENTUM_ALIGNMENT = True
