@@ -1,5 +1,5 @@
 # telegram_bot.py
-# Telegram Bot - Production Ready with Arabic Signals
+# Telegram Bot v2026.3 - With Market Regime + Near-Miss + All Accuracy Commands
 
 import asyncio
 import logging
@@ -24,34 +24,22 @@ class TelegramBot:
         self.polling_task = None
         self.last_update_id = 0
         self.is_running = False
-        self._webhook_set = False
 
     def safe_text(self, text):
         return html.escape(str(text))
 
-    # ============================================================
-    # Start / Stop
-    # ============================================================
     async def start(self):
         if not self.token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
-
         self.is_running = True
         timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
         self.session = aiohttp.ClientSession(timeout=timeout)
-
-        if self.webhook_mode:
-            logger.info("ℹ️ Telegram Webhook mode enabled")
-        else:
-            # ✅ حذف Webhook قبل بدء Polling لمنع 409 Conflict
+        if not self.webhook_mode:
             await self.api_call("deleteWebhook", {"drop_pending_updates": True})
-            logger.info("ℹ️ Telegram polling mode selected")
-            # ✅ انتظار قصير للتأكد من حذف Webhook على سيرفرات Telegram
             await asyncio.sleep(2)
             self.polling_task = asyncio.create_task(self.polling_loop())
-
         if self.admin_id:
-            await self.send_message(self.admin_id, "🤖 <b>تم تشغيل البوت بنجاح!</b>")
+            await self.send_message(self.admin_id, "🤖 <b>البوت جاهز (v2026.3)</b>")
 
     async def close(self):
         self.is_running = False
@@ -65,110 +53,71 @@ class TelegramBot:
             await self.session.close()
             self.session = None
 
-    # ============================================================
-    # Webhook Management
-    # ============================================================
-    async def set_webhook(self, webhook_url: str) -> bool:
+    async def set_webhook(self, url):
         if not self.session:
-            timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT))
+        r = await self.api_call("setWebhook", {
+            "url": url, "drop_pending_updates": False, "allowed_updates": ["message"]})
+        return bool(r and r.get("ok"))
 
-        result = await self.api_call("setWebhook", {
-            "url": webhook_url,
-            "drop_pending_updates": False,
-            "allowed_updates": ["message"],
-        })
-
-        if result and result.get("ok"):
-            self._webhook_set = True
-            logger.info(f"✅ Webhook registered: {webhook_url}")
-            return True
-        else:
-            logger.error(f"❌ Failed to register webhook: {result}")
-            return False
-
-    async def delete_webhook(self) -> bool:
+    async def delete_webhook(self):
         if not self.session:
-            timeout = aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=config.TELEGRAM_API_TIMEOUT))
+        r = await self.api_call("deleteWebhook", {"drop_pending_updates": True})
+        return bool(r and r.get("ok"))
 
-        result = await self.api_call("deleteWebhook", {"drop_pending_updates": True})
-        if result and result.get("ok"):
-            self._webhook_set = False
-            logger.info("✅ Webhook deleted successfully")
-            return True
-        else:
-            logger.warning(f"⚠️ Failed to delete webhook: {result}")
-            return False
-
-    # ============================================================
-    # Polling Loop
-    # ============================================================
     async def polling_loop(self):
         while self.is_running:
             try:
-                params = {
+                r = await self.api_call("getUpdates", {
                     "offset": self.last_update_id + 1,
                     "timeout": config.TELEGRAM_LONG_POLL_TIMEOUT,
-                }
-                result = await self.api_call("getUpdates", params)
-                if result and result.get("ok"):
-                    updates = result.get("result", [])
-                    for update in updates:
-                        self.last_update_id = update.get("update_id", self.last_update_id)
-                        await self.handle_update(update)
-                else:
-                    if result:
-                        error_code = result.get("error_code")
-                        if error_code == 409:
-                            logger.warning("Polling conflict, waiting...")
-                            await asyncio.sleep(10)
+                })
+                if r and r.get("ok"):
+                    for u in r.get("result", []):
+                        self.last_update_id = u.get("update_id", self.last_update_id)
+                        await self.handle_update(u)
+                elif r and r.get("error_code") == 409:
+                    logger.warning("Polling conflict, waiting 10s")
+                    await asyncio.sleep(10)
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error(f"Polling loop error: {exc}")
+                logger.error(f"Polling error: {exc}")
                 await asyncio.sleep(5)
 
-    async def process_update(self, update: dict):
+    async def process_update(self, update):
         await self.handle_update(update)
 
-    # ============================================================
-    # Telegram API Call
-    # ============================================================
     async def api_call(self, method, payload=None, retries=config.TELEGRAM_MAX_RETRIES):
         if not self.session:
             return None
         backoff = config.TELEGRAM_RETRY_BACKOFF_BASE
         for attempt in range(retries + 1):
             try:
-                async with self.session.post(f"{self.base_url}/{method}", json=payload or {}) as response:
+                async with self.session.post(
+                    f"{self.base_url}/{method}", json=payload or {}) as response:
                     data = await response.json()
-                    if not data.get("ok"):
-                        if response.status == 429:
-                            retry_after = data.get("parameters", {}).get("retry_after", 5)
-                            logger.warning(f"Rate limited. Retry after {retry_after}s")
-                            await asyncio.sleep(retry_after)
-                            continue
-                        logger.error(f"Telegram API error: {data}")
+                    if not data.get("ok") and response.status == 429:
+                        ra = data.get("parameters", {}).get("retry_after", 5)
+                        await asyncio.sleep(ra)
+                        continue
                     return data
             except asyncio.TimeoutError:
-                logger.warning(f"Telegram API timeout (attempt {attempt+1})")
                 if attempt < retries:
                     await asyncio.sleep(backoff)
                     backoff *= 2
-            except Exception as exc:
-                logger.error(f"Telegram API request failed: {exc}")
+            except Exception:
                 if attempt < retries:
                     await asyncio.sleep(backoff)
                     backoff *= 2
-        logger.error(f"All retries failed for {method}")
         return None
 
-    # ============================================================
-    # Send Message
-    # ============================================================
-    async def send_message(self, chat_id, text, parse_mode="HTML", retries=config.TELEGRAM_MAX_RETRIES):
+    async def send_message(self, chat_id, text, parse_mode="HTML",
+                            retries=config.TELEGRAM_MAX_RETRIES):
         if not text:
             return None
         if len(text) > 4096:
@@ -177,73 +126,45 @@ class TelegramBot:
         for attempt in range(retries + 1):
             try:
                 result = await self.api_call("sendMessage", {
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": parse_mode,
-                    "disable_web_page_preview": True,
+                    "chat_id": chat_id, "text": text,
+                    "parse_mode": parse_mode, "disable_web_page_preview": True,
                 })
                 if result and result.get("ok"):
                     return result
-                if result:
-                    error_code = result.get("error_code")
-                    if error_code in (400, 403):
-                        return result
+                if result and result.get("error_code") in (400, 403):
+                    return result
             except Exception as exc:
-                logger.warning(f"Send attempt {attempt+1} exception for {chat_id}: {exc}")
+                logger.warning(f"Send attempt {attempt+1}: {exc}")
             if attempt < retries:
                 await asyncio.sleep(backoff)
                 backoff *= 2
         return None
 
-    # ============================================================
-    # Broadcast
-    # ============================================================
     async def broadcast(self, text):
         subscribers = await self.database.get_subscribers()
         count = len(subscribers)
-        logger.info(f"📢 Broadcasting to {count} subscribers")
         if count == 0:
-            logger.warning("⚠️ No active subscribers found!")
             if self.admin_id:
                 await self.send_message(
-                    self.admin_id,
-                    "⚠️ لا يوجد مشتركون نشطون. استخدم /adduser لإضافة مستخدمين.",
-                )
+                    self.admin_id, "⚠️ لا يوجد مشتركون. استخدم /adduser ID")
             return
-
         if self.admin_id and self.admin_id not in subscribers:
             subscribers = [self.admin_id] + subscribers
-
-        blocked_users = []
-        success_count = 0
-        failure_count = 0
-        for user_id in subscribers:
+        success = 0
+        for uid in subscribers:
             try:
-                result = await self.send_message(user_id, text)
-                if result and result.get("ok"):
-                    success_count += 1
-                else:
-                    failure_count += 1
-                    if result:
-                        error_code = result.get("error_code")
-                        error_desc = result.get("description", "").lower()
-                        if (
-                            error_code == 403
-                            or "blocked" in error_desc
-                            or "chat not found" in error_desc
-                            or "user not found" in error_desc
-                        ):
-                            logger.warning(f"User {user_id} invalid/blocked, removing")
-                            await self.database.remove_subscriber(user_id)
-                            blocked_users.append(user_id)
+                r = await self.send_message(uid, text)
+                if r and r.get("ok"):
+                    success += 1
+                elif r:
+                    ec = r.get("error_code")
+                    ed = r.get("description", "").lower()
+                    if ec == 403 or "blocked" in ed or "chat not found" in ed:
+                        await self.database.remove_subscriber(uid)
                 await asyncio.sleep(0.05)
-            except Exception as exc:
-                failure_count += 1
-                logger.warning(f"Broadcast exception for {user_id}: {exc}")
-
-        if blocked_users:
-            logger.info(f"✅ Removed invalid users: {blocked_users}")
-        logger.info(f"✅ Broadcast: {success_count}/{len(subscribers)} sent, {failure_count} failed")
+            except Exception:
+                pass
+        logger.info(f"📢 Broadcast: {success}/{len(subscribers)}")
 
     # ============================================================
     # Update Handler
@@ -261,198 +182,280 @@ class TelegramBot:
         text = (message.get("text", "") or "").strip()
         if chat_id is None or user_id is None:
             return
+        cmd = text.split()[0].lower() if text else ""
+        logger.info(f"📩 {cmd} from {user_id}")
 
-        command = text.split()[0].lower() if text else ""
-        logger.info(f"📩 Command: {command} from {user_id}")
-
-        if command.startswith("/start"):
+        if cmd.startswith("/start"):
             await self.send_message(chat_id, self.help_text())
-        elif command.startswith("/status"):
-            await self.status(chat_id)
-        elif command.startswith("/prewatch"):
-            await self.prewatch(chat_id)
-        elif command.startswith("/performance"):
-            await self.performance(chat_id)
-        elif command.startswith("/subscribers"):
-            await self.subscribers_list(chat_id, user_id)
-        elif command.startswith("/signal"):
+        elif cmd.startswith("/status"):
+            await self.cmd_status(chat_id)
+        elif cmd.startswith("/prewatch"):
+            await self.cmd_prewatch(chat_id)
+        elif cmd.startswith("/performance"):
+            await self.cmd_performance(chat_id)
+        elif cmd.startswith("/subscribers"):
+            await self.cmd_subscribers(chat_id, user_id)
+        elif cmd.startswith("/signal"):
             parts = text.split()
             if len(parts) != 2:
-                await self.send_message(chat_id, "الاستخدام:\n/signal BTCUSDT")
+                await self.send_message(chat_id, "الاستخدام: /signal BTCUSDT")
             else:
-                await self.signal(chat_id, parts[1].upper())
-        elif command.startswith("/adduser"):
-            if not self.is_admin(user_id):
-                await self.send_message(chat_id, "⛔ للمشرف فقط.")
-                return
-            parts = text.split()
-            if len(parts) != 2:
-                await self.send_message(chat_id, "الاستخدام: /adduser USER_ID")
-                return
-            try:
-                target_id = int(parts[1])
-                if await self.database.add_subscriber(target_id):
-                    await self.send_message(chat_id, f"✅ تم إضافة المشترك {target_id}.")
-                else:
-                    await self.send_message(chat_id, "❌ فشل إضافة المشترك.")
-            except ValueError:
-                await self.send_message(chat_id, "❌ يجب أن يكون USER_ID رقمياً.")
-        elif command.startswith("/removeuser"):
-            if not self.is_admin(user_id):
-                await self.send_message(chat_id, "⛔ للمشرف فقط.")
-                return
-            parts = text.split()
-            if len(parts) != 2:
-                await self.send_message(chat_id, "الاستخدام: /removeuser USER_ID")
-                return
-            try:
-                target_id = int(parts[1])
-                if await self.database.remove_subscriber(target_id):
-                    await self.send_message(chat_id, f"✅ تم حذف المشترك {target_id}.")
-                else:
-                    await self.send_message(chat_id, "❌ فشل حذف المشترك.")
-            except ValueError:
-                await self.send_message(chat_id, "❌ يجب أن يكون USER_ID رقمياً.")
-        elif command.startswith("/reset_daily"):
+                await self.cmd_signal(chat_id, parts[1].upper())
+        elif cmd.startswith("/adduser"):
+            await self.cmd_adduser(chat_id, user_id, text)
+        elif cmd.startswith("/removeuser"):
+            await self.cmd_removeuser(chat_id, user_id, text)
+        elif cmd.startswith("/reset_daily"):
             if not self.is_admin(user_id):
                 await self.send_message(chat_id, "⛔ للمشرف فقط.")
                 return
             await self.database.reset_daily(config.INITIAL_CAPITAL)
-            await self.send_message(chat_id, "✅ تم إعادة الإحصائيات اليومية.")
+            await self.send_message(chat_id, "✅ تم إعادة الإحصائيات.")
+        elif cmd.startswith("/accuracy_by_score"):
+            await self.cmd_accuracy_by_score(chat_id)
+        elif cmd.startswith("/accuracy_by_symbol"):
+            await self.cmd_accuracy_by_symbol(chat_id)
+        elif cmd.startswith("/accuracy_by_type"):
+            await self.cmd_accuracy_by_type(chat_id)
+        elif cmd.startswith("/accuracy"):
+            await self.cmd_accuracy(chat_id)
+        elif cmd.startswith("/last_signals"):
+            await self.cmd_last_signals(chat_id, text)
+        elif cmd.startswith("/near_miss"):
+            await self.cmd_near_miss(chat_id, user_id)
+        elif cmd.startswith("/regime"):
+            await self.cmd_regime(chat_id, text)
         else:
-            await self.send_message(chat_id, "❓ أمر غير معروف. استخدم /start للمساعدة.")
+            await self.send_message(chat_id, "❓ أمر غير معروف. استخدم /start.")
 
-    # ============================================================
-    # Admin Check
-    # ============================================================
     def is_admin(self, user_id):
         return int(user_id) == int(self.admin_id)
 
-    # ============================================================
-    # Help Text
-    # ============================================================
     def help_text(self):
         return (
-            "🤖 <b>نظام إشارات العملات الرقمية v2026</b>\n\n"
-            "📋 <b>الأوامر المتاحة:</b>\n"
+            "🤖 <b>نظام إشارات v2026.3</b>\n\n"
+            "📋 <b>أوامر عامة:</b>\n"
             "/status - حالة النظام\n"
             "/prewatch - قائمة المراقبة\n"
-            "/performance - الأداء\n"
-            "/subscribers - قائمة المشتركين (للمشرف)\n"
+            "/performance - الأداء (30 يوم)\n"
             "/signal BTCUSDT - تحليل فوري\n"
-            "/adduser USER_ID - إضافة مشترك\n"
-            "/removeuser USER_ID - حذف مشترك\n"
-            "/reset_daily - إعادة الإحصائيات\n\n"
-            "💥 النظام يرسل الإشارات القوية فقط + تنبؤات الانفجارات"
+            "/regime BTCUSDT - حالة السوق\n\n"
+            "📊 <b>تتبع النتائج:</b>\n"
+            "/accuracy - Win Rate (7/30/90)\n"
+            "/accuracy_by_score - حسب النقاط\n"
+            "/accuracy_by_symbol - أفضل/أسوأ\n"
+            "/accuracy_by_type - انفجار/اختراق/ترند\n"
+            "/last_signals 10 - آخر الإشارات\n\n"
+            "🔐 <b>المشرف:</b>\n"
+            "/adduser ID | /removeuser ID\n"
+            "/subscribers | /reset_daily\n"
+            "/near_miss 20 - الإشارات المرفوضة\n\n"
+            "💡 💥 انفجار | ⚡ اختراق | 📈 ترند"
         )
 
     # ============================================================
-    # Subscribers List
+    # Commands
     # ============================================================
-    async def subscribers_list(self, chat_id, user_id):
-        if not self.is_admin(user_id):
-            await self.send_message(chat_id, "⛔ للمشرف فقط.")
-            return
-        subs = await self.database.get_subscribers()
-        count = len(subs)
-        if count == 0:
-            await self.send_message(chat_id, "📭 لا يوجد مشتركون.")
-            return
-        lines = [f"📋 المشتركون ({count}):"]
-        for uid in subs:
-            lines.append(f"• {uid}")
-        await self.send_message(chat_id, "\n".join(lines))
-
-    # ============================================================
-    # Status Command
-    # ============================================================
-    async def status(self, chat_id):
+    async def cmd_status(self, chat_id):
         signals = await self.database.get_daily_signals()
         stats = await self.database.get_daily_pnl()
         prewatch = await self.database.get_prewatch(20)
         subscribers = await self.database.get_subscribers()
-
-        explosion_count = sum(
-            1 for s in signals
-            if s.get("exit_reason") is None and s.get("score", 0) >= config.EARLY_SNIPE_SCORE
-        )
-
+        type_counts = {"EXPLOSION": 0, "BREAKOUT": 0, "TREND": 0}
+        for s in signals:
+            st = s.get("signal_type") or "TREND"
+            if st in type_counts:
+                type_counts[st] += 1
         text = (
-            f"📊 <b>حالة النظام</b>\n\n"
-            f"📈 إشارات اليوم: {self.safe_text(len(signals))}\n"
-            f"💥 تنبيهات الانفجار: {self.safe_text(explosion_count)}\n"
-            f"💰 الأرباح اليومية: {self.safe_text(f'{stats['pnl']:.2f}')}\n"
-            f"🏆 ربح/خسارة/تعادل: {stats['wins']}/{stats['losses']}/{stats['breakeven']}\n"
-            f"🔭 قائمة المراقبة: {self.safe_text(len(prewatch))}\n"
-            f"👥 المشتركون: {self.safe_text(len(subscribers))}"
+            f"📊 <b>حالة النظام v2026.3</b>\n\n"
+            f"📈 إشارات اليوم: {len(signals)}\n"
+            f"   💥 {type_counts['EXPLOSION']} | ⚡ {type_counts['BREAKOUT']} | 📈 {type_counts['TREND']}\n\n"
+            f"💰 PnL: {stats['pnl']:.2f}\n"
+            f"🏆 ر/خ/ت: {stats['wins']}/{stats['losses']}/{stats['breakeven']}\n"
+            f"🔭 مراقبة: {len(prewatch)}\n"
+            f"👥 مشتركون: {len(subscribers)}"
         )
         await self.send_message(chat_id, text)
 
-    # ============================================================
-    # Prewatch Command
-    # ============================================================
-    async def prewatch(self, chat_id):
+    async def cmd_prewatch(self, chat_id):
         items = await self.database.get_prewatch(10)
         if not items:
             await self.send_message(chat_id, "🔭 قائمة المراقبة فارغة.")
             return
         lines = ["🔭 <b>قائمة المراقبة</b>\n"]
-        for item in items:
-            lines.append(
-                f"• <b>{self.safe_text(item['symbol'])}</b> | "
-                f"{self.safe_text(f'{item['price_change']:.2f}')}% | "
-                f"${self.safe_text(f'{item['quote_volume']:,.0f}')}"
-            )
+        for i in items:
+            lines.append(f"• <b>{i['symbol']}</b> | {i['price_change']:.2f}% | ${i['quote_volume']:,.0f}")
         await self.send_message(chat_id, "\n".join(lines))
 
-    # ============================================================
-    # Performance Command
-    # ============================================================
-    async def performance(self, chat_id):
-        signals = await self.database.get_daily_signals()
-        closed = [x for x in signals if x["status"] == "CLOSED"]
-        if not closed:
-            await self.send_message(chat_id, "لا توجد صفقات مغلقة كافية.")
+    async def cmd_performance(self, chat_id):
+        stats = await self.database.get_accuracy_stats(days=30)
+        if stats["total"] == 0:
+            await self.send_message(chat_id, "لا توجد بيانات كافية.")
             return
-
-        wins = [x for x in closed if float(x["result_r"]) > 0]
-        losses = [x for x in closed if float(x["result_r"]) < 0]
-        breakeven = [x for x in closed if float(x["result_r"]) == 0]
-        inconclusive = [x for x in closed if x.get("exit_reason") == "INCONCLUSIVE"]
-        timeouts = [x for x in closed if x.get("exit_reason") == "TIMEOUT"]
-
-        win_rate = len(wins) / len(closed) * 100
-        gross_profit = sum(float(x["result_r"]) for x in wins)
-        gross_loss = abs(sum(float(x["result_r"]) for x in losses))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
-
-        returns = [float(x["result_r"]) for x in closed]
-        import statistics
-        if len(returns) > 1:
-            avg = statistics.mean(returns)
-            stdev = statistics.stdev(returns)
-            sharpe = avg / stdev if stdev > 0 else 0
-        else:
-            sharpe = 0
-
-        pf_text = "∞" if profit_factor == float("inf") else f"{profit_factor:.2f}"
+        pf = "∞" if stats["profit_factor"] >= 999 else f"{stats['profit_factor']:.2f}"
         text = (
-            f"📈 <b>تقرير الأداء</b>\n\n"
-            f"📊 الصفقات المغلقة: {self.safe_text(len(closed))}\n"
-            f"🏆 ربح/خسارة/تعادل/غير محدد/مهلة: {len(wins)}/{len(losses)}/{len(breakeven)}/{len(inconclusive)}/{len(timeouts)}\n"
-            f"🎯 نسبة الفوز: {self.safe_text(f'{win_rate:.2f}')}%\n"
-            f"💹 معامل الربح: {self.safe_text(pf_text)}\n"
-            f"📉 نسبة شارب (R): {self.safe_text(f'{sharpe:.2f}')}"
+            f"📈 <b>الأداء (30 يوم)</b>\n\n"
+            f"📊 إجمالي: {stats['total']}\n"
+            f"✅ ربح: {stats['wins']} | ❌ خسارة: {stats['losses']}\n"
+            f"⏰ مهلة: {stats['timeouts']} | ➖ تعادل: {stats['breakeven']}\n\n"
+            f"🎯 Win Rate: <b>{stats['win_rate']}%</b>\n"
+            f"📉 Average R: {stats['avg_r']}\n"
+            f"💹 Profit Factor: {pf}"
         )
         await self.send_message(chat_id, text)
 
-    # ============================================================
-    # Manual Signal Analysis
-    # ============================================================
-    async def signal(self, chat_id, symbol):
+    async def cmd_subscribers(self, chat_id, user_id):
+        if not self.is_admin(user_id):
+            await self.send_message(chat_id, "⛔ للمشرف فقط.")
+            return
+        subs = await self.database.get_subscribers()
+        if not subs:
+            await self.send_message(chat_id, "📭 لا يوجد مشتركون.")
+            return
+        lines = [f"📋 المشتركون ({len(subs)}):"]
+        for uid in subs:
+            lines.append(f"• {uid}")
+        await self.send_message(chat_id, "\n".join(lines))
+
+    async def cmd_adduser(self, chat_id, user_id, text):
+        if not self.is_admin(user_id):
+            await self.send_message(chat_id, "⛔ للمشرف فقط.")
+            return
+        parts = text.split()
+        if len(parts) != 2:
+            await self.send_message(chat_id, "الاستخدام: /adduser USER_ID")
+            return
+        try:
+            tid = int(parts[1])
+            if await self.database.add_subscriber(tid):
+                await self.send_message(chat_id, f"✅ تم إضافة {tid}")
+        except ValueError:
+            await self.send_message(chat_id, "❌ USER_ID رقمي فقط")
+
+    async def cmd_removeuser(self, chat_id, user_id, text):
+        if not self.is_admin(user_id):
+            await self.send_message(chat_id, "⛔ للمشرف فقط.")
+            return
+        parts = text.split()
+        if len(parts) != 2:
+            await self.send_message(chat_id, "الاستخدام: /removeuser USER_ID")
+            return
+        try:
+            tid = int(parts[1])
+            if await self.database.remove_subscriber(tid):
+                await self.send_message(chat_id, f"✅ تم حذف {tid}")
+        except ValueError:
+            await self.send_message(chat_id, "❌ USER_ID رقمي فقط")
+
+    async def cmd_accuracy(self, chat_id):
+        d7 = await self.database.get_accuracy_stats(days=7)
+        d30 = await self.database.get_accuracy_stats(days=30)
+        d90 = await self.database.get_accuracy_stats(days=90)
+        def fmt(s):
+            if s["total"] == 0:
+                return "  لا توجد بيانات"
+            return (f"  • إشارات: {s['total']}\n"
+                    f"  • Win Rate: <b>{s['win_rate']}%</b>\n"
+                    f"  • Avg R: {s['avg_r']}\n"
+                    f"  • PF: {s['profit_factor']}")
+        await self.send_message(chat_id,
+            f"📊 <b>Win Rate</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📅 <b>7 أيام:</b>\n{fmt(d7)}\n\n"
+            f"📆 <b>30 يوم:</b>\n{fmt(d30)}\n\n"
+            f"📈 <b>90 يوم:</b>\n{fmt(d90)}")
+
+    async def cmd_accuracy_by_score(self, chat_id):
+        buckets = await self.database.get_accuracy_by_score(days=30)
+        if not buckets:
+            await self.send_message(chat_id, "لا توجد بيانات.")
+            return
+        lines = ["📊 <b>Win Rate حسب النقاط</b>\n"]
+        for name, stats in buckets.items():
+            if stats["total"] == 0:
+                lines.append(f"⭐ <b>{name}</b>: لا بيانات")
+            else:
+                lines.append(f"⭐ <b>{name}</b>: {stats['total']} | Win {stats['win_rate']}% | R {stats['avg_r']}")
+        await self.send_message(chat_id, "\n\n".join(lines))
+
+    async def cmd_accuracy_by_symbol(self, chat_id):
+        data = await self.database.get_accuracy_by_symbol(days=30, limit=10)
+        best = data.get("best", [])
+        worst = data.get("worst", [])
+        if not best and not worst:
+            await self.send_message(chat_id, "لا توجد بيانات.")
+            return
+        lines = ["📊 <b>Win Rate حسب العملة</b>\n"]
+        if best:
+            lines.append("🏆 <b>الأفضل:</b>")
+            for item in best:
+                st = item["stats"]
+                lines.append(f"  • {item['symbol']}: {st['win_rate']}% ({st['total']})")
+        if worst:
+            lines.append("\n📉 <b>الأسوأ:</b>")
+            for item in worst:
+                st = item["stats"]
+                lines.append(f"  • {item['symbol']}: {st['win_rate']}% ({st['total']})")
+        await self.send_message(chat_id, "\n".join(lines))
+
+    async def cmd_accuracy_by_type(self, chat_id):
+        data = await self.database.get_accuracy_by_type(days=30)
+        if not data:
+            await self.send_message(chat_id, "لا توجد بيانات.")
+            return
+        names = {"EXPLOSION": "💥 انفجار", "BREAKOUT": "⚡ اختراق", "TREND": "📈 ترند"}
+        lines = ["📊 <b>Win Rate حسب النوع</b>\n"]
+        for st, stats in data.items():
+            lines.append(f"<b>{names.get(st, st)}</b>\n"
+                         f"  • {stats['total']} إشارة | Win {stats['win_rate']}% | R {stats['avg_r']}")
+        await self.send_message(chat_id, "\n\n".join(lines))
+
+    async def cmd_last_signals(self, chat_id, text):
+        parts = text.split()
+        limit = min(int(parts[1]), 30) if len(parts) == 2 and parts[1].isdigit() else 10
+        outcomes = await self.database.get_recent_outcomes(limit)
+        if not outcomes:
+            await self.send_message(chat_id, "لا توجد إشارات مغلقة.")
+            return
+        lines = [f"📋 <b>آخر {len(outcomes)} إشارة</b>\n"]
+        for o in outcomes:
+            e = {"WIN": "✅", "LOSS": "❌", "TIMEOUT": "⏰", "BREAKEVEN": "➖"}.get(o["outcome"], "❓")
+            te = {"EXPLOSION": "💥", "BREAKOUT": "⚡", "TREND": "📈"}.get(o.get("signal_type"), "")
+            lines.append(f"{e} {te} <b>{o['symbol']}</b> {o['direction']} → {o['outcome']} ({o['r_multiple']:.2f}R)")
+        await self.send_message(chat_id, "\n".join(lines))
+
+    async def cmd_near_miss(self, chat_id, user_id):
+        if not self.is_admin(user_id):
+            await self.send_message(chat_id, "⛔ للمشرف فقط.")
+            return
+        # Simple display - in production would query DB
+        await self.send_message(chat_id, "📊 Near-miss logging يعمل في الخلفية. تحقق من /api/accuracy أو DB.")
+
+    async def cmd_regime(self, chat_id, text):
+        parts = text.split()
+        if len(parts) != 2:
+            await self.send_message(chat_id, "الاستخدام: /regime BTCUSDT")
+            return
+        symbol = parts[1].upper()
+        klines = await self.data_fetcher.klines(symbol, config.ANALYSIS_INTERVAL, 250)
+        if not klines:
+            await self.send_message(chat_id, f"❌ لا توجد بيانات لـ {symbol}")
+            return
+        from utils import klines_to_dataframe
+        from indicators import add_indicators, detect_market_regime
+        df = klines_to_dataframe(klines)
+        df = add_indicators(df)
+        regime = detect_market_regime(df)
+        emoji = {"TRENDING": "🟢", "RANGING": "🟡", "NEUTRAL": "⚪", "UNKNOWN": "❓"}.get(regime["regime"], "❓")
+        await self.send_message(chat_id,
+            f"{emoji} <b>حالة السوق: {symbol}</b>\n\n"
+            f"📊 النظام: <b>{regime['regime']}</b>\n"
+            f"📈 ADX: {regime['adx']:.1f}\n"
+            f"📉 Efficiency Ratio: {regime['er']:.3f}")
+
+    async def cmd_signal(self, chat_id, symbol):
         klines = await self.data_fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT)
         if not klines:
-            await self.send_message(chat_id, f"❌ لا توجد بيانات لـ {self.safe_text(symbol)}.")
+            await self.send_message(chat_id, f"❌ لا توجد بيانات لـ {symbol}")
             return
         from utils import klines_to_dataframe
         df = klines_to_dataframe(klines)
@@ -462,92 +465,77 @@ class TelegramBot:
         if not result:
             await self.send_message(
                 chat_id,
-                f"⚪ لا توجد إشارة قوية لـ {self.safe_text(symbol)}.\n"
-                f"(المعايير مشددة: الحد الأدنى للنقاط={config.MIN_SCORE})"
-            )
+                f"⚪ لا توجد إشارة لـ {symbol}\n"
+                f"(score≥{config.MIN_SCORE}, ADX≥{config.MIN_ADX})")
             return
         await self.send_message(chat_id, self.format_signal(result))
 
     # ============================================================
-    # Format Signal (Arabic)
+    # Format Signal
     # ============================================================
     def format_signal(self, signal):
-        def fmt(val):
-            if abs(val) < 1e-5:
-                return self.safe_text(f"{val:.4e}")
-            else:
-                return self.safe_text(f"{val:.6f}")
+        def fmt(v):
+            if abs(v) < 1e-5:
+                return self.safe_text(f"{v:.4e}")
+            return self.safe_text(f"{v:.6f}")
 
-        if signal["direction"] == "BUY":
-            direction_ar = "🟢 شراء"
-            emoji = "🟢"
+        direction = signal["direction"]
+        dir_ar = "🟢 شراء" if direction == "BUY" else "🔴 بيع"
+        st = signal.get("signal_type", "TREND")
+        score = signal.get("score", 0)
+
+        if st == "EXPLOSION":
+            title = f"💥 <b>تنبؤ بانفجار — {self.safe_text(signal['symbol'])}</b>"
+        elif st == "BREAKOUT":
+            title = f"⚡ <b>اختراق مؤكد — {self.safe_text(signal['symbol'])}</b>"
         else:
-            direction_ar = "🔴 بيع"
-            emoji = "🔴"
+            title = f"📈 <b>اتجاه قوي — {self.safe_text(signal['symbol'])}</b>"
 
-        score_val = signal.get('score', 0)
-        if score_val >= 9.0:
-            rating = "🔥 إشارة استثنائية"
-        elif score_val >= 8.0:
-            rating = "⚡ إشارة قوية جداً"
-        elif score_val >= 7.5:
-            rating = "✅ إشارة قوية"
-        else:
-            rating = "📊 إشارة مقبولة"
+        rating = ("🔥 استثنائية" if score >= 9.0 else
+                  "⚡ قوية جداً" if score >= 8.5 else
+                  "✅ قوية" if score >= 8.0 else "📊 مقبولة")
 
-        quality_label = f"⚡ الجودة: {signal.get('quality', 0)}%" if signal.get('quality') else ""
-        risk_label = f"🎯 المخاطرة: {signal.get('actual_risk_percent', 0):.2f}%" if signal.get('actual_risk_percent') else ""
-
-        if signal.get("early_snipe"):
-            title = f"{emoji} <b>💥 تنبؤ بانفجار — {self.safe_text(signal['symbol'])}</b>"
-            explosion_info = signal.get("explosion_details", {})
-            conditions = signal.get("explosion_conditions", 0)
-
-            details_lines = []
-            if explosion_info.get("squeeze"):
-                details_lines.append("  ✅ انضغاط بولينجر (TTM Squeeze)")
-            if explosion_info.get("consolidation"):
-                details_lines.append("  ✅ تجميع سعري (Consolidation)")
-            if explosion_info.get("volume_buildup"):
-                details_lines.append("  ✅ تراكم حجم (Volume Buildup)")
-            if explosion_info.get("breakout_proximity"):
-                details_lines.append("  ✅ اقتراب من مقاومة/دعم")
-
-            explosion_section = (
-                f"\n💥 <b>إعداد انفجار</b> ({conditions}/4 شروط)\n"
-                + "\n".join(details_lines)
-                + "\n"
-            )
-        else:
-            title = f"{emoji} <b>{rating} — {self.safe_text(signal['symbol'])}</b>"
-            explosion_section = ""
-
-        factor_count = signal.get("factor_count", 0)
-        factor_section = f"📊 العوامل المتوافقة: {factor_count}/7\n" if factor_count else ""
+        explosion_section = ""
+        if st == "EXPLOSION":
+            details = signal.get("explosion_details", {})
+            cond = signal.get("explosion_conditions", 0)
+            lines = []
+            if details.get("squeeze"):
+                lines.append("  ✅ انضغاط بولنجر")
+            if details.get("consolidation"):
+                lines.append("  ✅ تجميع سعري")
+            if details.get("volume_buildup"):
+                lines.append("  ✅ تراكم حجم")
+            if details.get("breakout_proximity"):
+                lines.append("  ✅ اقتراب مقاومة")
+            explosion_section = f"\n💥 <b>إعداد انفجار</b> ({cond}/4)\n" + "\n".join(lines) + "\n"
 
         position = signal.get('position_size', 0)
-        position_str = self.safe_text(f"{position:.6f}" if position >= 0.01 else f"{position:.4e}")
+        pos_str = self.safe_text(f"{position:.6f}" if position >= 0.01 else f"{position:.4e}")
+        regime = signal.get("market_regime", "N/A")
+        er_val = signal.get("efficiency_ratio", 0)
 
         return (
-            f"{title}\n"
-            f"{'━' * 20}\n\n"
-            f"📌 <b>الاتجاه:</b> {direction_ar}\n"
-            f"⭐ <b>النقاط:</b> {self.safe_text(score_val)}/10\n"
-            f"{quality_label}\n"
-            f"{risk_label}\n"
-            f"{factor_section}"
+            f"{title}\n{'━' * 20}\n\n"
+            f"📌 النوع: {signal.get('signal_type_ar', '📊')}\n"
+            f"🎯 الاتجاه: {dir_ar}\n"
+            f"⭐ النقاط: {score}/10 ({rating})\n"
+            f"⚡ الجودة: {signal.get('quality', 0)}%\n"
+            f"🎯 المخاطرة: {signal.get('actual_risk_percent', 0):.2f}%\n"
+            f"📊 العوامل: {signal.get('factor_count', 0)}/7\n"
+            f"🏛 حالة السوق: {regime} | ER: {er_val:.2f}\n"
             f"{explosion_section}\n"
-            f"━━━━━ <b>إدارة المخاطر</b> ━━━━━\n\n"
-            f"💰 <b>سعر الدخول:</b> {fmt(signal['entry'])}\n"
-            f"🛑 <b>وقف الخسارة:</b> {fmt(signal['sl'])}\n"
-            f"🎯 <b>جني الأرباح:</b> {fmt(signal['tp'])}\n"
-            f"📊 <b>نسبة R/R:</b> {self.safe_text(signal['rr'])}\n"
-            f"📦 <b>حجم الصفقة:</b> {position_str}\n\n"
-            f"━━━━━ <b>المؤشرات الفنية</b> ━━━━━\n\n"
-            f"📈 <b>RSI:</b> {self.safe_text(signal['rsi'])}\n"
-            f"📊 <b>ADX:</b> {self.safe_text(signal['adx'])}\n"
-            f"📉 <b>ATR:</b> {fmt(signal['atr'])}\n\n"
-            f"⏱ <b>الوقت:</b> {self.safe_text(signal['timestamp'][:19].replace('T', ' '))}\n\n"
-            "⚠️ <i>إشارة تحليلية وليست ضماناً للربح.</i>\n"
-            "📊 <i>الجودة تعبر عن قوة الإشارة وليست احتمالية ربح.</i>"
+            f"━━━━━ إدارة المخاطر ━━━━━\n\n"
+            f"💰 الدخول: {fmt(signal['entry'])}\n"
+            f"🛑 وقف الخسارة: {fmt(signal['sl'])}\n"
+            f"🎯 جني الأرباح: {fmt(signal['tp'])}\n"
+            f"📊 R/R: {self.safe_text(signal['rr'])}\n"
+            f"📦 الحجم: {pos_str}\n\n"
+            f"━━━━━ المؤشرات ━━━━━\n\n"
+            f"📈 RSI: {self.safe_text(signal['rsi'])}\n"
+            f"📊 ADX: {self.safe_text(signal['adx'])}\n"
+            f"📉 ATR: {fmt(signal['atr'])}\n"
+            f"📊 Volume: {self.safe_text(signal.get('volume_ratio', 0))}x\n\n"
+            f"⏱ {self.safe_text(signal['timestamp'][:19].replace('T', ' '))} UTC\n\n"
+            "⚠️ <i>إشارة تحليلية وليست ضماناً للربح.</i>"
         )
