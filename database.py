@@ -1,5 +1,5 @@
 # database.py
-# Database Manager v2026.3.2 - Naive UTC for PostgreSQL TIMESTAMP
+# Database Manager v2026.3.3 - TIMESTAMPTZ + aware datetimes (asyncpg 0.32 compatible)
 
 import json
 import logging
@@ -12,49 +12,31 @@ logger = logging.getLogger("quant_bot.database")
 
 
 # ============================================================
-# Helpers - كلها تُعيد NAIVE datetime (بدون tzinfo)
+# Helpers - ALL return aware UTC datetime
 # ============================================================
 def _utcnow():
-    """UTC الآن - naive (بدون tzinfo) لـ PostgreSQL TIMESTAMP"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    """UTC now - AWARE datetime (متوافق مع TIMESTAMPTZ)"""
+    return datetime.now(timezone.utc)
 
 
-def _to_naive_datetime(val):
-    """تحويل أي قيمة إلى naive datetime UTC"""
+def _to_aware(val):
+    """تحويل أي قيمة إلى aware UTC datetime"""
     if val is None:
         return None
     if isinstance(val, datetime):
-        if val.tzinfo is not None:
-            return val.astimezone(timezone.utc).replace(tzinfo=None)
-        return val
+        if val.tzinfo is None:
+            return val.replace(tzinfo=timezone.utc)
+        return val.astimezone(timezone.utc)
     if isinstance(val, date):
-        return datetime(val.year, val.month, val.day)
+        return datetime(val.year, val.month, val.day, tzinfo=timezone.utc)
     if isinstance(val, str):
         try:
             dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
-            if dt.tzinfo is not None:
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-            return dt
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
         except Exception:
             return None
-    return None
-
-
-def _to_date(val):
-    if val is None:
-        return None
-    if isinstance(val, datetime):
-        return val.date()
-    if isinstance(val, date):
-        return val
-    if isinstance(val, str):
-        try:
-            return datetime.fromisoformat(val).date()
-        except Exception:
-            try:
-                return datetime.strptime(val[:10], "%Y-%m-%d").date()
-            except Exception:
-                return None
     return None
 
 
@@ -81,12 +63,15 @@ class Database:
                 statement_cache_size=0,
                 server_settings={"application_name": "crypto_bot"},
             )
+            # كل الأعمدة الزمنية TIMESTAMPTZ
             await self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS subscribers (
-                    user_id BIGINT PRIMARY KEY, active INTEGER DEFAULT 1, created_at TIMESTAMP NOT NULL
+                    user_id BIGINT PRIMARY KEY, active INTEGER DEFAULT 1,
+                    created_at TIMESTAMPTZ NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS cooldown (
-                    symbol TEXT PRIMARY KEY, direction TEXT NOT NULL, created_at TIMESTAMP NOT NULL
+                    symbol TEXT PRIMARY KEY, direction TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS signals (
                     id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, direction TEXT NOT NULL,
@@ -94,14 +79,15 @@ class Database:
                     rr REAL, quantity REAL, actual_risk_percent REAL,
                     factor_contributions JSONB, factor_weights JSONB, used_factors JSONB,
                     status TEXT DEFAULT 'OPEN', result REAL DEFAULT 0, result_r REAL DEFAULT 0,
-                    created_at TIMESTAMP NOT NULL, closed_at TIMESTAMP, exit_reason TEXT
+                    created_at TIMESTAMPTZ NOT NULL, closed_at TIMESTAMPTZ, exit_reason TEXT
                 );
                 CREATE TABLE IF NOT EXISTS pre_watch (
                     symbol TEXT PRIMARY KEY, reason TEXT, price_change REAL, quote_volume REAL,
-                    trades INTEGER, price REAL, added_at TIMESTAMP NOT NULL, last_seen TIMESTAMP
+                    trades INTEGER, price REAL, added_at TIMESTAMPTZ NOT NULL, last_seen TIMESTAMPTZ
                 );
                 CREATE TABLE IF NOT EXISTS adaptive_weights (
-                    factor TEXT PRIMARY KEY, weight REAL NOT NULL, updated_at TIMESTAMP NOT NULL
+                    factor TEXT PRIMARY KEY, weight REAL NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS daily_stats (
                     date DATE PRIMARY KEY, capital REAL NOT NULL, pnl REAL DEFAULT 0,
@@ -110,12 +96,13 @@ class Database:
                 );
                 CREATE TABLE IF NOT EXISTS trade_log (
                     id SERIAL PRIMARY KEY, signal_id INTEGER, symbol TEXT, direction TEXT,
-                    entry REAL, exit_price REAL, result_r REAL, exit_reason TEXT, timestamp TIMESTAMP
+                    entry REAL, exit_price REAL, result_r REAL, exit_reason TEXT,
+                    timestamp TIMESTAMPTZ
                 );
                 CREATE TABLE IF NOT EXISTS signal_outcomes (
                     id SERIAL PRIMARY KEY, signal_id INTEGER UNIQUE, symbol TEXT NOT NULL,
                     direction TEXT NOT NULL, signal_type TEXT, entry_price REAL NOT NULL,
-                    exit_price REAL, entry_time TIMESTAMP NOT NULL, exit_time TIMESTAMP,
+                    exit_price REAL, entry_time TIMESTAMPTZ NOT NULL, exit_time TIMESTAMPTZ,
                     highest_price REAL, lowest_price REAL, outcome TEXT,
                     pips_gained REAL DEFAULT 0, pips_lost REAL DEFAULT 0,
                     r_multiple REAL DEFAULT 0, duration_minutes INTEGER DEFAULT 0,
@@ -124,10 +111,11 @@ class Database:
                 );
                 CREATE TABLE IF NOT EXISTS near_miss (
                     id SERIAL PRIMARY KEY, symbol TEXT, reason TEXT, details JSONB,
-                    timestamp TIMESTAMP NOT NULL
+                    timestamp TIMESTAMPTZ NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS bot_state (
-                    key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP NOT NULL
+                    key TEXT PRIMARY KEY, value TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
                 CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol);
@@ -135,7 +123,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_outcomes_symbol ON signal_outcomes(symbol);
                 CREATE INDEX IF NOT EXISTS idx_outcomes_created ON signal_outcomes(entry_time);
             """)
-            logger.info("PostgreSQL tables created")
+            logger.info("PostgreSQL tables created (TIMESTAMPTZ)")
             for factor in config.FACTORS:
                 if await self.get_weight(factor) is None:
                     await self.save_weight(factor, 1.0)
@@ -218,7 +206,7 @@ class Database:
             self.conn = None
 
     # ============================================================
-    # 🔒 Safe PG wrappers
+    # PG wrappers
     # ============================================================
     async def _pg_execute(self, query, *args):
         async with self._pg_lock:
@@ -239,11 +227,13 @@ class Database:
         try:
             if self.use_postgres:
                 await self._pg_execute(
-                    "INSERT INTO subscribers (user_id, active, created_at) VALUES ($1,1,$2) ON CONFLICT (user_id) DO UPDATE SET active=1",
+                    "INSERT INTO subscribers (user_id, active, created_at) VALUES ($1,1,$2) "
+                    "ON CONFLICT (user_id) DO UPDATE SET active=1",
                     user_id, _utcnow())
             else:
                 await self.conn.execute(
-                    "INSERT INTO subscribers (user_id, active, created_at) VALUES (?,1,?) ON CONFLICT(user_id) DO UPDATE SET active=1",
+                    "INSERT INTO subscribers (user_id, active, created_at) VALUES (?,1,?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET active=1",
                     (user_id, _utcnow().isoformat()))
                 await self.conn.commit()
             return True
@@ -451,12 +441,12 @@ class Database:
             return []
 
     # ============================================================
-    # Signal Outcomes
+    # Outcomes
     # ============================================================
     async def create_outcome(self, signal_id, symbol, direction, signal_type,
                              entry_price, entry_time, initial_high=None, initial_low=None):
         try:
-            et = _to_naive_datetime(entry_time) or _utcnow()
+            et = _to_aware(entry_time) or _utcnow()
             if self.use_postgres:
                 await self._pg_execute("""
                     INSERT INTO signal_outcomes (signal_id, symbol, direction, signal_type,
