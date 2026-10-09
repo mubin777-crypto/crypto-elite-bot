@@ -1,11 +1,11 @@
 # bot.py
-# Main Application - Production Ready
+# Main Application v2026.3 - Rebuilt with Circuit Breaker + Near-Miss + Fixed Bugs
 
 import asyncio
 import json
 import signal
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import aiohttp
 from aiohttp import web
 import config
@@ -20,12 +20,11 @@ from telegram_bot import TelegramBot
 # ============================================================
 # Web Handlers
 # ============================================================
-
 async def handle_health(request):
     return web.json_response({
         "status": "healthy",
-        "service": "Quant Signal Engine",
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "service": "Quant Signal Engine v2026.3",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }, status=200)
 
 
@@ -36,7 +35,7 @@ async def handle_telegram_webhook(request):
         await bot_instance.telegram.process_update(data)
         return web.Response(status=200)
     except Exception as e:
-        logger.error(f"Error handling Telegram Webhook: {e}")
+        logger.error(f"Webhook error: {e}")
         return web.Response(status=500)
 
 
@@ -45,27 +44,42 @@ async def handle_status_api(request):
     try:
         open_signals = await bot_instance.db.get_open_signals()
         daily_stats = await bot_instance.db.get_daily_pnl()
+        subscribers = await bot_instance.db.get_subscribers()
         return web.json_response({
             "open_trades": len(open_signals),
             "daily_pnl": daily_stats.get("pnl", 0.0),
             "wins": daily_stats.get("wins", 0),
             "losses": daily_stats.get("losses", 0),
-            "breakeven": daily_stats.get("breakeven", 0),
-            "inconclusive": daily_stats.get("inconclusive", 0),
-            "timeout": daily_stats.get("timeout", 0),
-            "subscribers": len(await bot_instance.db.get_subscribers()),
+            "subscribers": len(subscribers),
             "known_symbols": len(bot_instance.known_symbols),
-            "websocket_active": bot_instance.fetcher.websocket.running if hasattr(bot_instance.fetcher, 'websocket') else False,
+            "circuit_breaker": bot_instance.circuit_breaker_active,
         }, status=200)
     except Exception as e:
-        logger.error(f"Error fetching status: {e}")
+        logger.error(f"Status API error: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def handle_accuracy_api(request):
+    bot_instance = request.app['bot_instance']
+    try:
+        days = int(request.query.get("days", 30))
+        overall = await bot_instance.db.get_accuracy_stats(days)
+        by_score = await bot_instance.db.get_accuracy_by_score(days)
+        by_type = await bot_instance.db.get_accuracy_by_type(days)
+        return web.json_response({
+            "period_days": days,
+            "overall": overall,
+            "by_score": by_score,
+            "by_type": by_type,
+        }, status=200)
+    except Exception as e:
+        logger.error(f"Accuracy API error: {e}")
         return web.json_response({"error": str(e)}, status=500)
 
 
 # ============================================================
 # TradingBot Class
 # ============================================================
-
 class TradingBot:
     def __init__(self):
         self.running = True
@@ -82,6 +96,12 @@ class TradingBot:
         self.tasks = []
         self.known_symbols = set(config.CORE_UNIVERSE)
         self.web_runner = None
+        self.scan_semaphore = asyncio.Semaphore(5)
+        self.last_daily_summary_date = None
+        # 🆕 Circuit Breaker (من multi-market-trading-bot)[reference:37]
+        self.circuit_breaker_active = False
+        self.consecutive_losses = 0
+        self.circuit_breaker_until = None
 
     # ============================================================
     # Web Server
@@ -89,56 +109,39 @@ class TradingBot:
     async def init_web_server(self):
         app = web.Application()
         app['bot_instance'] = self
-
         app.router.add_get("/", handle_health)
         app.router.add_get("/health", handle_health)
         app.router.add_post(config.WEBHOOK_PATH, handle_telegram_webhook)
         app.router.add_get("/api/status", handle_status_api)
-
+        app.router.add_get("/api/accuracy", handle_accuracy_api)
         self.web_runner = web.AppRunner(app)
         await self.web_runner.setup()
         site = web.TCPSite(self.web_runner, "0.0.0.0", config.PORT)
         await site.start()
-
-        # ✅ تنظيف WEBHOOK_URL من التكرار /webhook
-        webhook_base = config.WEBHOOK_URL.rstrip("/")
-        if webhook_base.endswith("/webhook"):
-            webhook_base = webhook_base[:-8]
-
-        logger.info(f"🌐 Web Server running on port {config.PORT}")
-        logger.info(f"📍 Health: http://0.0.0.0:{config.PORT}/health")
-        logger.info(f"📍 Webhook: {webhook_base}{config.WEBHOOK_PATH}")
-        logger.info(f"📍 Status API: http://0.0.0.0:{config.PORT}/api/status")
+        logger.info(f"🌐 Web Server on port {config.PORT}")
         return self.web_runner
 
     async def setup_telegram_webhook(self):
         if config.TELEGRAM_USE_WEBHOOK and config.WEBHOOK_URL:
-            # ✅ تنظيف WEBHOOK_URL من التكرار
-            webhook_base = config.WEBHOOK_URL.rstrip("/")
-            if webhook_base.endswith("/webhook"):
-                webhook_base = webhook_base[:-8]
-            full_webhook_url = f"{webhook_base}{config.WEBHOOK_PATH}"
-            success = await self.telegram.set_webhook(full_webhook_url)
-            if success:
-                logger.info(f"✅ Telegram Webhook set to: {full_webhook_url}")
-            else:
-                logger.error("❌ Failed to set Telegram Webhook")
+            wb = config.WEBHOOK_URL.rstrip("/")
+            if wb.endswith("/webhook"):
+                wb = wb[:-8]
+            full = f"{wb}{config.WEBHOOK_PATH}"
+            if await self.telegram.set_webhook(full):
+                logger.info(f"✅ Webhook: {full}")
         else:
-            logger.info("ℹ️ Telegram Webhook disabled, using Polling mode")
+            logger.info("ℹ️ Polling mode")
 
-    # ============================================================
-    # Load weights
-    # ============================================================
     async def load_weights(self):
         saved = await self.db.get_weights()
         if saved:
             self.weights = AdaptiveWeights(saved)
             self.engine = SignalEngine(self.weights)
             self.telegram.signal_engine = self.engine
-            logger.info(f"Adaptive weights loaded: {self.weights.to_dict()}")
+            logger.info(f"Weights loaded: {self.weights.to_dict()}")
 
     # ============================================================
-    # Cooldown & Daily Loss
+    # Cooldown & Circuit Breaker
     # ============================================================
     async def cooldown_allowed(self, symbol, direction):
         record = await self.db.get_cooldown(symbol)
@@ -148,143 +151,181 @@ class TradingBot:
             created = datetime.fromisoformat(record["created_at"])
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            elapsed = (now - created).total_seconds()
+            elapsed = (datetime.now(timezone.utc) - created).total_seconds()
         except Exception:
             return True
-        same_direction_limit = config.COOLDOWN_MINUTES * 60
-        opposite_limit = config.OPPOSITE_COOLDOWN_HOURS * 3600
+        same_limit = config.COOLDOWN_MINUTES * 60
+        opp_limit = config.OPPOSITE_COOLDOWN_HOURS * 3600
         if record["direction"] == direction:
-            return elapsed >= same_direction_limit
-        return elapsed >= opposite_limit
+            return elapsed >= same_limit
+        return elapsed >= opp_limit
 
     async def daily_loss_exceeded(self):
         stats = await self.db.get_daily_pnl()
         limit = -self.daily_capital * config.DAILY_MAX_LOSS_PERCENT
         return stats["pnl"] <= limit
 
+    # 🆕 Circuit Breaker (من multi-market-trading-bot)[reference:38]
+    async def check_circuit_breaker(self):
+        if not config.ENABLE_CIRCUIT_BREAKER:
+            return False
+        if self.circuit_breaker_active:
+            if self.circuit_breaker_until and datetime.now(timezone.utc) < self.circuit_breaker_until:
+                return True
+            self.circuit_breaker_active = False
+            self.circuit_breaker_until = None
+            self.consecutive_losses = 0
+            logger.info("✅ Circuit breaker reset")
+
+        if self.consecutive_losses >= config.MAX_CONSECUTIVE_LOSSES:
+            self.circuit_breaker_active = True
+            self.circuit_breaker_until = datetime.now(timezone.utc) + timedelta(hours=12)
+            await self.telegram.broadcast(
+                f"🚨 <b>Circuit Breaker Activated</b>\n\n"
+                f"خسائر متتالية: {self.consecutive_losses}\n"
+                f"سيتوقف النظام 12 ساعة"
+            )
+            logger.warning(f"Circuit breaker: {self.consecutive_losses} consecutive losses")
+            return True
+        return False
+
+    async def is_rate_limited(self):
+        if await self.db.count_signals_today() >= config.MAX_SIGNALS_PER_DAY:
+            return True
+        if await self.db.count_recent_signals_global(hours=1) >= config.MAX_SIGNALS_PER_HOUR:
+            return True
+        return False
+
+    async def is_duplicate(self, symbol):
+        count = await self.db.count_recent_signals_for_symbol(
+            symbol, hours=config.DUPLICATE_WINDOW_HOURS)
+        return count >= config.MAX_SIGNALS_PER_SYMBOL_PER_DAY
+
     # ============================================================
-    # Strict Symbol Validation
+    # Symbol Validation
     # ============================================================
-    def is_valid_symbol(self, symbol: str) -> bool:
+    def is_valid_symbol(self, symbol):
         if not symbol or not symbol.endswith("USDT"):
             return False
         if symbol in config.EXCLUDED_SYMBOLS:
             return False
-
         base = symbol[:-4]
         if not base:
             return False
-
-        # استبعاد الأسهم المرمّزة (تنتهي بـ B قبل USDT)
         if config.EXCLUDE_TOKENIZED_STOCKS and base.endswith("B") and len(base) > 2:
-            known_cryptos_ending_in_b = {
-                "BNB", "ARB", "BGB", "WIF", "SATS", "ORDI",
-                "OMB", "GLMB", "STGB", "BANB", "VIB", "SNB",
-                "MTLB", "RBNB", "VETB", "ACB", "TROYB"
-            }
-            if base not in known_cryptos_ending_in_b:
-                logger.debug(f"Rejected tokenized stock: {symbol}")
+            known = {"BNB", "ARB", "BGB", "WIF", "SATS", "ORDI", "VIB", "SNB", "ACB"}
+            if base not in known:
                 return False
-
-        # استبعاد اللواحق الممنوعة
         for suffix in config.EXCLUDED_SUFFIXES:
             if symbol.endswith(suffix):
-                logger.debug(f"Rejected leveraged token: {symbol}")
                 return False
-
         if base[0].isdigit():
             return False
         if not base.isascii() or not base.isalnum():
             return False
         if len(base) < 2 or len(base) > 10:
             return False
-
         return True
 
     # ============================================================
     # Scan Symbol
     # ============================================================
     async def scan_symbol(self, symbol):
-        if symbol in config.EXCLUDED_SYMBOLS:
-            return
-        if not self.is_valid_symbol(symbol):
-            return
-        if await self.daily_loss_exceeded():
-            return
+        async with self.scan_semaphore:
+            try:
+                if await self.is_duplicate(symbol):
+                    return
+                try:
+                    klines = await asyncio.wait_for(
+                        self.fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT),
+                        timeout=15.0)
+                except asyncio.TimeoutError:
+                    return
+                if not klines:
+                    return
+                self.last_data_update[symbol] = time.time()
+                if len(self.last_data_update) > self.last_data_update_max:
+                    oldest = min(self.last_data_update, key=self.last_data_update.get)
+                    del self.last_data_update[oldest]
 
-        klines = await self.fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT)
-        if not klines:
-            return
+                df = klines_to_dataframe(klines)
+                if len(df) < 60:
+                    return
+                try:
+                    klines_15m = await asyncio.wait_for(
+                        self.fetcher.klines(symbol, config.TREND_INTERVAL, 50),
+                        timeout=15.0)
+                except asyncio.TimeoutError:
+                    klines_15m = None
+                df_15m = klines_to_dataframe(klines_15m) if klines_15m else None
 
-        self.last_data_update[symbol] = time.time()
-        if len(self.last_data_update) > self.last_data_update_max:
-            oldest = min(self.last_data_update, key=self.last_data_update.get)
-            del self.last_data_update[oldest]
+                result = self.engine.analyze(symbol, df, self.daily_capital, df_15m)
+                if not result:
+                    return
+                if not await self.cooldown_allowed(symbol, result["direction"]):
+                    return
 
-        df = klines_to_dataframe(klines)
-        if len(df) < 60:
-            return
+                signal_id = await self.db.add_signal(result)
+                if not signal_id:
+                    return
+                result["signal_id"] = signal_id
 
-        klines_15m = await self.fetcher.klines(symbol, config.TREND_INTERVAL, 50)
-        df_15m = klines_to_dataframe(klines_15m) if klines_15m else None
+                entry_dt = datetime.now(timezone.utc)
+                await self.db.create_outcome(
+                    signal_id=signal_id,
+                    symbol=result["symbol"],
+                    direction=result["direction"],
+                    signal_type=result["signal_type"],
+                    entry_price=result["entry"],
+                    entry_time=entry_dt,
+                )
+                formatted = self.telegram.format_signal(result)
+                await self.telegram.broadcast(formatted)
+                await self.db.set_cooldown(symbol, result["direction"])
+                logger.info(
+                    f"📊 Signal: {symbol} {result['direction']} "
+                    f"type={result['signal_type']} score={result['score']} (id={signal_id})"
+                )
+            except Exception as e:
+                logger.exception(f"scan_symbol error {symbol}: {e}")
 
-        result = self.engine.analyze(symbol, df, self.daily_capital, df_15m)
-        if not result:
-            return
-        if not await self.cooldown_allowed(symbol, result["direction"]):
-            return
-
-        signal_id = await self.db.add_signal(result)
-        result["signal_id"] = signal_id
-
-        formatted = self.telegram.format_signal(result)
-        await self.telegram.broadcast(formatted)
-
-        await self.db.set_cooldown(symbol, result["direction"])
-        logger.info(
-            f"📊 Signal generated: {symbol} {result['direction']} "
-            f"score={result['score']} (id={signal_id})"
-        )
-
-    # ============================================================
-    # Scan Market
-    # ============================================================
     async def scan_market(self):
+        # ✅ فحص مرة واحدة (Bug #4 fix)
+        if await self.daily_loss_exceeded():
+            logger.info("Daily loss limit reached")
+            return
+        if await self.is_rate_limited():
+            logger.info("Rate limit reached")
+            return
+        if await self.check_circuit_breaker():
+            logger.info("Circuit breaker active")
+            return
+
         prewatch = await self.db.get_prewatch(config.MAX_PREWATCH_TO_SCAN)
-        prewatch_symbols = [
+        prewatch_syms = [
             item["symbol"] for item in prewatch
             if item["symbol"] not in self.known_symbols
             and self.is_valid_symbol(item["symbol"])
         ]
-        symbols = list(dict.fromkeys(list(self.known_symbols) + prewatch_symbols))
-        tasks = [self.scan_symbol(symbol) for symbol in symbols]
+        symbols = list(dict.fromkeys(list(self.known_symbols) + prewatch_syms))
+        tasks = [self.scan_symbol(s) for s in symbols]
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"Scan task failed: {result}")
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.error(f"Scan task: {r}")
 
-    # ============================================================
-    # Scan Pre-watch
-    # ============================================================
     async def scan_prewatch(self):
         data = await self.fetcher.ticker_24h()
         if not isinstance(data, list):
             return
-
-        added_count = 0
-        rejected_count = 0
-
+        added = 0
         for item in data:
             symbol = item.get("symbol", "").upper()
-
             if not self.is_valid_symbol(symbol):
-                rejected_count += 1
                 continue
             if symbol in self.known_symbols:
                 continue
-
             try:
                 change = float(item.get("priceChangePercent", 0))
                 volume = float(item.get("quoteVolume", 0))
@@ -292,31 +333,218 @@ class TradingBot:
                 price = float(item.get("lastPrice", 0))
             except (ValueError, TypeError):
                 continue
-
             if volume < config.PREWATCH_MIN_VOLUME_USDT:
                 continue
             if trades < config.PREWATCH_MIN_TRADES:
                 continue
             if price > config.PREWATCH_MAX_PRICE or price < config.PREWATCH_MIN_PRICE:
                 continue
-
             if abs(change) > config.PREWATCH_PRICE_CHANGE or volume > config.PREWATCH_VOLUME_USDT:
                 reasons = []
                 if abs(change) > config.PREWATCH_PRICE_CHANGE:
                     reasons.append("price_move")
                 if volume > config.PREWATCH_VOLUME_USDT:
                     reasons.append("high_volume")
-                await self.db.add_prewatch(
-                    symbol, ",".join(reasons), change, volume, trades, price
-                )
+                await self.db.add_prewatch(symbol, ",".join(reasons), change, volume, trades, price)
                 self.known_symbols.add(symbol)
-                added_count += 1
+                added += 1
+        if added > 0:
+            logger.info(f"📋 Pre-watch: Added {added} symbols")
 
-        if added_count > 0 or rejected_count > 0:
-            logger.info(
-                f"📋 Pre-watch scan: Added {added_count} new symbols, "
-                f"rejected {rejected_count} invalid"
+    # ============================================================
+    # Track Signal Outcomes (Fixed Bug #1 + #2)
+    # ============================================================
+    async def track_signal_outcomes(self):
+        while self.running:
+            try:
+                pending = await self.db.get_pending_outcomes()
+                for outcome in pending:
+                    try:
+                        await self._process_outcome(outcome)
+                    except Exception as e:
+                        logger.error(f"Outcome error signal={outcome.get('signal_id')}: {e}")
+                await self._maybe_send_daily_summary()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.exception(f"Tracker error: {exc}")
+            await asyncio.sleep(config.TRACKER_INTERVAL)
+
+    async def _process_outcome(self, outcome):
+        signal_id = outcome["signal_id"]
+        symbol = outcome["symbol"]
+        direction = outcome["direction"]
+        entry_price = float(outcome["entry_price"])
+        sl = float(outcome["sl"])
+        tp = float(outcome["tp"])
+        quantity = float(outcome.get("quantity", 0))
+
+        entry_time = outcome["entry_time"]
+        if isinstance(entry_time, str):
+            entry_dt = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+        else:
+            entry_dt = entry_time
+        if entry_dt.tzinfo is None:
+            entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+
+        # ✅ Bug #2 fix: fetch from entry time
+        entry_ms = int(entry_dt.timestamp() * 1000)
+        try:
+            klines = await asyncio.wait_for(
+                self.fetcher.request("/api/v3/klines", {
+                    "symbol": symbol.upper(),
+                    "interval": config.ANALYSIS_INTERVAL,
+                    "startTime": entry_ms,
+                    "limit": 500,
+                }), timeout=15.0)
+        except asyncio.TimeoutError:
+            return
+        if not isinstance(klines, list) or not klines:
+            return
+
+        highest = float(outcome.get("highest_price") or entry_price)
+        lowest = float(outcome.get("lowest_price") or entry_price)
+        max_dd = float(outcome.get("max_drawdown_during_trade") or 0.0)
+        outcome_result = None
+        hit_tp = 0
+        hit_sl = 0
+        exit_price = entry_price
+        risk = abs(entry_price - sl)
+
+        for candle in klines:
+            candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
+            if candle_time <= entry_dt:
+                continue
+            high = float(candle[2])
+            low = float(candle[3])
+            if high > highest:
+                highest = high
+            if low < lowest:
+                lowest = low
+            if direction == "BUY":
+                dd = (highest - low) / entry_price
+            else:
+                dd = (high - lowest) / entry_price
+            if dd > max_dd:
+                max_dd = dd
+
+            if direction == "BUY":
+                hit_tp_c = high >= tp
+                hit_sl_c = low <= sl
+            else:
+                hit_tp_c = low <= tp
+                hit_sl_c = high >= sl
+
+            if hit_sl_c and hit_tp_c:
+                outcome_result = "LOSS"; hit_sl = 1; exit_price = sl; break
+            elif hit_sl_c:
+                outcome_result = "LOSS"; hit_sl = 1; exit_price = sl; break
+            elif hit_tp_c:
+                outcome_result = "WIN"; hit_tp = 1; exit_price = tp; break
+
+        candles_since = [c for c in klines
+                         if datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc) > entry_dt]
+        if outcome_result is None:
+            if len(candles_since) >= config.OUTCOME_CHECK_CANDLES:
+                outcome_result = "TIMEOUT"
+                exit_price = float(candles_since[-1][4])
+            else:
+                await self.db.update_outcome_highlow(signal_id, highest, lowest)
+                return
+
+        if risk > 0:
+            if direction == "BUY":
+                r_multiple = (exit_price - entry_price) / risk
+            else:
+                r_multiple = (entry_price - exit_price) / risk
+        else:
+            r_multiple = 0.0
+
+        pips_gained = max(0.0, (exit_price - entry_price) if direction == "BUY"
+                          else (entry_price - exit_price))
+        pips_lost = max(0.0, (entry_price - exit_price) if direction == "BUY"
+                        else (exit_price - entry_price))
+        duration_min = int((datetime.now(timezone.utc) - entry_dt).total_seconds() / 60)
+
+        await self.db.update_outcome_highlow(signal_id, highest, lowest)
+        await self.db.finalize_outcome(
+            signal_id=signal_id, exit_price=exit_price, outcome=outcome_result,
+            hit_tp=hit_tp, hit_sl=hit_sl, r_multiple=round(r_multiple, 4),
+            duration_minutes=duration_min,
+            pips_gained=round(pips_gained, 8), pips_lost=round(pips_lost, 8),
+            max_dd=round(max_dd, 6),
+        )
+
+        # ✅ Bug #1 fix: use actual risk amount
+        if quantity > 0:
+            actual_risk_amount = quantity * abs(entry_price - sl)
+        else:
+            actual_risk_amount = self.daily_capital * config.RISK_PER_TRADE
+        result_amount = r_multiple * actual_risk_amount
+        await self.db.close_signal(signal_id, result_amount, r_multiple, outcome_result)
+
+        category = "win" if outcome_result == "WIN" else (
+            "loss" if outcome_result == "LOSS" else "timeout")
+        await self.db.add_daily_result(self.daily_capital, result_amount, category)
+
+        # Circuit breaker tracking
+        if outcome_result == "LOSS":
+            self.consecutive_losses += 1
+        elif outcome_result == "WIN":
+            self.consecutive_losses = 0
+
+        # Update weights
+        signal_row = await self.db.get_signal(signal_id)
+        if signal_row and signal_row.get("factor_contributions"):
+            try:
+                fc = signal_row["factor_contributions"]
+                if isinstance(fc, str):
+                    fc = json.loads(fc)
+            except Exception:
+                fc = {}
+            success = outcome_result == "WIN"
+            for factor, contrib in fc.items():
+                if factor in config.FACTORS:
+                    self.weights.update(factor, success, contribution=contrib)
+                    await self.db.save_weight(factor, self.weights.weights[factor])
+
+        logger.info(f"📈 Outcome: signal={signal_id} {symbol} {outcome_result} R={r_multiple:.2f}")
+        if config.TELEGRAM_ADMIN_ID and outcome_result in ("WIN", "LOSS"):
+            emoji = "✅" if outcome_result == "WIN" else "❌"
+            await self.telegram.send_message(
+                config.TELEGRAM_ADMIN_ID,
+                f"{emoji} <b>إشارة #{signal_id}</b>\n"
+                f"{symbol} {direction}\n"
+                f"النتيجة: <b>{outcome_result}</b> ({r_multiple:.2f}R)\n"
+                f"المدة: {duration_min} دقيقة"
             )
+
+    # ============================================================
+    # Daily Summary (Fixed Bug #5)
+    # ============================================================
+    async def _maybe_send_daily_summary(self):
+        now = datetime.now(timezone.utc)
+        today = now.date().isoformat()
+        if now.hour > 2:
+            return
+        last_sent = await self.db.get_bot_state("last_summary_date")
+        if last_sent == today:
+            return
+        try:
+            y = await self.db.get_accuracy_stats(days=1)
+            w = await self.db.get_accuracy_stats(days=7)
+            m = await self.db.get_accuracy_stats(days=30)
+            text = (
+                f"📊 <b>ملخص يومي</b> — {today}\n━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📅 <b>24 ساعة:</b> {y['total']} إشارة | Win {y['win_rate']}% | R {y['avg_r']}\n"
+                f"📆 <b>7 أيام:</b> {w['total']} إشارة | Win {w['win_rate']}% | R {w['avg_r']}\n"
+                f"📈 <b>30 يوم:</b> {m['total']} إشارة | Win {m['win_rate']}% | R {m['avg_r']}"
+            )
+            await self.telegram.broadcast(text)
+            await self.db.set_bot_state("last_summary_date", today)
+            logger.info("📊 Daily summary sent")
+        except Exception as e:
+            logger.error(f"Daily summary error: {e}")
 
     # ============================================================
     # Health Monitor
@@ -326,21 +554,16 @@ class TradingBot:
             try:
                 await asyncio.sleep(config.HEALTH_CHECK_INTERVAL)
                 now = time.time()
-                stale = [
-                    sym for sym, ts in self.last_data_update.items()
-                    if now - ts > 900
-                ]
+                stale = [s for s, ts in self.last_data_update.items() if now - ts > 900]
                 if len(stale) > 3 and now - self.last_health_alert > config.HEALTH_CHECK_INTERVAL:
                     await self.telegram.broadcast(
-                        f"⚠️ <b>تنبيه صحة البيانات</b>\n\n"
-                        f"عملات متوقفة: {len(stale)}\n"
-                        + "\n".join(stale[:5])
+                        f"⚠️ <b>تنبيه صحة البيانات</b>\nعملات متوقفة: {len(stale)}"
                     )
                     self.last_health_alert = now
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.exception(f"Health monitor error: {exc}")
+                logger.exception(f"Health error: {exc}")
 
     # ============================================================
     # Self Ping
@@ -351,122 +574,13 @@ class TradingBot:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             while self.running:
                 try:
-                    async with session.get(url) as response:
-                        logger.debug(f"Self-ping: {response.status}")
+                    async with session.get(url) as r:
+                        logger.debug(f"Ping: {r.status}")
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    logger.warning(f"Self-ping failed: {exc}")
+                    logger.warning(f"Ping failed: {exc}")
                 await asyncio.sleep(config.SELF_PING_INTERVAL)
-
-    # ============================================================
-    # Evaluate Open Signals
-    # ============================================================
-    async def evaluate_open_signals(self):
-        open_signals = await self.db.get_open_signals()
-        if not open_signals:
-            return
-
-        for signal_row in open_signals:
-            try:
-                signal_time = datetime.fromisoformat(signal_row["created_at"])
-                klines = await self.fetcher.klines(
-                    signal_row["symbol"],
-                    config.ANALYSIS_INTERVAL,
-                    config.SIGNAL_MAX_HOLD_CANDLES + 5
-                )
-                if not klines:
-                    continue
-
-                entry = float(signal_row["entry"])
-                sl = float(signal_row["sl"])
-                tp = float(signal_row["tp"])
-                direction = signal_row["direction"]
-                outcome = None
-                exit_reason = None
-
-                for candle in klines:
-                    candle_time = datetime.fromtimestamp(
-                        candle[0] / 1000, tz=timezone.utc
-                    )
-                    if candle_time <= signal_time:
-                        continue
-
-                    high = float(candle[2])
-                    low = float(candle[3])
-                    hit_sl = low <= sl if direction == "BUY" else high >= sl
-                    hit_tp = high >= tp if direction == "BUY" else low <= tp
-
-                    if hit_sl and hit_tp:
-                        outcome = -1.0
-                        exit_reason = "SL_TP_SAME_CANDLE"
-                        break
-                    elif hit_sl:
-                        outcome = -1.0
-                        exit_reason = "SL"
-                        break
-                    elif hit_tp:
-                        outcome = 2.0
-                        exit_reason = "TP"
-                        break
-
-                if outcome is None:
-                    outcome = 0.0
-                    exit_reason = "TIMEOUT"
-
-                result_amount = outcome * self.daily_capital * config.RISK_PER_TRADE
-                await self.db.close_signal(
-                    signal_row["id"], result_amount, outcome, exit_reason
-                )
-
-                if outcome > 0:
-                    category = "win"
-                elif outcome < 0:
-                    category = "loss"
-                elif exit_reason == "TIMEOUT":
-                    category = "timeout"
-                else:
-                    category = "breakeven"
-
-                await self.db.add_daily_result(
-                    self.daily_capital, result_amount, category
-                )
-
-                signal_data = await self.db.get_signal(signal_row["id"])
-                if signal_data and signal_data.get("factor_contributions"):
-                    try:
-                        if isinstance(signal_data["factor_contributions"], str):
-                            factor_contributions = json.loads(
-                                signal_data["factor_contributions"]
-                            )
-                        else:
-                            factor_contributions = signal_data["factor_contributions"]
-                    except Exception:
-                        factor_contributions = {}
-
-                    success = outcome > 0
-                    for factor, contribution in factor_contributions.items():
-                        if factor in config.FACTORS:
-                            self.weights.update(
-                                factor, success, contribution=contribution
-                            )
-                            await self.db.save_weight(
-                                factor, self.weights.weights[factor]
-                            )
-                else:
-                    success = outcome > 0
-                    for factor in config.FACTORS:
-                        self.weights.update(factor, success, contribution=0.5)
-                        await self.db.save_weight(
-                            factor, self.weights.weights[factor]
-                        )
-
-                logger.info(
-                    f"📈 Signal evaluated: id={signal_row['id']} "
-                    f"result={outcome} reason={exit_reason}"
-                )
-            except Exception as exc:
-                logger.exception(f"Signal evaluation error: {exc}")
 
     # ============================================================
     # Scanner Loop
@@ -479,105 +593,75 @@ class TradingBot:
                 if self.scan_counter % config.PREWATCH_SCAN_EVERY == 0:
                     await self.scan_prewatch()
                 await self.scan_market()
-                await self.evaluate_open_signals()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.exception(f"Scanner error: {exc}")
             elapsed = time.monotonic() - started
-            wait = max(1, config.SCAN_INTERVAL - elapsed)
-            await asyncio.sleep(wait)
+            await asyncio.sleep(max(1, config.SCAN_INTERVAL - elapsed))
 
     # ============================================================
-    # Start
+    # Start / Shutdown
     # ============================================================
     async def start(self):
         config.validate_config()
-
-        logger.info(f"🔧 BINANCE_ENDPOINTS: {config.BINANCE_ENDPOINTS}")
-        logger.info(f"🔧 DATABASE: {'PostgreSQL' if config.USE_POSTGRES else 'SQLite'}")
-        logger.info(f"🔧 TELEGRAM_MODE: {'Webhook' if config.TELEGRAM_USE_WEBHOOK else 'Polling'}")
-        logger.info(f"🔧 MIN_SCORE: {config.MIN_SCORE}, MIN_ADX: {config.MIN_ADX}")
-        logger.info(f"🔧 EARLY_SNIPE_SCORE: {config.EARLY_SNIPE_SCORE}")
-        logger.info(f"🔧 EXCLUDED_SYMBOLS: {len(config.EXCLUDED_SYMBOLS)} entries")
-
-        # 1️⃣ تهيئة قاعدة البيانات
+        logger.info(f"🔧 DB: {'PostgreSQL' if config.USE_POSTGRES else 'SQLite'}")
+        logger.info(f"🔧 Telegram: {'Webhook' if config.TELEGRAM_USE_WEBHOOK else 'Polling'}")
         try:
             await self.db.init()
-            logger.info("✅ Database initialized successfully")
+            logger.info("✅ DB initialized")
         except Exception as e:
-            logger.error(f"❌ Database initialization failed: {e}")
+            logger.error(f"❌ DB init failed: {e}")
             return
 
-        # 2️⃣ تحميل الأوزان
         await self.load_weights()
-
-        # 3️⃣ بدء جلب البيانات
         await self.fetcher.start()
-
-        # 4️⃣ بدء خادم الويب
         await self.init_web_server()
-
-        # 5️⃣ تفعيل Webhook
         await self.setup_telegram_webhook()
-
-        # 6️⃣ بدء Telegram Bot
         await self.telegram.start()
 
-        # 7️⃣ إضافة الأدمن كمشترك
-        admin_id = config.TELEGRAM_ADMIN_ID
-        if admin_id:
-            success = await self.db.add_subscriber(admin_id)
-            if success:
-                logger.info(f"✅ Admin {admin_id} added as subscriber")
-                await self.telegram.send_message(
-                    admin_id,
-                    "✅ <b>تم تشغيل النظام بنجاح!</b>\n\n"
-                    "النظام يرسل الإشارات القوية فقط + تنبؤات الانفجارات 💥"
-                )
-            else:
-                logger.error(f"❌ Failed to add admin {admin_id} as subscriber")
+        if config.TELEGRAM_ADMIN_ID:
+            await self.db.add_subscriber(config.TELEGRAM_ADMIN_ID)
+            await self.telegram.send_message(
+                config.TELEGRAM_ADMIN_ID,
+                "✅ <b>النظام v2026.3 يعمل!</b>\n\n"
+                "🆕 الجديد:\n"
+                "• Market Regime Detection (ADX+ER)\n"
+                "• Circuit Breaker تلقائي\n"
+                "• Near-Miss Logging\n"
+                "• Kaufman Efficiency Ratio\n"
+                "• 3 أنواع إشارات\n"
+                "• تتبع نتائج كامل\n"
+                "• حماية من التكرار"
+            )
 
-        count = await self.db.get_subscribers()
-        logger.info(f"📊 Total active subscribers: {len(count)}")
-        logger.info(f"📊 Known symbols: {len(self.known_symbols)}")
-
-        # 8️⃣ بدء المهام الخلفية
         self.tasks = [
             asyncio.create_task(self.scanner_loop()),
+            asyncio.create_task(self.track_signal_outcomes()),
             asyncio.create_task(self.health_monitor()),
             asyncio.create_task(self.self_ping()),
         ]
-        logger.info("🚀 Quant Crypto Signal System started successfully")
-
+        logger.info("🚀 System v2026.3 started")
         try:
             while self.running:
                 await asyncio.sleep(1)
         finally:
             await self.shutdown()
 
-    # ============================================================
-    # Shutdown
-    # ============================================================
     async def shutdown(self):
         logger.info("🛑 Shutting down...")
-
         if config.TELEGRAM_USE_WEBHOOK:
-            logger.info("🗑️ Deleting Telegram webhook...")
             await self.telegram.delete_webhook()
-
         self.running = False
-        for task in self.tasks:
-            task.cancel()
+        for t in self.tasks:
+            t.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
-
         if self.web_runner:
             await self.web_runner.cleanup()
-
         await self.telegram.close()
         await self.fetcher.close()
         await self.db.close()
-        logger.info("✅ System shutdown complete")
+        logger.info("✅ Shutdown complete")
 
     def stop(self):
         self.running = False
