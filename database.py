@@ -1,13 +1,57 @@
 # database.py
-# Database Manager v2026.3 - With Signal Outcomes + Near-Miss + Bot State
+# Database Manager v2026.3.1 - PostgreSQL type-safe + Lock protection
 
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+import asyncio
+from datetime import datetime, timezone, timedelta, date
 from typing import Optional
 import config
 
 logger = logging.getLogger("quant_bot.database")
+
+
+# ============================================================
+# Helpers للتحويل بين str و datetime
+# ============================================================
+def _to_datetime(val):
+    """تحويل ISO string أو date إلى datetime-aware"""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            return val.replace(tzinfo=timezone.utc)
+        return val
+    if isinstance(val, date):
+        return datetime(val.year, val.month, val.day, tzinfo=timezone.utc)
+    if isinstance(val, str):
+        try:
+            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+    return None
+
+
+def _to_date(val):
+    """تحويل string/date/datetime إلى date"""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val).date()
+        except Exception:
+            try:
+                return datetime.strptime(val[:10], "%Y-%m-%d").date()
+            except Exception:
+                return None
+    return None
 
 
 class Database:
@@ -16,6 +60,8 @@ class Database:
         self.use_postgres = config.USE_POSTGRES
         self.db_path = config.DB_PATH
         self.database_url = config.DATABASE_URL
+        # 🔒 قفل عام لكل عمليات PostgreSQL
+        self._pg_lock = asyncio.Lock()
 
     async def init(self):
         if self.use_postgres and self.database_url:
@@ -24,10 +70,17 @@ class Database:
             await self._init_sqlite()
         logger.info(f"Database: {'PostgreSQL' if self.use_postgres else 'SQLite'}")
 
+    # ============================================================
+    # PostgreSQL Init
+    # ============================================================
     async def _init_postgres(self):
         try:
             import asyncpg
-            self.conn = await asyncpg.connect(self.database_url)
+            self.conn = await asyncpg.connect(
+                self.database_url,
+                statement_cache_size=0,   # 🔧 حل مشكلة Neon pooler
+                server_settings={"application_name": "crypto_bot"},
+            )
             await self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS subscribers (
                     user_id BIGINT PRIMARY KEY, active INTEGER DEFAULT 1, created_at TIMESTAMP NOT NULL
@@ -96,6 +149,9 @@ class Database:
             self.use_postgres = False
             await self._init_sqlite()
 
+    # ============================================================
+    # SQLite Init
+    # ============================================================
     async def _init_sqlite(self):
         import aiosqlite
         self.conn = await aiosqlite.connect(self.db_path)
@@ -166,16 +222,33 @@ class Database:
             self.conn = None
 
     # ============================================================
+    # 🔒 Wrapper للعمليات PostgreSQL
+    # ============================================================
+    async def _pg_execute(self, query, *args):
+        """تنفيذ آمن مع قفل"""
+        async with self._pg_lock:
+            return await self.conn.execute(query, *args)
+
+    async def _pg_fetch(self, query, *args):
+        async with self._pg_lock:
+            return await self.conn.fetch(query, *args)
+
+    async def _pg_fetchrow(self, query, *args):
+        async with self._pg_lock:
+            return await self.conn.fetchrow(query, *args)
+
+    # ============================================================
     # Subscribers
     # ============================================================
     async def add_subscriber(self, user_id):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             if self.use_postgres:
-                await self.conn.execute(
+                now = datetime.now(timezone.utc)
+                await self._pg_execute(
                     "INSERT INTO subscribers (user_id, active, created_at) VALUES ($1,1,$2) ON CONFLICT (user_id) DO UPDATE SET active=1",
                     user_id, now)
             else:
+                now = datetime.now(timezone.utc).isoformat()
                 await self.conn.execute(
                     "INSERT INTO subscribers (user_id, active, created_at) VALUES (?,1,?) ON CONFLICT(user_id) DO UPDATE SET active=1",
                     (user_id, now))
@@ -188,7 +261,7 @@ class Database:
     async def remove_subscriber(self, user_id):
         try:
             if self.use_postgres:
-                await self.conn.execute("UPDATE subscribers SET active=0 WHERE user_id=$1", user_id)
+                await self._pg_execute("UPDATE subscribers SET active=0 WHERE user_id=$1", user_id)
             else:
                 await self.conn.execute("UPDATE subscribers SET active=0 WHERE user_id=?", (user_id,))
                 await self.conn.commit()
@@ -200,7 +273,7 @@ class Database:
     async def get_subscribers(self):
         try:
             if self.use_postgres:
-                rows = await self.conn.fetch("SELECT user_id FROM subscribers WHERE active=1 ORDER BY user_id")
+                rows = await self._pg_fetch("SELECT user_id FROM subscribers WHERE active=1 ORDER BY user_id")
                 return [int(r["user_id"]) for r in rows]
             cursor = await self.conn.execute("SELECT user_id FROM subscribers WHERE active=1 ORDER BY user_id")
             rows = await cursor.fetchall()
@@ -215,7 +288,7 @@ class Database:
     async def get_cooldown(self, symbol):
         try:
             if self.use_postgres:
-                row = await self.conn.fetchrow("SELECT * FROM cooldown WHERE symbol=$1", symbol)
+                row = await self._pg_fetchrow("SELECT * FROM cooldown WHERE symbol=$1", symbol)
                 return dict(row) if row else None
             cursor = await self.conn.execute("SELECT * FROM cooldown WHERE symbol=?", (symbol,))
             row = await cursor.fetchone()
@@ -225,14 +298,15 @@ class Database:
             return None
 
     async def set_cooldown(self, symbol, direction):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             if self.use_postgres:
-                await self.conn.execute("""
+                now = datetime.now(timezone.utc)
+                await self._pg_execute("""
                     INSERT INTO cooldown (symbol, direction, created_at) VALUES ($1,$2,$3)
                     ON CONFLICT (symbol) DO UPDATE SET direction=$2, created_at=$3
                 """, symbol, direction, now)
             else:
+                now = datetime.now(timezone.utc).isoformat()
                 await self.conn.execute("""
                     INSERT INTO cooldown (symbol, direction, created_at) VALUES (?,?,?)
                     ON CONFLICT(symbol) DO UPDATE SET direction=excluded.direction, created_at=excluded.created_at
@@ -246,15 +320,15 @@ class Database:
     # ============================================================
     async def count_recent_signals_for_symbol(self, symbol, hours=4):
         try:
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             if self.use_postgres:
-                row = await self.conn.fetchrow(
+                row = await self._pg_fetchrow(
                     "SELECT COUNT(*) as cnt FROM signals WHERE symbol=$1 AND created_at>=$2",
                     symbol, cutoff)
                 return int(row["cnt"]) if row else 0
             cursor = await self.conn.execute(
                 "SELECT COUNT(*) as cnt FROM signals WHERE symbol=? AND created_at>=?",
-                (symbol, cutoff))
+                (symbol, cutoff.isoformat()))
             row = await cursor.fetchone()
             return int(row["cnt"]) if row else 0
         except Exception as e:
@@ -263,13 +337,13 @@ class Database:
 
     async def count_recent_signals_global(self, hours=1):
         try:
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             if self.use_postgres:
-                row = await self.conn.fetchrow(
+                row = await self._pg_fetchrow(
                     "SELECT COUNT(*) as cnt FROM signals WHERE created_at>=$1", cutoff)
                 return int(row["cnt"]) if row else 0
             cursor = await self.conn.execute(
-                "SELECT COUNT(*) as cnt FROM signals WHERE created_at>=?", (cutoff,))
+                "SELECT COUNT(*) as cnt FROM signals WHERE created_at>=?", (cutoff.isoformat(),))
             row = await cursor.fetchone()
             return int(row["cnt"]) if row else 0
         except Exception as e:
@@ -278,13 +352,13 @@ class Database:
 
     async def count_signals_today(self):
         try:
-            today = datetime.now(timezone.utc).date().isoformat()
+            today = datetime.now(timezone.utc).date()
             if self.use_postgres:
-                row = await self.conn.fetchrow(
-                    "SELECT COUNT(*) as cnt FROM signals WHERE created_at::date=$1::date", today)
+                row = await self._pg_fetchrow(
+                    "SELECT COUNT(*) as cnt FROM signals WHERE created_at::date=$1", today)
                 return int(row["cnt"]) if row else 0
             cursor = await self.conn.execute(
-                "SELECT COUNT(*) as cnt FROM signals WHERE DATE(created_at)=?", (today,))
+                "SELECT COUNT(*) as cnt FROM signals WHERE DATE(created_at)=?", (today.isoformat(),))
             row = await cursor.fetchone()
             return int(row["cnt"]) if row else 0
         except Exception as e:
@@ -295,14 +369,14 @@ class Database:
     # Signals
     # ============================================================
     async def add_signal(self, signal):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             fc = json.dumps(signal.get("factor_contributions", {}))
             fw = json.dumps(signal.get("factor_weights", {}))
             uf = json.dumps(signal.get("used_factors", {}))
             st = signal.get("signal_type", "TREND")
             if self.use_postgres:
-                row = await self.conn.fetchrow("""
+                now = datetime.now(timezone.utc)
+                row = await self._pg_fetchrow("""
                     INSERT INTO signals (symbol, direction, signal_type, score, quality,
                         entry, sl, tp, rr, quantity, actual_risk_percent,
                         factor_contributions, factor_weights, used_factors, created_at)
@@ -314,11 +388,12 @@ class Database:
                     signal["position_size"], signal.get("actual_risk_percent", 0),
                     fc, fw, uf, now)
                 return row["id"]
+            now_str = datetime.now(timezone.utc).isoformat()
             params = (signal["symbol"], signal["direction"], st,
                       signal["score"], signal.get("quality", 0),
                       signal["entry"], signal["sl"], signal["tp"], signal["rr"],
                       signal["position_size"], signal.get("actual_risk_percent", 0),
-                      fc, fw, uf, now)
+                      fc, fw, uf, now_str)
             cursor = await self.conn.execute("""
                 INSERT INTO signals (symbol, direction, signal_type, score, quality,
                     entry, sl, tp, rr, quantity, actual_risk_percent,
@@ -334,7 +409,7 @@ class Database:
     async def get_signal(self, signal_id):
         try:
             if self.use_postgres:
-                row = await self.conn.fetchrow("SELECT * FROM signals WHERE id=$1", signal_id)
+                row = await self._pg_fetchrow("SELECT * FROM signals WHERE id=$1", signal_id)
                 return dict(row) if row else None
             cursor = await self.conn.execute("SELECT * FROM signals WHERE id=?", (signal_id,))
             row = await cursor.fetchone()
@@ -346,7 +421,7 @@ class Database:
     async def get_open_signals(self):
         try:
             if self.use_postgres:
-                rows = await self.conn.fetch("SELECT * FROM signals WHERE status='OPEN' ORDER BY id ASC")
+                rows = await self._pg_fetch("SELECT * FROM signals WHERE status='OPEN' ORDER BY id ASC")
                 return [dict(r) for r in rows]
             cursor = await self.conn.execute("SELECT * FROM signals WHERE status='OPEN' ORDER BY id ASC")
             rows = await cursor.fetchall()
@@ -356,31 +431,32 @@ class Database:
             return []
 
     async def close_signal(self, signal_id, result, result_r, exit_reason="SL"):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             if self.use_postgres:
-                await self.conn.execute("""
+                now = datetime.now(timezone.utc)
+                await self._pg_execute("""
                     UPDATE signals SET status='CLOSED', result=$1, result_r=$2,
                     closed_at=$3, exit_reason=$4 WHERE id=$5
                 """, result, result_r, now, exit_reason, signal_id)
             else:
+                now_str = datetime.now(timezone.utc).isoformat()
                 await self.conn.execute("""
                     UPDATE signals SET status='CLOSED', result=?, result_r=?,
                     closed_at=?, exit_reason=? WHERE id=?
-                """, (result, result_r, now, exit_reason, signal_id))
+                """, (result, result_r, now_str, exit_reason, signal_id))
                 await self.conn.commit()
         except Exception as e:
             logger.error(f"close_signal error: {e}")
 
     async def get_daily_signals(self):
-        today = datetime.now(timezone.utc).date().isoformat()
         try:
+            today = datetime.now(timezone.utc).date()
             if self.use_postgres:
-                rows = await self.conn.fetch(
-                    "SELECT * FROM signals WHERE created_at::date=$1::date ORDER BY id DESC", today)
+                rows = await self._pg_fetch(
+                    "SELECT * FROM signals WHERE created_at::date=$1 ORDER BY id DESC", today)
                 return [dict(r) for r in rows]
             cursor = await self.conn.execute(
-                "SELECT * FROM signals WHERE DATE(created_at)=? ORDER BY id DESC", (today,))
+                "SELECT * FROM signals WHERE DATE(created_at)=? ORDER BY id DESC", (today.isoformat(),))
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
@@ -393,15 +469,14 @@ class Database:
     async def create_outcome(self, signal_id, symbol, direction, signal_type,
                              entry_price, entry_time, initial_high=None, initial_low=None):
         try:
-            if isinstance(entry_time, str):
-                entry_time = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+            et = _to_datetime(entry_time) or datetime.now(timezone.utc)
             if self.use_postgres:
-                await self.conn.execute("""
+                await self._pg_execute("""
                     INSERT INTO signal_outcomes (signal_id, symbol, direction, signal_type,
                         entry_price, entry_time, highest_price, lowest_price, outcome, duration_minutes)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',0)
                     ON CONFLICT (signal_id) DO NOTHING
-                """, signal_id, symbol, direction, signal_type, entry_price, entry_time,
+                """, signal_id, symbol, direction, signal_type, entry_price, et,
                     initial_high or entry_price, initial_low or entry_price)
             else:
                 await self.conn.execute("""
@@ -409,7 +484,7 @@ class Database:
                         entry_price, entry_time, highest_price, lowest_price, outcome, duration_minutes)
                     VALUES (?,?,?,?,?,?,?,?,'PENDING',0)
                 """, (signal_id, symbol, direction, signal_type, entry_price,
-                      entry_time.isoformat(), initial_high or entry_price, initial_low or entry_price))
+                      et.isoformat(), initial_high or entry_price, initial_low or entry_price))
                 await self.conn.commit()
         except Exception as e:
             logger.error(f"create_outcome error: {e}")
@@ -417,7 +492,7 @@ class Database:
     async def update_outcome_highlow(self, signal_id, current_high, current_low):
         try:
             if self.use_postgres:
-                await self.conn.execute("""
+                await self._pg_execute("""
                     UPDATE signal_outcomes SET highest_price=GREATEST(highest_price,$1),
                     lowest_price=LEAST(lowest_price,$2) WHERE signal_id=$3 AND outcome='PENDING'
                 """, current_high, current_low, signal_id)
@@ -433,10 +508,10 @@ class Database:
     async def finalize_outcome(self, signal_id, exit_price, outcome,
                                 hit_tp, hit_sl, r_multiple, duration_minutes,
                                 pips_gained, pips_lost, max_dd):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             if self.use_postgres:
-                await self.conn.execute("""
+                now = datetime.now(timezone.utc)
+                await self._pg_execute("""
                     UPDATE signal_outcomes SET exit_price=$1, exit_time=$2, outcome=$3,
                     hit_tp=$4, hit_sl=$5, r_multiple=$6, duration_minutes=$7,
                     pips_gained=$8, pips_lost=$9, max_drawdown_during_trade=$10
@@ -444,12 +519,13 @@ class Database:
                 """, exit_price, now, outcome, hit_tp, hit_sl, r_multiple,
                     duration_minutes, pips_gained, pips_lost, max_dd, signal_id)
             else:
+                now_str = datetime.now(timezone.utc).isoformat()
                 await self.conn.execute("""
                     UPDATE signal_outcomes SET exit_price=?, exit_time=?, outcome=?,
                     hit_tp=?, hit_sl=?, r_multiple=?, duration_minutes=?,
                     pips_gained=?, pips_lost=?, max_drawdown_during_trade=?
                     WHERE signal_id=?
-                """, (exit_price, now, outcome, hit_tp, hit_sl, r_multiple,
+                """, (exit_price, now_str, outcome, hit_tp, hit_sl, r_multiple,
                       duration_minutes, pips_gained, pips_lost, max_dd, signal_id))
                 await self.conn.commit()
         except Exception as e:
@@ -465,7 +541,7 @@ class Database:
                 ORDER BY so.id ASC
             """
             if self.use_postgres:
-                rows = await self.conn.fetch(sql)
+                rows = await self._pg_fetch(sql)
                 return [dict(r) for r in rows]
             cursor = await self.conn.execute(sql)
             rows = await cursor.fetchall()
@@ -478,10 +554,10 @@ class Database:
     # Accuracy Stats
     # ============================================================
     async def get_accuracy_stats(self, days=30):
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             if self.use_postgres:
-                rows = await self.conn.fetch("""
+                rows = await self._pg_fetch("""
                     SELECT outcome, r_multiple FROM signal_outcomes
                     WHERE entry_time>=$1 AND outcome!='PENDING'
                 """, cutoff)
@@ -489,7 +565,7 @@ class Database:
                 cursor = await self.conn.execute("""
                     SELECT outcome, r_multiple FROM signal_outcomes
                     WHERE entry_time>=? AND outcome!='PENDING'
-                """, (cutoff,))
+                """, (cutoff.isoformat(),))
                 rows = await cursor.fetchall()
             return self._compute_stats(rows)
         except Exception as e:
@@ -497,10 +573,10 @@ class Database:
             return self._empty_stats()
 
     async def get_accuracy_by_score(self, days=30):
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             if self.use_postgres:
-                rows = await self.conn.fetch("""
+                rows = await self._pg_fetch("""
                     SELECT so.outcome, so.r_multiple, s.score
                     FROM signal_outcomes so JOIN signals s ON s.id=so.signal_id
                     WHERE so.entry_time>=$1 AND so.outcome!='PENDING'
@@ -510,7 +586,7 @@ class Database:
                     SELECT so.outcome, so.r_multiple, s.score
                     FROM signal_outcomes so JOIN signals s ON s.id=so.signal_id
                     WHERE so.entry_time>=? AND so.outcome!='PENDING'
-                """, (cutoff,))
+                """, (cutoff.isoformat(),))
                 rows = await cursor.fetchall()
             buckets = {"7.5-8.0": [], "8.0-8.5": [], "8.5-9.0": [], "9.0+": []}
             for r in rows:
@@ -529,10 +605,10 @@ class Database:
             return {}
 
     async def get_accuracy_by_symbol(self, days=30, limit=10):
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             if self.use_postgres:
-                rows = await self.conn.fetch("""
+                rows = await self._pg_fetch("""
                     SELECT symbol, outcome, r_multiple FROM signal_outcomes
                     WHERE entry_time>=$1 AND outcome!='PENDING'
                 """, cutoff)
@@ -540,7 +616,7 @@ class Database:
                 cursor = await self.conn.execute("""
                     SELECT symbol, outcome, r_multiple FROM signal_outcomes
                     WHERE entry_time>=? AND outcome!='PENDING'
-                """, (cutoff,))
+                """, (cutoff.isoformat(),))
                 rows = await cursor.fetchall()
             by_sym = {}
             for r in rows:
@@ -556,10 +632,10 @@ class Database:
             return {"best": [], "worst": []}
 
     async def get_accuracy_by_type(self, days=30):
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             if self.use_postgres:
-                rows = await self.conn.fetch("""
+                rows = await self._pg_fetch("""
                     SELECT signal_type, outcome, r_multiple FROM signal_outcomes
                     WHERE entry_time>=$1 AND outcome!='PENDING'
                 """, cutoff)
@@ -567,7 +643,7 @@ class Database:
                 cursor = await self.conn.execute("""
                     SELECT signal_type, outcome, r_multiple FROM signal_outcomes
                     WHERE entry_time>=? AND outcome!='PENDING'
-                """, (cutoff,))
+                """, (cutoff.isoformat(),))
                 rows = await cursor.fetchall()
             by_t = {}
             for r in rows:
@@ -581,7 +657,7 @@ class Database:
     async def get_recent_outcomes(self, limit=10):
         try:
             if self.use_postgres:
-                rows = await self.conn.fetch("""
+                rows = await self._pg_fetch("""
                     SELECT * FROM signal_outcomes WHERE outcome!='PENDING' ORDER BY id DESC LIMIT $1
                 """, limit)
                 return [dict(r) for r in rows]
@@ -620,20 +696,21 @@ class Database:
                 "breakeven": 0, "win_rate": 0.0, "avg_r": 0.0, "profit_factor": 0.0}
 
     # ============================================================
-    # Near-Miss Logging (من OpenClaw Apex)[reference:36]
+    # Near-Miss
     # ============================================================
     async def log_near_miss(self, symbol, reason, details):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             d = json.dumps(details) if not isinstance(details, str) else details
             if self.use_postgres:
-                await self.conn.execute("""
-                    INSERT INTO near_miss (symbol, reason, details, timestamp) VALUES ($1,$2,$3,$4)
-                """, symbol, reason, d, now)
+                now = datetime.now(timezone.utc)
+                await self._pg_execute(
+                    "INSERT INTO near_miss (symbol, reason, details, timestamp) VALUES ($1,$2,$3,$4)",
+                    symbol, reason, d, now)
             else:
-                await self.conn.execute("""
-                    INSERT INTO near_miss (symbol, reason, details, timestamp) VALUES (?,?,?,?)
-                """, (symbol, reason, d, now))
+                now_str = datetime.now(timezone.utc).isoformat()
+                await self.conn.execute(
+                    "INSERT INTO near_miss (symbol, reason, details, timestamp) VALUES (?,?,?,?)",
+                    (symbol, reason, d, now_str))
                 await self.conn.commit()
         except Exception as e:
             logger.error(f"log_near_miss error: {e}")
@@ -644,7 +721,7 @@ class Database:
     async def get_bot_state(self, key):
         try:
             if self.use_postgres:
-                row = await self.conn.fetchrow("SELECT value FROM bot_state WHERE key=$1", key)
+                row = await self._pg_fetchrow("SELECT value FROM bot_state WHERE key=$1", key)
                 return row["value"] if row else None
             cursor = await self.conn.execute("SELECT value FROM bot_state WHERE key=?", (key,))
             row = await cursor.fetchone()
@@ -654,18 +731,19 @@ class Database:
             return None
 
     async def set_bot_state(self, key, value):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             if self.use_postgres:
-                await self.conn.execute("""
+                now = datetime.now(timezone.utc)
+                await self._pg_execute("""
                     INSERT INTO bot_state (key, value, updated_at) VALUES ($1,$2,$3)
                     ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=$3
                 """, key, value, now)
             else:
+                now_str = datetime.now(timezone.utc).isoformat()
                 await self.conn.execute("""
                     INSERT INTO bot_state (key, value, updated_at) VALUES (?,?,?)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-                """, (key, value, now))
+                """, (key, value, now_str))
                 await self.conn.commit()
         except Exception as e:
             logger.error(f"set_bot_state error: {e}")
@@ -674,16 +752,17 @@ class Database:
     # Pre-watch
     # ============================================================
     async def add_prewatch(self, symbol, reason, price_change, quote_volume, trades, price):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             if self.use_postgres:
-                await self.conn.execute("""
+                now = datetime.now(timezone.utc)
+                await self._pg_execute("""
                     INSERT INTO pre_watch (symbol, reason, price_change, quote_volume, trades, price, added_at, last_seen)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$7)
                     ON CONFLICT (symbol) DO UPDATE SET
                     reason=$2, price_change=$3, quote_volume=$4, trades=$5, price=$6, last_seen=$7
                 """, symbol, reason, price_change, quote_volume, trades, price, now)
             else:
+                now_str = datetime.now(timezone.utc).isoformat()
                 await self.conn.execute("""
                     INSERT INTO pre_watch (symbol, reason, price_change, quote_volume, trades, price, added_at, last_seen)
                     VALUES (?,?,?,?,?,?,?,?)
@@ -691,7 +770,7 @@ class Database:
                     reason=excluded.reason, price_change=excluded.price_change,
                     quote_volume=excluded.quote_volume, trades=excluded.trades,
                     price=excluded.price, last_seen=excluded.last_seen
-                """, (symbol, reason, price_change, quote_volume, trades, price, now, now))
+                """, (symbol, reason, price_change, quote_volume, trades, price, now_str, now_str))
                 await self.conn.commit()
         except Exception as e:
             logger.error(f"add_prewatch error: {e}")
@@ -699,7 +778,7 @@ class Database:
     async def get_prewatch(self, limit=30):
         try:
             if self.use_postgres:
-                rows = await self.conn.fetch("SELECT * FROM pre_watch ORDER BY added_at DESC LIMIT $1", limit)
+                rows = await self._pg_fetch("SELECT * FROM pre_watch ORDER BY added_at DESC LIMIT $1", limit)
                 return [dict(r) for r in rows]
             cursor = await self.conn.execute("SELECT * FROM pre_watch ORDER BY added_at DESC LIMIT ?", (limit,))
             rows = await cursor.fetchall()
@@ -714,7 +793,7 @@ class Database:
     async def get_weight(self, factor):
         try:
             if self.use_postgres:
-                row = await self.conn.fetchrow("SELECT weight FROM adaptive_weights WHERE factor=$1", factor)
+                row = await self._pg_fetchrow("SELECT weight FROM adaptive_weights WHERE factor=$1", factor)
                 return float(row["weight"]) if row else None
             cursor = await self.conn.execute("SELECT weight FROM adaptive_weights WHERE factor=?", (factor,))
             row = await cursor.fetchone()
@@ -724,18 +803,19 @@ class Database:
             return None
 
     async def save_weight(self, factor, weight):
-        now = datetime.now(timezone.utc).isoformat()
         try:
             if self.use_postgres:
-                await self.conn.execute("""
+                now = datetime.now(timezone.utc)
+                await self._pg_execute("""
                     INSERT INTO adaptive_weights (factor, weight, updated_at) VALUES ($1,$2,$3)
                     ON CONFLICT (factor) DO UPDATE SET weight=$2, updated_at=$3
                 """, factor, float(weight), now)
             else:
+                now_str = datetime.now(timezone.utc).isoformat()
                 await self.conn.execute("""
                     INSERT INTO adaptive_weights (factor, weight, updated_at) VALUES (?,?,?)
                     ON CONFLICT(factor) DO UPDATE SET weight=excluded.weight, updated_at=excluded.updated_at
-                """, (factor, float(weight), now))
+                """, (factor, float(weight), now_str))
                 await self.conn.commit()
         except Exception as e:
             logger.error(f"save_weight error: {e}")
@@ -743,7 +823,7 @@ class Database:
     async def get_weights(self):
         try:
             if self.use_postgres:
-                rows = await self.conn.fetch("SELECT factor, weight FROM adaptive_weights")
+                rows = await self._pg_fetch("SELECT factor, weight FROM adaptive_weights")
                 return {r["factor"]: float(r["weight"]) for r in rows}
             cursor = await self.conn.execute("SELECT factor, weight FROM adaptive_weights")
             rows = await cursor.fetchall()
@@ -756,12 +836,12 @@ class Database:
     # Daily Stats
     # ============================================================
     async def get_daily_pnl(self):
-        today = datetime.now(timezone.utc).date().isoformat()
         try:
+            today = datetime.now(timezone.utc).date()
             if self.use_postgres:
-                row = await self.conn.fetchrow("""
+                row = await self._pg_fetchrow("""
                     SELECT pnl, wins, losses, breakeven, inconclusive, timeout
-                    FROM daily_stats WHERE date=$1::date
+                    FROM daily_stats WHERE date=$1
                 """, today)
                 if row:
                     return {"pnl": float(row["pnl"]), "wins": row["wins"],
@@ -771,7 +851,7 @@ class Database:
                 cursor = await self.conn.execute("""
                     SELECT pnl, wins, losses, breakeven, inconclusive, timeout
                     FROM daily_stats WHERE date=?
-                """, (today,))
+                """, (today.isoformat(),))
                 row = await cursor.fetchone()
                 if row:
                     return {"pnl": float(row["pnl"]), "wins": row["wins"],
@@ -785,15 +865,15 @@ class Database:
                     "inconclusive": 0, "timeout": 0}
 
     async def add_daily_result(self, capital, pnl, outcome):
-        today = datetime.now(timezone.utc).date().isoformat()
         col_map = {"win": "wins", "loss": "losses", "breakeven": "breakeven",
                    "inconclusive": "inconclusive", "timeout": "timeout"}
         col = col_map.get(outcome)
         if not col:
             return
         try:
+            today = datetime.now(timezone.utc).date()
             if self.use_postgres:
-                await self.conn.execute(f"""
+                await self._pg_execute(f"""
                     INSERT INTO daily_stats (date, capital, pnl, signals, {col})
                     VALUES ($1,$2,$3,1,1) ON CONFLICT (date) DO UPDATE SET
                     pnl=daily_stats.pnl+$3, signals=daily_stats.signals+1,
@@ -804,18 +884,18 @@ class Database:
                     INSERT INTO daily_stats (date, capital, pnl, signals, {col})
                     VALUES (?,?,?,1,1) ON CONFLICT(date) DO UPDATE SET
                     pnl=pnl+excluded.pnl, signals=signals+1, {col}={col}+1
-                """, (today, capital, pnl))
+                """, (today.isoformat(), capital, pnl))
                 await self.conn.commit()
         except Exception as e:
             logger.error(f"add_daily_result error: {e}")
 
     async def reset_daily(self, capital):
-        today = datetime.now(timezone.utc).date().isoformat()
         try:
+            today = datetime.now(timezone.utc).date()
             if self.use_postgres:
-                await self.conn.execute("DELETE FROM daily_stats WHERE date=$1::date", today)
+                await self._pg_execute("DELETE FROM daily_stats WHERE date=$1", today)
             else:
-                await self.conn.execute("DELETE FROM daily_stats WHERE date=?", (today,))
+                await self.conn.execute("DELETE FROM daily_stats WHERE date=?", (today.isoformat(),))
                 await self.conn.commit()
         except Exception as e:
             logger.error(f"reset_daily error: {e}")
