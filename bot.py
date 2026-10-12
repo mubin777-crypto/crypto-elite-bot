@@ -1,5 +1,5 @@
 # bot.py
-# Main Application v2026.3 - Rebuilt with Circuit Breaker + Near-Miss + Fixed Bugs
+# Main Application v2026.3.1 - Fixed: cooldown datetime, timeouts, health threshold
 
 import asyncio
 import json
@@ -23,7 +23,7 @@ from telegram_bot import TelegramBot
 async def handle_health(request):
     return web.json_response({
         "status": "healthy",
-        "service": "Quant Signal Engine v2026.3",
+        "service": "Quant Signal Engine v2026.3.1",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }, status=200)
 
@@ -98,7 +98,6 @@ class TradingBot:
         self.web_runner = None
         self.scan_semaphore = asyncio.Semaphore(5)
         self.last_daily_summary_date = None
-        # 🆕 Circuit Breaker (من multi-market-trading-bot)[reference:37]
         self.circuit_breaker_active = False
         self.consecutive_losses = 0
         self.circuit_breaker_until = None
@@ -141,31 +140,61 @@ class TradingBot:
             logger.info(f"Weights loaded: {self.weights.to_dict()}")
 
     # ============================================================
-    # Cooldown & Circuit Breaker
+    # ✅ FIXED: Cooldown handles datetime AND string
     # ============================================================
     async def cooldown_allowed(self, symbol, direction):
         record = await self.db.get_cooldown(symbol)
         if not record:
             return True
+
         try:
-            created = datetime.fromisoformat(record["created_at"])
+            created_val = record["created_at"]
+
+            # ✅ PostgreSQL TIMESTAMPTZ يعيد datetime object، SQLite يعيد string
+            if isinstance(created_val, datetime):
+                created = created_val
+            elif isinstance(created_val, str):
+                created = datetime.fromisoformat(created_val.replace("Z", "+00:00"))
+            else:
+                logger.warning(f"Unexpected created_at type: {type(created_val)}")
+                return True
+
+            # اطمئن أن المقارنة aware vs aware
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
-            elapsed = (datetime.now(timezone.utc) - created).total_seconds()
-        except Exception:
+
+            now = datetime.now(timezone.utc)
+            elapsed = (now - created).total_seconds()
+
+        except Exception as e:
+            logger.warning(f"cooldown parse error for {symbol}: {e}")
             return True
-        same_limit = config.COOLDOWN_MINUTES * 60
-        opp_limit = config.OPPOSITE_COOLDOWN_HOURS * 3600
+
+        same_direction_limit = config.COOLDOWN_MINUTES * 60
+        opposite_limit = config.OPPOSITE_COOLDOWN_HOURS * 3600
+
         if record["direction"] == direction:
-            return elapsed >= same_limit
-        return elapsed >= opp_limit
+            allowed = elapsed >= same_direction_limit
+            if not allowed:
+                logger.debug(
+                    f"Cooldown blocked {symbol} {direction} "
+                    f"(elapsed {elapsed:.0f}s < {same_direction_limit}s)"
+                )
+            return allowed
+
+        allowed = elapsed >= opposite_limit
+        if not allowed:
+            logger.debug(
+                f"Opposite cooldown blocked {symbol} {direction} "
+                f"(elapsed {elapsed:.0f}s < {opposite_limit}s)"
+            )
+        return allowed
 
     async def daily_loss_exceeded(self):
         stats = await self.db.get_daily_pnl()
         limit = -self.daily_capital * config.DAILY_MAX_LOSS_PERCENT
         return stats["pnl"] <= limit
 
-    # 🆕 Circuit Breaker (من multi-market-trading-bot)[reference:38]
     async def check_circuit_breaker(self):
         if not config.ENABLE_CIRCUIT_BREAKER:
             return False
@@ -228,21 +257,26 @@ class TradingBot:
         return True
 
     # ============================================================
-    # Scan Symbol
+    # ✅ FIXED: timeout 15s -> 8s
     # ============================================================
     async def scan_symbol(self, symbol):
         async with self.scan_semaphore:
             try:
                 if await self.is_duplicate(symbol):
                     return
+
+                # جلب Klines الأساسية (timeout 8s)
                 try:
                     klines = await asyncio.wait_for(
                         self.fetcher.klines(symbol, config.ANALYSIS_INTERVAL, config.KLINE_LIMIT),
-                        timeout=15.0)
+                        timeout=8.0)
                 except asyncio.TimeoutError:
+                    logger.debug(f"Timeout fetching klines: {symbol}")
                     return
+
                 if not klines:
                     return
+
                 self.last_data_update[symbol] = time.time()
                 if len(self.last_data_update) > self.last_data_update_max:
                     oldest = min(self.last_data_update, key=self.last_data_update.get)
@@ -251,23 +285,29 @@ class TradingBot:
                 df = klines_to_dataframe(klines)
                 if len(df) < 60:
                     return
+
+                # جلب Klines 15m (timeout 8s)
                 try:
                     klines_15m = await asyncio.wait_for(
                         self.fetcher.klines(symbol, config.TREND_INTERVAL, 50),
-                        timeout=15.0)
+                        timeout=8.0)
                 except asyncio.TimeoutError:
                     klines_15m = None
+
                 df_15m = klines_to_dataframe(klines_15m) if klines_15m else None
 
                 result = self.engine.analyze(symbol, df, self.daily_capital, df_15m)
                 if not result:
                     return
+
                 if not await self.cooldown_allowed(symbol, result["direction"]):
                     return
 
                 signal_id = await self.db.add_signal(result)
                 if not signal_id:
+                    logger.error(f"Failed to save signal for {symbol}")
                     return
+
                 result["signal_id"] = signal_id
 
                 entry_dt = datetime.now(timezone.utc)
@@ -279,9 +319,12 @@ class TradingBot:
                     entry_price=result["entry"],
                     entry_time=entry_dt,
                 )
+
                 formatted = self.telegram.format_signal(result)
                 await self.telegram.broadcast(formatted)
+
                 await self.db.set_cooldown(symbol, result["direction"])
+
                 logger.info(
                     f"📊 Signal: {symbol} {result['direction']} "
                     f"type={result['signal_type']} score={result['score']} (id={signal_id})"
@@ -290,7 +333,6 @@ class TradingBot:
                 logger.exception(f"scan_symbol error {symbol}: {e}")
 
     async def scan_market(self):
-        # ✅ فحص مرة واحدة (Bug #4 fix)
         if await self.daily_loss_exceeded():
             logger.info("Daily loss limit reached")
             return
@@ -352,7 +394,7 @@ class TradingBot:
             logger.info(f"📋 Pre-watch: Added {added} symbols")
 
     # ============================================================
-    # Track Signal Outcomes (Fixed Bug #1 + #2)
+    # Track Signal Outcomes (Fixed Bug #1 + #2 from previous review)
     # ============================================================
     async def track_signal_outcomes(self):
         while self.running:
@@ -380,14 +422,13 @@ class TradingBot:
         quantity = float(outcome.get("quantity", 0))
 
         entry_time = outcome["entry_time"]
-        if isinstance(entry_time, str):
-            entry_dt = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
-        else:
+        if isinstance(entry_time, datetime):
             entry_dt = entry_time
+        else:
+            entry_dt = datetime.fromisoformat(str(entry_time).replace("Z", "+00:00"))
         if entry_dt.tzinfo is None:
             entry_dt = entry_dt.replace(tzinfo=timezone.utc)
 
-        # ✅ Bug #2 fix: fetch from entry time
         entry_ms = int(entry_dt.timestamp() * 1000)
         try:
             klines = await asyncio.wait_for(
@@ -475,7 +516,7 @@ class TradingBot:
             max_dd=round(max_dd, 6),
         )
 
-        # ✅ Bug #1 fix: use actual risk amount
+        # PnL using actual risk
         if quantity > 0:
             actual_risk_amount = quantity * abs(entry_price - sl)
         else:
@@ -487,13 +528,11 @@ class TradingBot:
             "loss" if outcome_result == "LOSS" else "timeout")
         await self.db.add_daily_result(self.daily_capital, result_amount, category)
 
-        # Circuit breaker tracking
         if outcome_result == "LOSS":
             self.consecutive_losses += 1
         elif outcome_result == "WIN":
             self.consecutive_losses = 0
 
-        # Update weights
         signal_row = await self.db.get_signal(signal_id)
         if signal_row and signal_row.get("factor_contributions"):
             try:
@@ -520,7 +559,7 @@ class TradingBot:
             )
 
     # ============================================================
-    # Daily Summary (Fixed Bug #5)
+    # Daily Summary
     # ============================================================
     async def _maybe_send_daily_summary(self):
         now = datetime.now(timezone.utc)
@@ -547,14 +586,14 @@ class TradingBot:
             logger.error(f"Daily summary error: {e}")
 
     # ============================================================
-    # Health Monitor
+    # ✅ FIXED: Health threshold 900s -> 1800s
     # ============================================================
     async def health_monitor(self):
         while self.running:
             try:
                 await asyncio.sleep(config.HEALTH_CHECK_INTERVAL)
                 now = time.time()
-                stale = [s for s, ts in self.last_data_update.items() if now - ts > 900]
+                stale = [s for s, ts in self.last_data_update.items() if now - ts > 1800]
                 if len(stale) > 3 and now - self.last_health_alert > config.HEALTH_CHECK_INTERVAL:
                     await self.telegram.broadcast(
                         f"⚠️ <b>تنبيه صحة البيانات</b>\nعملات متوقفة: {len(stale)}"
@@ -624,15 +663,12 @@ class TradingBot:
             await self.db.add_subscriber(config.TELEGRAM_ADMIN_ID)
             await self.telegram.send_message(
                 config.TELEGRAM_ADMIN_ID,
-                "✅ <b>النظام v2026.3 يعمل!</b>\n\n"
-                "🆕 الجديد:\n"
-                "• Market Regime Detection (ADX+ER)\n"
-                "• Circuit Breaker تلقائي\n"
-                "• Near-Miss Logging\n"
-                "• Kaufman Efficiency Ratio\n"
-                "• 3 أنواع إشارات\n"
-                "• تتبع نتائج كامل\n"
-                "• حماية من التكرار"
+                "✅ <b>النظام v2026.3.1 يعمل!</b>\n\n"
+                "🔧 إصلاحات جديدة:\n"
+                "• Cooldown صارم (لا إشارات مكررة)\n"
+                "• فلتر RSI في كل الأنواع\n"
+                "• Timeouts محسّنة (8s)\n"
+                "• Health threshold 30 دقيقة"
             )
 
         self.tasks = [
@@ -641,7 +677,7 @@ class TradingBot:
             asyncio.create_task(self.health_monitor()),
             asyncio.create_task(self.self_ping()),
         ]
-        logger.info("🚀 System v2026.3 started")
+        logger.info("🚀 System v2026.3.1 started")
         try:
             while self.running:
                 await asyncio.sleep(1)
