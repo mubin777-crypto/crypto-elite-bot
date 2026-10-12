@@ -1,5 +1,5 @@
 # signals.py
-# Signal Engine v2026.3 - Rebuilt with Market Regime + 3 Signal Types
+# Signal Engine v2026.3.1 - Fixed: RSI filter in TREND branch
 
 import math
 import logging
@@ -33,7 +33,6 @@ class SignalEngine:
 
         scores = {"BUY": {}, "SELL": {}}
 
-        # RSI
         if config.RSI_BUY_ZONE_MIN <= rsi_value <= config.RSI_BUY_ZONE_MAX:
             scores["BUY"]["rsi"] = 1.0
         elif rsi_value > config.RSI_OVERBOUGHT:
@@ -155,13 +154,9 @@ class SignalEngine:
         return {"entry": entry, "sl": sl, "tp": tp, "risk_distance": risk, "rr": rr}
 
     # ============================================================
-    # Position Size (من kadmos-risk: risk_budget ÷ stop_distance)[reference:33]
+    # Position Size
     # ============================================================
     def position_size(self, capital, entry, sl, atr_value=None):
-        """
-        ✅ الإصلاح الجذري: position_size = risk_budget ÷ real_stop_distance
-        مع Volatility Targeting (من binance-futures-ai-bot)
-        """
         if capital <= 0 or entry <= 0:
             return None, None
         risk_amount = capital * config.RISK_PER_TRADE
@@ -204,17 +199,17 @@ class SignalEngine:
         return m < 0 and h < 0
 
     # ============================================================
-    # Signal Type Classifier
+    # ✅ FIXED: Signal Classifier with RSI filter on ALL branches
     # ============================================================
     def _classify_signal(
         self, is_explosion_4of4, breakout_confirmed,
         adx_value, rsi_value, direction,
         buy_positives, sell_positives, er_value
     ):
-        # 🆕 Market Regime Check (من binance-futures-ai-bot)[reference:34]
+        # Market Regime Check
         if config.ENABLE_REGIME_FILTER:
             if adx_value < config.REGIME_ADX_RANGING and er_value < config.REGIME_ER_CHOPPY:
-                return None  # سوق متذبذب - لا إشارات
+                return None
 
         # 1. EXPLOSION
         if is_explosion_4of4:
@@ -226,7 +221,7 @@ class SignalEngine:
                 return None
             return "EXPLOSION"
 
-        # 2. BREAKOUT (مع حد أدنى للعوامل)
+        # 2. BREAKOUT
         if breakout_confirmed:
             if adx_value < config.BREAKOUT_MIN_ADX:
                 return None
@@ -240,12 +235,21 @@ class SignalEngine:
                 return None
             return "BREAKOUT"
 
-        # 3. TREND
+        # 3. TREND - ✅ فلتر RSI إلزامي
         if direction == "BUY" and buy_positives >= config.MIN_FACTORS_ALIGNED:
             if adx_value >= config.MIN_ADX:
+                if rsi_value > config.RSI_OVERBOUGHT:
+                    return None
+                if rsi_value < config.RSI_OVERSOLD:
+                    return None
                 return "TREND"
+
         if direction == "SELL" and sell_positives >= config.MIN_FACTORS_ALIGNED:
             if adx_value >= config.MIN_ADX:
+                if rsi_value < config.RSI_OVERSOLD:
+                    return None
+                if rsi_value > config.RSI_OVERBOUGHT:
+                    return None
                 return "TREND"
 
         return None
@@ -257,13 +261,13 @@ class SignalEngine:
         adx_bonus = min((adx_value - 20) / 30.0 * 1.0, 1.0) if adx_value > 20 else 0.0
         volume_bonus = min((volume_ratio - 1.0) / 2.0 * 0.5, 0.5) if volume_ratio > 1.0 else 0.0
         trend_bonus = 0.5 if trend_aligned else 0.0
-        er_bonus = min(er_value * 0.5, 0.5) if er_value > 0 else 0.0  # 🆕
+        er_bonus = min(er_value * 0.5, 0.5) if er_value > 0 else 0.0
 
         total = base + factor_bonus + adx_bonus + volume_bonus + trend_bonus + er_bonus
         return round(min(total, 10.0), 2)
 
     # ============================================================
-    # 🆕 Near-Miss Logging (من OpenClaw Apex)[reference:35]
+    # Near-Miss Logging
     # ============================================================
     def _log_near_miss(self, symbol, reason, details):
         if not config.ENABLE_NEAR_MISS_LOGGING:
@@ -312,20 +316,17 @@ class SignalEngine:
         atr_value = float(latest["atr"])
         er_value = float(latest["efficiency_ratio"])
 
-        # Market Regime
         regime_data = detect_market_regime(df)
         if regime_data["regime"] == "RANGING" and config.ENABLE_REGIME_FILTER:
             self._log_near_miss(symbol, "ranging_market", regime_data)
             return None
 
-        # Explosion Detection
         explosion = detect_explosion_setup(df)
         is_explosion_4of4 = (
             explosion.get("active", False)
             and explosion.get("conditions_met", 0) >= 4
         )
 
-        # Breakout
         breakout_data = explosion.get("breakout_data", {})
         breakout_confirmed = (
             (breakout_data.get("breakout_up", False)
@@ -333,7 +334,6 @@ class SignalEngine:
             and volume_ratio >= config.BREAKOUT_MIN_VOLUME
         )
 
-        # Direction
         if buy_score > sell_score:
             candidate_direction = "BUY"
             candidate_positives = buy_positives
@@ -360,6 +360,7 @@ class SignalEngine:
         if signal_type is None:
             self._log_near_miss(symbol, "classify_rejected", {
                 "adx": round(adx_value, 1),
+                "rsi": round(rsi_value, 1),
                 "er": round(er_value, 3),
                 "buy": round(buy_score, 1),
                 "sell": round(sell_score, 1),
@@ -425,7 +426,8 @@ class SignalEngine:
 
         logger.info(
             f"✅ Signal: {symbol} {direction} type={signal_type} "
-            f"score={score} quality={quality}% regime={regime_data['regime']}"
+            f"score={score} quality={quality}% RSI={rsi_value:.1f} "
+            f"regime={regime_data['regime']}"
         )
 
         return {
